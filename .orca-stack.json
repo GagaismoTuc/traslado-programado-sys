@@ -1,0 +1,47 @@
+{
+  "version": 1,
+  "modo": "multiagente",
+  "ramaBase": "main",
+  "agentes": {
+    "usa": [
+      "claude",
+      "agy",
+      "codex",
+      "pi"
+    ],
+    "preguntarAntes": [
+      "claude"
+    ],
+    "preferencia": [
+      "codex",
+      "agy",
+      "claude"
+    ]
+  },
+  "verificacion": {
+    "suite": null,
+    "typecheck": null
+  },
+  "riesgo": [
+    "**/migrations/**",
+    "**/auth/**",
+    "package-lock.json",
+    "pnpm-lock.yaml",
+    "yarn.lock",
+    "package.json",
+    ".github/workflows/**",
+    "**/*.env*",
+    "**/deploy/**",
+    "infra/**"
+  ],
+  "merge": true,
+  "despliegue": {
+    "despues": false
+  },
+  "idioma": {
+    "codigo": "inglés",
+    "commits": "español",
+    "prs": "español"
+  },
+  "setup": "completo"
+}
