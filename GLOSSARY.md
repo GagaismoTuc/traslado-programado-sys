@@ -57,7 +57,7 @@ A numbered, published state of one Recorrido. Each publication creates the next 
 _Avoid_: revisión, edición
 
 **Publicación forzada** (Override):
-A Versión del plan the Oficina publishes although it breaks a limit, with a recorded reason.
+A Versión del plan the Oficina publishes although it breaks a limit, with a recorded reason. It never covers a Pasajero left without a Recorrido.
 _Avoid_: override, excepción
 
 **Plan diario** (Daily plan):
