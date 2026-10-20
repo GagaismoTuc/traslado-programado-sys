@@ -14,15 +14,15 @@
 <body><main>
   <p class="eyebrow">Data model / planning</p>
   <h1>How a Plan diario becomes route work</h1>
-  <p class="intro">Two bounded ER views keep the planning chain readable while preserving route assignments, passenger and vehicle constraints, and absence records.</p>
+  <p class="intro">Two bounded ER views keep the planning chain readable while preserving dated Traslados, versioned Recorridos, assignments, constraints, and absence records.</p>
 
   <section class="figure" aria-labelledby="planning-core-heading">
     <h2 id="planning-core-heading">Planning chain</h2>
-    <p>The daily plan is versioned; each published version orders Paradas against Traslados.</p>
+    <p>The Recorrido is versioned, not the Plan diario. Each Plan diario dates its Traslados even when they are unassigned or cancelled.</p>
     <div class="diagram-container">
       <svg viewBox="0 0 1280 720" xmlns="http://www.w3.org/2000/svg" role="img" aria-labelledby="plan-core-title plan-core-desc">
         <title id="plan-core-title">Planning chain ER model</title>
-        <desc id="plan-core-desc">Entity relationships from Plan diario through Recorrido, plan versions, and Paradas to Traslados, Pasajeros, and Destinos.</desc>
+        <desc id="plan-core-desc">Plan diario has one-to-many relationships to Recorridos and dated Traslados. Recorrido owns plan versions and Paradas; each Parada refers to a Traslado, which belongs to a Pasajero and Destino.</desc>
         <defs>
           <marker id="plan-core-arrow" markerWidth="8" markerHeight="6" refX="7" refY="3" orient="auto"><polygon points="0 0,8 3,0 6" fill="#4f5d75"/></marker>
           <marker id="plan-core-arrow-accent" markerWidth="8" markerHeight="6" refX="7" refY="3" orient="auto"><polygon points="0 0,8 3,0 6" fill="#bf4520"/></marker>
@@ -36,6 +36,7 @@
         <path class="connector" d="M885 260 V390"/>
         <path class="connector" d="M790 450 H730"/>
         <path class="connector" d="M900 540 V572 H380 Q372 572 372 564 V488 Q372 480 364 480"/>
+        <path class="connector" d="M100 240 V602 Q100 610 108 610 H1032 Q1040 610 1040 602 V473 Q1040 465 1032 465 H1010"/>
         <rect class="labelmask" x="224" y="170" width="20" height="12" rx="2"/><text class="cardinality" x="234" y="179">1</text>
         <rect class="labelmask" x="246" y="170" width="20" height="12" rx="2"/><text class="cardinality" x="256" y="179">N</text>
         <rect class="labelmask" x="454" y="170" width="20" height="12" rx="2"/><text class="cardinality" x="464" y="179">1</text>
@@ -49,24 +50,26 @@
         <rect class="labelmask" x="574" y="548" width="82" height="12" rx="2"/><text class="cardinality" x="615" y="557">DESTINATION</text>
         <rect class="labelmask" x="910" y="544" width="24" height="12" rx="2"/><text class="cardinality" x="922" y="553">N</text>
         <rect class="labelmask" x="332" y="520" width="24" height="12" rx="2"/><text class="cardinality" x="344" y="529">1</text>
+        <rect class="labelmask" x="108" y="252" width="24" height="12" rx="2"/><text class="cardinality" x="120" y="261">1</text>
+        <rect class="labelmask" x="1014" y="444" width="24" height="12" rx="2"/><text class="cardinality" x="1026" y="453">N</text>
         <!-- Entities. -->
         <rect class="entity" x="40" y="150" width="180" height="90" rx="6"/><rect class="entity-head" x="41" y="151" width="178" height="34" rx="5"/>
-        <rect class="tag" x="50" y="158" width="48" height="14" rx="2"/><text class="tagtext" x="74" y="168">ENTITY</text><text class="name" x="130" y="177">Plan diario</text><text class="field" x="56" y="215">daily plan</text>
+        <rect class="tag" x="50" y="153" width="48" height="10" rx="2"/><text class="tagtext" x="74" y="163">ENTITY</text><text class="name" x="130" y="177">Plan diario</text><text class="field" x="56" y="215">daily plan / date</text>
         <rect class="entity" x="270" y="150" width="180" height="90" rx="6"/><rect class="entity-head" x="271" y="151" width="178" height="34" rx="5"/>
-        <rect class="tag" x="280" y="158" width="48" height="14" rx="2"/><text class="tagtext" x="304" y="168">ENTITY</text><text class="name" x="360" y="177">Recorrido</text><text class="field" x="286" y="215">route assignment</text>
+        <rect class="tag" x="280" y="153" width="48" height="10" rx="2"/><text class="tagtext" x="304" y="163">ENTITY</text><text class="name" x="360" y="177">Recorrido</text><text class="field" x="286" y="215">route assignment</text>
         <rect class="entity" x="510" y="130" width="220" height="130" rx="6"/><rect class="entity-head" x="511" y="131" width="218" height="34" rx="5"/>
-        <rect class="tag" x="520" y="138" width="48" height="14" rx="2"/><text class="tagtext" x="544" y="148">ENTITY</text><text class="name" x="620" y="157">Versi&#243;n del plan</text>
+        <rect class="tag" x="520" y="133" width="48" height="10" rx="2"/><text class="tagtext" x="544" y="143">ENTITY</text><text class="name" x="620" y="157">Versi&#243;n del plan</text>
         <text class="field" x="526" y="188">version N</text><text class="field" x="526" y="204">published_at</text><text class="field" x="526" y="220">published_by</text><text class="field" x="526" y="236">override_reason</text>
         <rect class="entity" x="790" y="130" width="190" height="130" rx="6"/><rect class="entity-head" x="791" y="131" width="188" height="34" rx="5"/>
-        <rect class="tag" x="800" y="138" width="48" height="14" rx="2"/><text class="tagtext" x="824" y="148">ENTITY</text><text class="name" x="885" y="157">Parada</text>
+        <rect class="tag" x="800" y="133" width="48" height="10" rx="2"/><text class="tagtext" x="824" y="143">ENTITY</text><text class="name" x="885" y="157">Parada</text>
         <text class="field" x="806" y="188">order</text><text class="field" x="806" y="204">kind: pickup / drop-off</text><text class="field" x="806" y="220">planned time</text><text class="field" x="806" y="236">locked when done</text>
         <rect class="entity" x="790" y="390" width="220" height="150" rx="6"/><rect class="entity-head" x="791" y="391" width="218" height="34" rx="5"/>
-        <rect class="tag" x="800" y="398" width="48" height="14" rx="2"/><text class="tagtext" x="824" y="408">ENTITY</text><text class="name" x="900" y="417">Traslado</text>
-        <text class="field" x="806" y="450">direction: entrada / salida</text><text class="field" x="806" y="468">target local time</text><text class="field" x="806" y="486">planned km</text><text class="field" x="806" y="504">status</text>
+        <rect class="tag" x="800" y="393" width="48" height="10" rx="2"/><text class="tagtext" x="824" y="403">ENTITY</text><text class="name" x="900" y="417">Traslado</text>
+        <text class="field" x="806" y="450">direction: entrada / salida</text><text class="field" x="806" y="468">target local time</text><text class="field" x="806" y="486">planned km</text><text class="field" x="806" y="504">status</text><text class="field" x="806" y="522">day retained if unassigned / cancelled</text>
         <rect class="entity" x="510" y="390" width="220" height="110" rx="6"/><rect class="entity-head" x="511" y="391" width="218" height="34" rx="5"/>
-        <rect class="tag" x="520" y="398" width="48" height="14" rx="2"/><text class="tagtext" x="544" y="408">ENTITY</text><text class="name" x="620" y="417">Pasajero</text><text class="field" x="526" y="455">passenger record</text>
+        <rect class="tag" x="520" y="393" width="48" height="10" rx="2"/><text class="tagtext" x="544" y="403">ENTITY</text><text class="name" x="620" y="417">Pasajero</text><text class="field" x="526" y="455">passenger record</text>
         <rect class="entity" x="270" y="390" width="190" height="90" rx="6"/><rect class="entity-head" x="271" y="391" width="188" height="34" rx="5"/>
-        <rect class="tag" x="280" y="398" width="48" height="14" rx="2"/><text class="tagtext" x="304" y="408">ENTITY</text><text class="name" x="365" y="417">Destino</text><text class="field" x="286" y="455">destination record</text>
+        <rect class="tag" x="280" y="393" width="48" height="10" rx="2"/><text class="tagtext" x="304" y="403">ENTITY</text><text class="name" x="365" y="417">Destino</text><text class="field" x="286" y="455">destination record</text>
         <line class="legendline" x1="40" y1="652" x2="1240" y2="652"/>
         <text class="legend-title" x="40" y="674">LEGEND</text>
         <rect x="126" y="666" width="14" height="10" rx="2" fill="#fff" stroke="rgba(45,49,66,.3)"/><text class="legend" x="148" y="675">entity / attributes below header</text>
@@ -78,11 +81,11 @@
 
   <section class="figure" aria-labelledby="planning-constraints-heading">
     <h2 id="planning-constraints-heading">Assignments, constraints &amp; exceptions</h2>
-    <p>Passenger and vehicle Adaptaciones are independent n:m relationships; an Ausencia belongs to one Traslado.</p>
+    <p>One Veh&#237;culo has N Recorridos; each Recorrido has 1 Veh&#237;culo. Passenger and vehicle Adaptaciones are independent n:m relationships; an Ausencia belongs to one Traslado.</p>
     <div class="diagram-container">
       <svg viewBox="0 0 1280 720" xmlns="http://www.w3.org/2000/svg" role="img" aria-labelledby="plan-constraints-title plan-constraints-desc">
         <title id="plan-constraints-title">Route assignments and constraints</title>
-        <desc id="plan-constraints-desc">ER relationships assign Recorridos to a Vehiculo and Chofer, connect passenger and vehicle Adaptaciones, and associate Ausencias with Traslados.</desc>
+        <desc id="plan-constraints-desc">ER relationships show that one Veh&#237;culo has many Recorridos and each Recorrido has one Veh&#237;culo; they also assign Choferes, connect passenger and vehicle Adaptaciones, and associate Ausencias with Traslados.</desc>
         <defs>
           <marker id="plan-constraints-arrow" markerWidth="8" markerHeight="6" refX="7" refY="3" orient="auto"><polygon points="0 0,8 3,0 6" fill="#4f5d75"/></marker>
           <marker id="plan-constraints-arrow-accent" markerWidth="8" markerHeight="6" refX="7" refY="3" orient="auto"><polygon points="0 0,8 3,0 6" fill="#bf4520"/></marker>
@@ -92,8 +95,8 @@
         <path class="connector" d="M300 200 H520"/><path class="connector" d="M740 200 H980"/>
         <path class="connector" d="M190 250 V322 Q190 330 198 330 H612 Q620 330 620 338 V390"/>
         <path class="connector" d="M400 450 H520"/><path class="connector" d="M1020 500 V530"/>
-        <rect class="labelmask" x="326" y="176" width="20" height="12" rx="2"/><text class="cardinality" x="336" y="185">N</text>
-        <rect class="labelmask" x="474" y="176" width="20" height="12" rx="2"/><text class="cardinality" x="484" y="185">1</text>
+        <rect class="labelmask" x="326" y="176" width="20" height="12" rx="2"/><text class="cardinality" x="336" y="185">1</text>
+        <rect class="labelmask" x="474" y="176" width="20" height="12" rx="2"/><text class="cardinality" x="484" y="185">N</text>
         <rect class="labelmask" x="764" y="176" width="20" height="12" rx="2"/><text class="cardinality" x="774" y="185">N</text>
         <rect class="labelmask" x="936" y="176" width="20" height="12" rx="2"/><text class="cardinality" x="946" y="185">1</text>
         <rect class="labelmask" x="374" y="306" width="70" height="12" rx="2"/><text class="cardinality" x="409" y="315">M:N</text>
@@ -102,22 +105,22 @@
         <rect class="labelmask" x="1028" y="504" width="24" height="12" rx="2"/><text class="cardinality" x="1040" y="513">N</text>
         <!-- Assignment and constraint entities. -->
         <rect class="entity" x="80" y="150" width="220" height="100" rx="6"/><rect class="entity-head" x="81" y="151" width="218" height="34" rx="5"/>
-        <rect class="tag" x="90" y="158" width="48" height="14" rx="2"/><text class="tagtext" x="114" y="168">ENTITY</text><text class="name" x="190" y="177">Veh&#237;culo</text><text class="field" x="96" y="216">plate / model / seats</text>
+        <rect class="tag" x="90" y="153" width="48" height="10" rx="2"/><text class="tagtext" x="114" y="163">ENTITY</text><text class="name" x="190" y="177">Veh&#237;culo</text><text class="field" x="96" y="216">plate / model / seats</text>
         <rect class="entity" x="520" y="150" width="220" height="100" rx="6"/><rect class="entity-head" x="521" y="151" width="218" height="34" rx="5"/>
-        <rect class="tag" x="530" y="158" width="48" height="14" rx="2"/><text class="tagtext" x="554" y="168">ENTITY</text><text class="name" x="630" y="177">Recorrido</text><text class="field" x="536" y="216">route assignment</text>
+        <rect class="tag" x="530" y="153" width="48" height="10" rx="2"/><text class="tagtext" x="554" y="163">ENTITY</text><text class="name" x="630" y="177">Recorrido</text><text class="field" x="536" y="216">route assignment</text>
         <rect class="entity" x="980" y="150" width="220" height="100" rx="6"/><rect class="entity-head" x="981" y="151" width="218" height="34" rx="5"/>
-        <rect class="tag" x="990" y="158" width="48" height="14" rx="2"/><text class="tagtext" x="1014" y="168">ENTITY</text><text class="name" x="1090" y="177">Chofer</text><text class="field" x="996" y="216">driver assignment</text>
+        <rect class="tag" x="990" y="153" width="48" height="10" rx="2"/><text class="tagtext" x="1014" y="163">ENTITY</text><text class="name" x="1090" y="177">Chofer</text><text class="field" x="996" y="216">driver assignment</text>
         <rect class="entity" x="80" y="370" width="320" height="180" rx="6"/><rect class="entity-head" x="81" y="371" width="318" height="34" rx="5"/>
-        <rect class="tag" x="90" y="378" width="48" height="14" rx="2"/><text class="tagtext" x="114" y="388">ENTITY</text><text class="name" x="240" y="397">Pasajero</text>
+        <rect class="tag" x="90" y="373" width="48" height="10" rx="2"/><text class="tagtext" x="114" y="383">ENTITY</text><text class="name" x="240" y="397">Pasajero</text>
         <text class="field" x="96" y="428">home pin: lat / lng; address text</text><text class="field" x="96" y="446">access notes; requires Acompa&#241;ante</text>
         <text class="field" x="96" y="464">Tiempo m&#225;ximo a bordo</text><text class="field" x="96" y="482">boarding / alighting minutes</text>
         <text class="field" x="96" y="500">short medical alert; no diagnosis</text>
         <rect class="entity" x="520" y="390" width="220" height="100" rx="6"/><rect class="entity-head" x="521" y="391" width="218" height="34" rx="5"/>
-        <rect class="tag" x="530" y="398" width="48" height="14" rx="2"/><text class="tagtext" x="554" y="408">ENTITY</text><text class="name" x="630" y="417">Adaptaci&#243;n</text><text class="field" x="536" y="456">required / has</text>
+        <rect class="tag" x="530" y="393" width="48" height="10" rx="2"/><text class="tagtext" x="554" y="403">ENTITY</text><text class="name" x="630" y="417">Adaptaci&#243;n</text><text class="field" x="536" y="456">required / has</text>
         <rect class="entity" x="900" y="350" width="240" height="150" rx="6"/><rect class="entity-head" x="901" y="351" width="238" height="34" rx="5"/>
-        <rect class="tag" x="910" y="358" width="48" height="14" rx="2"/><text class="tagtext" x="934" y="368">ENTITY</text><text class="name" x="1020" y="377">Traslado</text><text class="field" x="916" y="420">direction / target local time</text><text class="field" x="916" y="438">planned km / status</text>
+        <rect class="tag" x="910" y="353" width="48" height="10" rx="2"/><text class="tagtext" x="934" y="363">ENTITY</text><text class="name" x="1020" y="377">Traslado</text><text class="field" x="916" y="420">direction / target local time</text><text class="field" x="916" y="438">planned km / status</text>
         <rect class="entity" x="900" y="530" width="240" height="80" rx="6"/><rect class="entity-head" x="901" y="531" width="238" height="34" rx="5"/>
-        <rect class="tag" x="910" y="538" width="48" height="14" rx="2"/><text class="tagtext" x="934" y="548">ENTITY</text><text class="name" x="1020" y="557">Ausencia</text><text class="field" x="916" y="587">absence record</text>
+        <rect class="tag" x="910" y="533" width="48" height="10" rx="2"/><text class="tagtext" x="934" y="543">ENTITY</text><text class="name" x="1020" y="557">Ausencia</text><text class="field" x="916" y="587">absence record</text>
         <line class="legendline" x1="40" y1="652" x2="1240" y2="652"/>
         <text class="legend-title" x="40" y="674">LEGEND</text><rect x="126" y="666" width="14" height="10" rx="2" fill="#fff" stroke="rgba(45,49,66,.3)"/><text class="legend" x="148" y="675">entity</text>
         <line x1="250" y1="671" x2="290" y2="671" stroke="#4f5d75" stroke-width="1.1"/><text class="legend" x="300" y="675">relationship</text><text class="legend" x="440" y="675">1 / N = cardinality; M:N = many-to-many</text>

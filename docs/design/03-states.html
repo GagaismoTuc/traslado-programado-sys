@@ -18,11 +18,11 @@
 
   <section class="figure" aria-labelledby="transfer-state-heading">
     <h2 id="transfer-state-heading">Traslado</h2>
-    <p>A Traslado may move to another Recorrido only while Planificado (before Subi&#243;).</p>
+    <p>A Traslado may move to another Recorrido only while Planificado. Corrections append a new event and preserve the original Marca.</p>
     <div class="diagram-container">
       <svg viewBox="0 0 1280 720" xmlns="http://www.w3.org/2000/svg" role="img" aria-labelledby="state-transfer-title state-transfer-desc">
         <title id="state-transfer-title">Traslado state machine</title>
-        <desc id="state-transfer-desc">A Traslado progresses from Planificado to Subio and Entregado, or becomes Ausente or Cancelado por Ausencia; it may move to another Recorrido only while Planificado, before Subio.</desc>
+        <desc id="state-transfer-desc">A Traslado progresses from Planificado to Subio and Entregado, or becomes Ausente or Cancelado por Ausencia; it may move to another Recorrido only while Planificado. A Chofer may correct their own last mark within two minutes; afterward only Oficina may correct it with a reason, by appending a reference to the original Marca.</desc>
         <defs>
           <marker id="state-transfer-arrow" markerWidth="8" markerHeight="6" refX="7" refY="3" orient="auto"><polygon points="0 0,8 3,0 6" fill="#4f5d75"/></marker>
           <marker id="state-transfer-arrow-accent" markerWidth="8" markerHeight="6" refX="7" refY="3" orient="auto"><polygon points="0 0,8 3,0 6" fill="#bf4520"/></marker>
@@ -33,12 +33,17 @@
         <path class="connector" d="M630 324 H740" marker-end="url(#state-transfer-arrow)"/>
         <path class="connector" d="M190 280 V233" marker-end="url(#state-transfer-arrow)"/>
         <path class="connector" d="M190 368 V465" marker-end="url(#state-transfer-arrow)"/>
-        <path class="connector" d="M145 280 V258 Q145 250 153 250 H227 Q235 250 235 258 V280" marker-end="url(#state-transfer-arrow)"/>
+        <path class="connector" d="M115 280 V258 Q115 250 123 250 H152 Q160 250 160 258 V280" marker-end="url(#state-transfer-arrow)"/>
+        <path class="connector" d="M300 190 H326 Q334 190 334 198 V302 Q334 310 326 310 H300" marker-end="url(#state-transfer-arrow)"/>
+        <path class="connector" d="M740 302 V260 H638 Q630 260 630 268 V302" marker-end="url(#state-transfer-arrow)"/>
+        <path class="connector" d="M685 324 V430 H980 V345 H990"/>
         <rect class="labelmask" x="308" y="300" width="90" height="12" rx="2"/><text class="label" x="353" y="309">MARK SUBI&#211;</text>
         <rect class="labelmask" x="648" y="300" width="88" height="12" rx="2"/><text class="label" x="692" y="309">ENTREGADO</text>
         <rect class="labelmask" x="202" y="246" width="70" height="12" rx="2"/><text class="label" x="237" y="255">NO-SHOW</text>
         <rect class="labelmask" x="202" y="400" width="72" height="12" rx="2"/><text class="label" x="238" y="409">AUSENCIA</text>
-        <rect class="labelmask" x="150" y="222" width="110" height="12" rx="2"/><text class="label" x="205" y="231">MOVE RECORRIDO</text>
+        <rect class="labelmask" x="88" y="222" width="100" height="12" rx="2"/><text class="label" x="138" y="231">MOVE RECORRIDO</text>
+        <rect class="labelmask" x="340" y="246" width="96" height="12" rx="2"/><text class="label" x="388" y="255">CORRECCI&#211;N</text>
+        <rect class="labelmask" x="635" y="238" width="100" height="12" rx="2"/><text class="label" x="685" y="247">CORRECCI&#211;N</text>
         <!-- States. -->
         <rect class="state" x="80" y="280" width="220" height="88" rx="8"/><text class="state-name" x="190" y="327">Planificado</text>
         <rect class="state" x="410" y="280" width="220" height="88" rx="8"/><text class="state-name" x="520" y="327">Subi&#243;</text>
@@ -50,8 +55,12 @@
         <text class="note-title" x="1008" y="302">Other-adult delivery</text>
         <text class="note-text" x="1008" y="328">Allowed only when Consentimiento</text><text class="note-text" x="1008" y="344">permits the handoff.</text>
         <text class="note-text" x="1008" y="374">Otherwise: block delivery; Chofer</text><text class="note-text" x="1008" y="390">calls the Oficina.</text>
-        <rect class="note-box" x="410" y="465" width="430" height="88" rx="6"/>
-        <text class="note-title" x="430" y="494">Pending sync is phone-local</text><text class="note-text" x="430" y="518">Marks may show a pending-sync overlay; it is not a server state.</text>
+        <rect class="note-box" x="410" y="455" width="430" height="155" rx="6"/>
+        <text class="note-title" x="430" y="480">Corrections append; they never edit</text>
+        <text class="note-text" x="430" y="508">Chofer may undo their own last mark within 2 minutes.</text>
+        <text class="note-text" x="430" y="526">Afterward only Oficina corrects it, with a reason.</text>
+        <text class="note-text" x="430" y="544">Correcci&#243;n references the original Marca.</text>
+        <text class="note-text" x="430" y="572">Pending sync is phone-local, not a server state.</text>
         <line class="legendline" x1="40" y1="652" x2="1240" y2="652"/>
         <text class="legend-title" x="40" y="674">LEGEND</text>
         <rect x="126" y="666" width="14" height="10" rx="4" fill="#fff" stroke="rgba(45,49,66,.32)"/><text class="legend" x="148" y="675">server state</text>
@@ -63,11 +72,11 @@
 
   <section class="figure" aria-labelledby="route-state-heading">
     <h2 id="route-state-heading">Recorrido</h2>
-    <p>Each publication creates the next version; closing is gated by all onboard Traslados reaching Entregado.</p>
+    <p>Recorrido has four states; publishing N+1 updates a version attribute on Publicado or En curso.</p>
     <div class="diagram-container">
       <svg viewBox="0 0 1280 720" xmlns="http://www.w3.org/2000/svg" role="img" aria-labelledby="state-route-title state-route-desc">
         <title id="state-route-title">Recorrido state machine</title>
-        <desc id="state-route-desc">A Recorrido moves from Borrador through published versions and En curso to Cerrado; an onboard Traslado without Entregado blocks closure and alerts the Oficina.</desc>
+        <desc id="state-route-desc">A Recorrido moves from Borrador to Publicado, En curso, and Cerrado. Publish creates version N+1 as a guarded self-loop on Publicado and En curso. Closing alerts the Oficina and is blocked if any Traslado is still Planificado or is Subio without Entregado.</desc>
         <defs>
           <marker id="state-route-arrow" markerWidth="8" markerHeight="6" refX="7" refY="3" orient="auto"><polygon points="0 0,8 3,0 6" fill="#4f5d75"/></marker>
           <marker id="state-route-arrow-accent" markerWidth="8" markerHeight="6" refX="7" refY="3" orient="auto"><polygon points="0 0,8 3,0 6" fill="#bf4520"/></marker>
@@ -75,27 +84,31 @@
         </defs>
         <rect width="1280" height="720" fill="#f5f5f5"/>
         <circle cx="56" cy="324" r="6" fill="#2d3142"/>
-        <path class="connector" d="M62 324 H90" marker-end="url(#state-route-arrow)"/>
-        <path class="connector" d="M240 324 H320" marker-end="url(#state-route-arrow)"/>
-        <path class="connector" d="M500 324 H570" marker-end="url(#state-route-arrow)"/>
-        <path class="connector" d="M770 324 H840" marker-end="url(#state-route-arrow)"/>
-        <path class="connector-focus" d="M1000 324 H1080" marker-end="url(#state-route-arrow-accent)"/>
-        <path class="connector-focus" d="M1230 324 H1252" marker-end="url(#state-route-arrow-accent)"/>
-        <circle cx="1260" cy="324" r="8" fill="none" stroke="#bf4520" stroke-width="1.2"/><circle cx="1260" cy="324" r="5" fill="#bf4520"/>
-        <rect class="labelmask" x="254" y="300" width="52" height="12" rx="2"/><text class="label" x="280" y="309">PUBLISH</text>
-        <rect class="labelmask" x="508" y="300" width="54" height="12" rx="2"/><text class="label" x="535" y="309">CHANGE</text>
-        <rect class="labelmask" x="778" y="300" width="48" height="12" rx="2"/><text class="label" x="802" y="309">START</text>
-        <rect class="labelmask" x="1008" y="300" width="62" height="12" rx="2"/><text class="label-focus" x="1039" y="309">SAFE CLOSE</text>
-        <!-- State rail. -->
-        <rect class="state" x="90" y="280" width="150" height="88" rx="8"/><text class="state-name" x="165" y="327">Borrador</text>
-        <rect class="state" x="320" y="280" width="180" height="88" rx="8"/><text class="state-name" x="410" y="319">Publicado</text><text class="label" x="410" y="341">VERSION N</text>
-        <rect class="state" x="570" y="280" width="200" height="88" rx="8"/><text class="state-name" x="670" y="319">Publicado</text><text class="label" x="670" y="341">VERSION N+1</text>
-        <rect class="state" x="840" y="280" width="160" height="88" rx="8"/><text class="state-name" x="920" y="327">En curso</text>
-        <rect class="state-focus" x="1080" y="280" width="150" height="88" rx="8"/><text class="state-name" x="1155" y="327">Cerrado</text>
-        <rect class="note-focus" x="320" y="440" width="680" height="112" rx="6"/>
-        <text class="note-title" x="344" y="472">Close gate</text>
-        <text class="note-text" x="344" y="500">If any Traslado is Subi&#243; without Entregado, closing is blocked and an alarm goes to the Oficina.</text>
-        <text class="note-text" x="344" y="526">Published version N+1 is created for every subsequent plan change.</text>
+        <path class="connector" d="M62 324 H80" marker-end="url(#state-route-arrow)"/>
+        <path class="connector" d="M230 324 H340" marker-end="url(#state-route-arrow)"/>
+        <path class="connector" d="M510 324 H650" marker-end="url(#state-route-arrow)"/>
+        <path class="connector-focus" d="M820 324 H1010" marker-end="url(#state-route-arrow-accent)"/>
+        <path class="connector" d="M390 280 V250 Q390 242 398 242 H452 Q460 242 460 250 V280" marker-end="url(#state-route-arrow)"/>
+        <path class="connector" d="M700 280 V250 Q700 242 708 242 H762 Q770 242 770 250 V280" marker-end="url(#state-route-arrow)"/>
+        <path class="connector-focus" d="M1180 324 H1222" marker-end="url(#state-route-arrow-accent)"/>
+        <circle cx="1230" cy="324" r="8" fill="none" stroke="#bf4520" stroke-width="1.2"/><circle cx="1230" cy="324" r="5" fill="#bf4520"/>
+        <path class="connector-focus" d="M1000 440 V324"/>
+        <rect class="labelmask" x="258" y="300" width="54" height="12" rx="2"/><text class="label" x="285" y="309">PUBLISH</text>
+        <rect class="labelmask" x="555" y="300" width="50" height="12" rx="2"/><text class="label" x="580" y="309">START</text>
+        <rect class="labelmask" x="873" y="300" width="84" height="12" rx="2"/><text class="label-focus" x="915" y="309">SAFE CLOSE</text>
+        <rect class="labelmask" x="365" y="214" width="120" height="12" rx="2"/><text class="label" x="425" y="223">PUBLISH N+1</text>
+        <rect class="labelmask" x="675" y="214" width="120" height="12" rx="2"/><text class="label" x="735" y="223">PUBLISH N+1</text>
+        <!-- Version is an attribute on these states, not a separate Recorrido state. -->
+        <rect class="state" x="80" y="280" width="150" height="88" rx="8"/><text class="state-name" x="155" y="327">Borrador</text>
+        <rect class="state" x="340" y="280" width="170" height="88" rx="8"/><text class="state-name" x="425" y="319">Publicado</text><text class="label" x="425" y="341">VERSION N</text>
+        <rect class="state" x="650" y="280" width="170" height="88" rx="8"/><text class="state-name" x="735" y="319">En curso</text><text class="label" x="735" y="341">VERSION N</text>
+        <rect class="state-focus" x="1010" y="280" width="170" height="88" rx="8"/><text class="state-name" x="1095" y="327">Cerrado</text>
+        <rect class="note-focus" x="260" y="440" width="760" height="160" rx="6"/>
+        <text class="note-title" x="284" y="466">Publish guard and close gate</text>
+        <text class="note-text" x="284" y="490">Initial PUBLISH and both self-loops: validator passes, or Oficina overrides with a logged reason.</text>
+        <text class="note-text" x="284" y="514">Each plan change publishes version N+1; the version is an attribute, not a state.</text>
+        <text class="note-text" x="284" y="538">Close is blocked with an Oficina alarm if any Traslado stays Planificado or is Subi&#243; without Entregado.</text>
+        <text class="note-text" x="284" y="562">Resolve first: Chofer marks Ausente, or Oficina reassigns or cancels the Traslado.</text>
         <line class="legendline" x1="40" y1="652" x2="1240" y2="652"/>
         <text class="legend-title" x="40" y="674">LEGEND</text>
         <circle cx="136" cy="671" r="5" fill="#2d3142"/><text class="legend" x="150" y="675">start</text>
