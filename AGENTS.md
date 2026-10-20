@@ -12,6 +12,11 @@ Default canonical labels: `needs-triage`, `needs-info`, `ready-for-agent`, `read
 
 Single-context: one `GLOSSARY.md` and `docs/adr/` at the repo root. See `docs/agents/domain.md`.
 
+### Project data and migrations
+
+- Never use real personal data in development, CI, or staging; use synthetic test data only.
+- Keep one database migration per ticket. If another migration lands first, merge `origin/main` and regenerate with `db:generate` before continuing.
+
 <!-- orca-stack:begin -->
 ## Orca stack: contrato de trabajo
 

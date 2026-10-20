@@ -19,8 +19,8 @@
     ]
   },
   "verificacion": {
-    "suite": null,
-    "typecheck": null
+    "suite": "pnpm build && pnpm test",
+    "typecheck": "pnpm typecheck"
   },
   "riesgo": [
     "**/migrations/**",
