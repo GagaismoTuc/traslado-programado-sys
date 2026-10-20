@@ -52,8 +52,16 @@ _Avoid_: viaje, servicio
 The ordered stops one Vehículo with its Chofer makes in one part of the day, serving several Traslados.
 _Avoid_: ruta, vuelta
 
+**Versión del plan** (Plan version):
+A numbered, published state of one Recorrido. Each publication creates the next version.
+_Avoid_: revisión, edición
+
+**Publicación forzada** (Override):
+A Versión del plan the Oficina publishes although it breaks a limit, with a recorded reason. It never covers a Pasajero left without a Recorrido.
+_Avoid_: override, excepción
+
 **Plan diario** (Daily plan):
-All the Recorridos of one day.
+All the Recorridos and Traslados of one day.
 _Avoid_: horario, planilla, cronograma
 
 **Ausencia** (Absence):
@@ -69,6 +77,18 @@ The written authorization from a Pasajero's family to keep and use the Pasajero'
 _Avoid_: autorización, permiso
 
 ## Execution
+
+**Marca** (Mark):
+A Chofer's record of what happened to a Pasajero on a Traslado: Subió, Ausente, Entregado, or a Corrección of one of them. Marks are never edited or deleted.
+_Avoid_: registro, check
+
+**Corrección** (Correction):
+A Marca that replaces an earlier Marca of the same Traslado without changing it. The Chofer can make one within 2 minutes of the original; after that only the Oficina can, with a reason.
+_Avoid_: edición, anulación
+
+**Confirmación de versión** (Version acknowledgement):
+A Chofer's record of having seen a given Versión del plan.
+_Avoid_: acuse, ack
 
 **Subió** (Boarded):
 The Chofer's mark that a Pasajero got into the Vehículo, with the time and place it happened.
