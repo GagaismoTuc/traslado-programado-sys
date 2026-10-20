@@ -6,3 +6,6 @@ coverage/
 !.env.example
 .pnpm-store/
 *.log
+.orca-stack.local.json
+odd/
+.atl/
