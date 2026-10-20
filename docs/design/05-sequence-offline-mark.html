@@ -1,9 +1,9 @@
 <!doctype html>
-<html lang="en">
+<html lang="es">
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>Offline mark sequence | Traslado programado</title>
+  <title>Secuencia de marca sin señal | Traslado programado</title>
   <link href="https://fonts.googleapis.com/css2?family=Instrument+Serif:ital@0;1&family=Geist:wght@400;500;600&family=Geist+Mono:wght@400;500;600&display=swap" rel="stylesheet">
   <style>
     :root{--paper:#f5f5f5;--ink:#2d3142;--muted:#4f5d75;--soft:#5a6580;--rule:rgba(45,49,66,.12);--accent:#bf4520;--accent-tint:rgba(191,69,32,.08);--link:#2e5aa8;--sans:'Geist',system-ui,sans-serif;--serif:'Instrument Serif',serif;--mono:'Geist Mono',ui-monospace,monospace}
@@ -12,13 +12,13 @@
   </style>
 </head>
 <body><main>
-  <p class="eyebrow">Sequence / offline event</p>
-  <h1>Save first; sync when connected</h1>
-  <p class="intro">The driver app owns the IndexedDB queue. There is no Background Sync; device-local marks stay durable until server confirmation.</p>
+  <p class="eyebrow">Secuencia / marca sin señal</p>
+  <h1>Primero se guarda; se sincroniza con señal</h1>
+  <p class="intro">La cola en IndexedDB es de la app del chofer. No hay Background Sync; las marcas quedan guardadas en el celular hasta que el servidor las confirma.</p>
 
-  <section class="figure"><h2>01 / Capture, sync and reconcile</h2><p>The Chofer selects the Receptor when marking Entregado; the phone applies the cached-consent guard offline.</p>
+  <section class="figure"><h2>01 / Marcar, sincronizar y conciliar</h2><p>El Chofer elige el Receptor al marcar Entregado; el celular aplica la regla del Consentimiento aunque no haya señal.</p>
     <div class="diagram-container"><svg viewBox="0 0 1280 720" xmlns="http://www.w3.org/2000/svg" role="img" aria-labelledby="offline-sync-title offline-sync-desc">
-      <title id="offline-sync-title">Capture and sync an offline mark</title><desc id="offline-sync-desc">A Chofer selects a Receptor for Entregado and records the mark locally. The API returns confirmation, or accepts and flags it if the Traslado moved or consent data disagrees; it never rejects the mark.</desc>
+      <title id="offline-sync-title">Marcar y sincronizar sin señal</title><desc id="offline-sync-desc">El Chofer elige el Receptor de un Entregado y la marca se guarda en el celular. La API la confirma, o la acepta y la señala si el Traslado cambió o el Consentimiento no coincide; nunca la rechaza.</desc>
       <defs>
         <marker id="offline-sync-arrow" markerWidth="8" markerHeight="6" refX="7" refY="3" orient="auto"><polygon points="0 0,8 3,0 6" fill="#4f5d75"/></marker>
         <marker id="offline-sync-arrow-accent" markerWidth="8" markerHeight="6" refX="7" refY="3" orient="auto"><polygon points="0 0,8 3,0 6" fill="#bf4520"/></marker>
@@ -31,28 +31,28 @@
       <path class="message" d="M1020 370 H1060 Q1068 370 1068 378 V390 Q1068 398 1060 398 H1020" marker-end="url(#offline-sync-arrow-link)"/>
       <path class="message-return" d="M1020 440 H720" marker-end="url(#offline-sync-arrow)"/><path class="message-return" d="M1020 500 H720" marker-end="url(#offline-sync-arrow)"/>
       <path class="message" d="M720 560 H120" marker-end="url(#offline-sync-arrow-link)"/><path class="message" d="M720 600 H420" marker-end="url(#offline-sync-arrow-link)"/>
-      <text class="guard" x="720" y="428">[same route]</text><text class="guard" x="720" y="488">[moved / consent mismatch]</text>
-      <rect class="labelmask" x="372" y="198" width="96" height="12" rx="2"/><text class="message-label" x="420" y="207">MARK ENTREGADO</text>
-      <rect class="labelmask" x="548" y="238" width="76" height="12" rx="2"/><text class="message-label" x="586" y="247">WRITE EVENT</text>
-      <rect class="labelmask" x="192" y="278" width="88" height="12" rx="2"/><text class="return-label" x="236" y="287">SAVED ON PHONE</text>
-      <rect class="labelmask" x="836" y="318" width="52" height="12" rx="2"/><text class="message-label" x="862" y="327">FLUSH</text>
-      <rect class="labelmask" x="1074" y="366" width="80" height="12" rx="2"/><text class="message-label" x="1114" y="375">UPSERT + AUDIT</text>
-      <rect class="labelmask" x="816" y="428" width="84" height="12" rx="2"/><text class="return-label" x="858" y="437">CONFIRMED</text>
-      <rect class="labelmask" x="804" y="488" width="88" height="12" rx="2"/><text class="return-label" x="848" y="497">ACCEPT + FLAG</text>
-      <rect class="labelmask" x="358" y="538" width="124" height="12" rx="2"/><text class="message-label" x="420" y="547">SERVER CONFIRMED</text>
-      <rect class="labelmask" x="530" y="578" width="112" height="12" rx="2"/><text class="message-label" x="586" y="587">KEEP CONFIRMED</text>
-      <rect class="actor" x="40" y="82" width="160" height="68" rx="6"/><rect class="actor-tag" x="50" y="90" width="52" height="14" rx="2"/><text class="actor-tagtext" x="76" y="100">ACTOR</text><text class="actor-name" x="120" y="124">Chofer</text><text class="actor-sub" x="120" y="140">marks stop</text>
-      <rect class="actor" x="340" y="82" width="160" height="68" rx="6"/><rect class="actor-tag" x="350" y="90" width="48" height="14" rx="2"/><text class="actor-tagtext" x="374" y="100">STORE</text><text class="actor-name" x="420" y="124">IndexedDB</text><text class="actor-sub" x="420" y="140">app-owned queue</text>
-      <rect class="actor" x="640" y="82" width="160" height="68" rx="6"/><rect class="actor-tag" x="650" y="90" width="52" height="14" rx="2"/><text class="actor-tagtext" x="676" y="100">CLIENT</text><text class="actor-name" x="720" y="124">Driver app</text><text class="actor-sub" x="720" y="140">offline-first</text>
-      <rect class="actor" x="940" y="82" width="160" height="68" rx="6"/><rect class="actor-tag" x="950" y="90" width="38" height="14" rx="2"/><text class="actor-tagtext" x="969" y="100">API</text><text class="actor-name" x="1020" y="124">Hono API</text><text class="actor-sub" x="1020" y="140">idempotent endpoint</text>
-      <rect class="note-box" x="40" y="610" width="1200" height="34" rx="4"/><text class="note-text" x="56" y="624">Queue stores UUID, phone time, GPS and plan version; flush on online / visibilitychange / app open (no Background Sync).</text><text class="note-text" x="56" y="638">Cached plan carries Adultos autorizados + Consentimiento; enforce the other-adult rule locally; accept and flag mismatches; keep confirmed marks until end-of-day wipe.</text>
-      <line class="legendline" x1="40" y1="652" x2="1240" y2="652"/><text class="legend-title" x="40" y="674">LEGEND</text><line x1="126" y1="671" x2="164" y2="671" stroke="#2e5aa8" stroke-width="1.2" marker-end="url(#offline-sync-arrow-link)"/><text class="legend" x="174" y="675">call / local action</text><line x1="300" y1="671" x2="338" y2="671" stroke="#4f5d75" stroke-width="1.1" stroke-dasharray="5 4" marker-end="url(#offline-sync-arrow)"/><text class="legend" x="348" y="675">return</text>
+      <text class="guard" x="720" y="428">[mismo recorrido]</text><text class="guard" x="720" y="488">[cambió / no coincide el consentimiento]</text>
+      <rect class="labelmask" x="372" y="198" width="96" height="12" rx="2"/><text class="message-label" x="420" y="207">MARCA ENTREGADO</text>
+      <rect class="labelmask" x="548" y="238" width="76" height="12" rx="2"/><text class="message-label" x="586" y="247">GUARDA EVENTO</text>
+      <rect class="labelmask" x="192" y="278" width="88" height="12" rx="2"/><text class="return-label" x="236" y="287">EN EL CELULAR</text>
+      <rect class="labelmask" x="836" y="318" width="52" height="12" rx="2"/><text class="message-label" x="862" y="327">ENVÍA COLA</text>
+      <rect class="labelmask" x="1074" y="366" width="80" height="12" rx="2"/><text class="message-label" x="1114" y="375">UPSERT + AUDITA</text>
+      <rect class="labelmask" x="816" y="428" width="84" height="12" rx="2"/><text class="return-label" x="858" y="437">CONFIRMADA</text>
+      <rect class="labelmask" x="804" y="488" width="88" height="12" rx="2"/><text class="return-label" x="848" y="497">ACEPTA + SEÑALA</text>
+      <rect class="labelmask" x="358" y="538" width="124" height="12" rx="2"/><text class="message-label" x="420" y="547">CONFIRMADA (SERVIDOR)</text>
+      <rect class="labelmask" x="530" y="578" width="112" height="12" rx="2"/><text class="message-label" x="586" y="587">CONSERVA LA CONFIRMADA</text>
+      <rect class="actor" x="40" y="82" width="160" height="68" rx="6"/><rect class="actor-tag" x="50" y="90" width="52" height="14" rx="2"/><text class="actor-tagtext" x="76" y="100">ACTOR</text><text class="actor-name" x="120" y="124">Chofer</text><text class="actor-sub" x="120" y="140">marca la parada</text>
+      <rect class="actor" x="340" y="82" width="160" height="68" rx="6"/><rect class="actor-tag" x="350" y="90" width="48" height="14" rx="2"/><text class="actor-tagtext" x="374" y="100">DATOS</text><text class="actor-name" x="420" y="124">IndexedDB</text><text class="actor-sub" x="420" y="140">cola de la app</text>
+      <rect class="actor" x="640" y="82" width="160" height="68" rx="6"/><rect class="actor-tag" x="650" y="90" width="52" height="14" rx="2"/><text class="actor-tagtext" x="676" y="100">CLIENTE</text><text class="actor-name" x="720" y="124">App del chofer</text><text class="actor-sub" x="720" y="140">funciona sin señal</text>
+      <rect class="actor" x="940" y="82" width="160" height="68" rx="6"/><rect class="actor-tag" x="950" y="90" width="38" height="14" rx="2"/><text class="actor-tagtext" x="969" y="100">API</text><text class="actor-name" x="1020" y="124">API Hono</text><text class="actor-sub" x="1020" y="140">endpoint idempotente</text>
+      <rect class="note-box" x="40" y="610" width="1200" height="34" rx="4"/><text class="note-text" x="56" y="624">La cola guarda UUID, hora del celular, GPS y versión del plan; se envía con online / visibilitychange / al abrir la app (sin Background Sync).</text><text class="note-text" x="56" y="638">El plan en caché trae los Adultos autorizados y el Consentimiento; la regla de otro adulto se aplica en el celular; las diferencias se aceptan y se señalan; las marcas confirmadas se guardan hasta el borrado de fin del día.</text>
+      <line class="legendline" x1="40" y1="652" x2="1240" y2="652"/><text class="legend-title" x="40" y="674">REFERENCIAS</text><line x1="126" y1="671" x2="164" y2="671" stroke="#2e5aa8" stroke-width="1.2" marker-end="url(#offline-sync-arrow-link)"/><text class="legend" x="174" y="675">llamada / acción local</text><line x1="300" y1="671" x2="338" y2="671" stroke="#4f5d75" stroke-width="1.1" stroke-dasharray="5 4" marker-end="url(#offline-sync-arrow)"/><text class="legend" x="348" y="675">respuesta</text>
     </svg></div>
   </section>
 
-  <section class="figure"><h2>02 / End a session or revoke a device</h2><p>Cerrar sesi&#243;n flushes before ending the session. Revoking a lost device wipes locally without upload; Oficina sees Traslados without a confirmed mark, not queue contents.</p>
+  <section class="figure"><h2>02 / Cerrar sesión o revocar un dispositivo</h2><p>Cerrar sesión envía la cola antes de terminar. Revocar un celular perdido lo borra sin subir nada; la Oficina ve los Traslados sin marca confirmada, no el contenido de la cola.</p>
     <div class="diagram-container"><svg viewBox="0 0 1280 720" xmlns="http://www.w3.org/2000/svg" role="img" aria-labelledby="offline-recovery-title offline-recovery-desc">
-      <title id="offline-recovery-title">Session end, expiry and device revocation</title><desc id="offline-recovery-desc">Cerrar sesi&#243;n flushes the queue before ending the session. An expired session permits sign-in and retry. For a lost or stolen device, the server returns revoked, the phone wipes without uploading, and Oficina sees only Traslados without a confirmed mark.</desc>
+      <title id="offline-recovery-title">Fin de sesión, vencimiento y revocación</title><desc id="offline-recovery-desc">Cerrar sesión envía la cola antes de terminar. Con la sesión vencida, se vuelve a ingresar y se reintenta. Con un celular perdido o robado, el servidor responde revocado, el celular borra todo sin subir nada y la Oficina ve solo los Traslados sin marca confirmada.</desc>
       <defs>
         <marker id="offline-recovery-arrow" markerWidth="8" markerHeight="6" refX="7" refY="3" orient="auto"><polygon points="0 0,8 3,0 6" fill="#4f5d75"/></marker>
         <marker id="offline-recovery-arrow-accent" markerWidth="8" markerHeight="6" refX="7" refY="3" orient="auto"><polygon points="0 0,8 3,0 6" fill="#bf4520"/></marker>
@@ -63,31 +63,31 @@
       <rect class="activation" x="346" y="174" width="8" height="430"/><rect class="activation" x="806" y="214" width="8" height="400"/><rect class="activation" x="576" y="594" width="8" height="28"/>
       <path class="message" d="M120 180 H350" marker-end="url(#offline-recovery-arrow-link)"/><path class="message" d="M350 220 H810" marker-end="url(#offline-recovery-arrow-link)"/><path class="message-return" d="M810 280 H350" marker-end="url(#offline-recovery-arrow)"/><path class="message" d="M350 310 H810" marker-end="url(#offline-recovery-arrow-link)"/><path class="message-return" d="M810 340 H350" marker-end="url(#offline-recovery-arrow)"/>
       <path class="message-return" d="M810 420 H350" marker-end="url(#offline-recovery-arrow)"/><path class="message" d="M120 450 H350" marker-end="url(#offline-recovery-arrow-link)"/><path class="message" d="M350 480 H810" marker-end="url(#offline-recovery-arrow-link)"/><path class="message" d="M1070 540 H810" marker-end="url(#offline-recovery-arrow-link)"/><path class="message-return" d="M810 570 H350" marker-end="url(#offline-recovery-arrow)"/><path class="message" d="M350 600 H580" marker-end="url(#offline-recovery-arrow-link)"/><path class="message" d="M810 625 H1070" marker-end="url(#offline-recovery-arrow-link)"/>
-      <text class="guard" x="120" y="270">[queue confirmed]</text><text class="guard" x="120" y="410">[session expired]</text><text class="guard" x="120" y="540">[Revocar por p&#233;rdida o robo]</text>
-      <rect class="labelmask" x="184" y="158" width="102" height="12" rx="2"/><text class="message-label" x="235" y="167">CERRAR SESI&#211;N</text>
-      <rect class="labelmask" x="540" y="198" width="72" height="12" rx="2"/><text class="message-label" x="576" y="207">FLUSH QUEUE</text>
-      <rect class="labelmask" x="540" y="258" width="80" height="12" rx="2"/><text class="return-label" x="580" y="267">CONFIRMED</text>
-      <rect class="labelmask" x="540" y="288" width="80" height="12" rx="2"/><text class="message-label" x="580" y="297">END SESSION</text>
-      <rect class="labelmask" x="540" y="328" width="80" height="12" rx="2"/><text class="return-label" x="580" y="337">LOGGED OUT</text>
-      <rect class="labelmask" x="530" y="398" width="100" height="12" rx="2"/><text class="return-label" x="580" y="407">LOGIN REQUIRED</text>
-      <rect class="labelmask" x="208" y="428" width="66" height="12" rx="2"/><text class="message-label" x="241" y="437">SIGN IN</text>
-      <rect class="labelmask" x="520" y="458" width="78" height="12" rx="2"/><text class="message-label" x="559" y="467">RE-FLUSH</text>
-      <rect class="labelmask" x="900" y="528" width="120" height="12" rx="2"/><text class="message-label" x="960" y="537">REVOKE DEVICE</text>
-      <rect class="labelmask" x="530" y="558" width="72" height="12" rx="2"/><text class="return-label" x="566" y="567">REVOKED</text>
-      <rect class="labelmask" x="410" y="588" width="110" height="12" rx="2"/><text class="message-label" x="465" y="597">WIPE NO UPLOAD</text>
-      <rect class="labelmask" x="876" y="613" width="168" height="12" rx="2"/><text class="message-label" x="960" y="622">UNCONFIRMED TRASLADOS</text>
-      <rect class="actor" x="40" y="82" width="160" height="68" rx="6"/><rect class="actor-tag" x="50" y="90" width="52" height="14" rx="2"/><text class="actor-tagtext" x="76" y="100">ACTOR</text><text class="actor-name" x="120" y="124">Chofer</text><text class="actor-sub" x="120" y="140">phone user</text>
-      <rect class="actor" x="270" y="82" width="160" height="68" rx="6"/><rect class="actor-tag" x="280" y="90" width="52" height="14" rx="2"/><text class="actor-tagtext" x="306" y="100">CLIENT</text><text class="actor-name" x="350" y="124">Driver app</text><text class="actor-sub" x="350" y="140">queue owner</text>
-      <rect class="actor" x="500" y="82" width="160" height="68" rx="6"/><rect class="actor-tag" x="510" y="90" width="48" height="14" rx="2"/><text class="actor-tagtext" x="534" y="100">STORE</text><text class="actor-name" x="580" y="124">IndexedDB</text><text class="actor-sub" x="580" y="140">local marks</text>
-      <rect class="actor" x="730" y="82" width="160" height="68" rx="6"/><rect class="actor-tag" x="740" y="90" width="38" height="14" rx="2"/><text class="actor-tagtext" x="759" y="100">API</text><text class="actor-name" x="810" y="124">Hono API</text><text class="actor-sub" x="810" y="140">session / device</text>
-      <rect class="actor" x="990" y="82" width="160" height="68" rx="6"/><rect class="actor-tag" x="1000" y="90" width="52" height="14" rx="2"/><text class="actor-tagtext" x="1026" y="100">ACTOR</text><text class="actor-name" x="1070" y="124">Oficina</text><text class="actor-sub" x="1070" y="140">missing marks only</text>
-      <line class="legendline" x1="40" y1="652" x2="1240" y2="652"/><text class="legend-title" x="40" y="674">LEGEND</text><line x1="126" y1="671" x2="164" y2="671" stroke="#2e5aa8" stroke-width="1.2" marker-end="url(#offline-recovery-arrow-link)"/><text class="legend" x="174" y="675">call / local action</text><line x1="300" y1="671" x2="338" y2="671" stroke="#4f5d75" stroke-width="1.1" stroke-dasharray="5 4" marker-end="url(#offline-recovery-arrow)"/><text class="legend" x="348" y="675">return</text>
+      <text class="guard" x="120" y="270">[cola confirmada]</text><text class="guard" x="120" y="410">[sesión vencida]</text><text class="guard" x="120" y="540">[Revocar por pérdida o robo]</text>
+      <rect class="labelmask" x="184" y="158" width="102" height="12" rx="2"/><text class="message-label" x="235" y="167">CERRAR SESIÓN</text>
+      <rect class="labelmask" x="540" y="198" width="72" height="12" rx="2"/><text class="message-label" x="576" y="207">ENVÍA COLA</text>
+      <rect class="labelmask" x="540" y="258" width="80" height="12" rx="2"/><text class="return-label" x="580" y="267">CONFIRMADA</text>
+      <rect class="labelmask" x="540" y="288" width="80" height="12" rx="2"/><text class="message-label" x="580" y="297">TERMINA SESIÓN</text>
+      <rect class="labelmask" x="540" y="328" width="80" height="12" rx="2"/><text class="return-label" x="580" y="337">SESIÓN CERRADA</text>
+      <rect class="labelmask" x="530" y="398" width="100" height="12" rx="2"/><text class="return-label" x="580" y="407">PIDE INGRESAR</text>
+      <rect class="labelmask" x="208" y="428" width="66" height="12" rx="2"/><text class="message-label" x="241" y="437">INGRESA</text>
+      <rect class="labelmask" x="520" y="458" width="78" height="12" rx="2"/><text class="message-label" x="559" y="467">REENVÍA COLA</text>
+      <rect class="labelmask" x="900" y="528" width="120" height="12" rx="2"/><text class="message-label" x="960" y="537">REVOCA DISPOSITIVO</text>
+      <rect class="labelmask" x="530" y="558" width="72" height="12" rx="2"/><text class="return-label" x="566" y="567">REVOCADO</text>
+      <rect class="labelmask" x="410" y="588" width="110" height="12" rx="2"/><text class="message-label" x="465" y="597">BORRA SIN SUBIR</text>
+      <rect class="labelmask" x="876" y="613" width="168" height="12" rx="2"/><text class="message-label" x="960" y="622">TRASLADOS SIN CONFIRMAR</text>
+      <rect class="actor" x="40" y="82" width="160" height="68" rx="6"/><rect class="actor-tag" x="50" y="90" width="52" height="14" rx="2"/><text class="actor-tagtext" x="76" y="100">ACTOR</text><text class="actor-name" x="120" y="124">Chofer</text><text class="actor-sub" x="120" y="140">usa el celular</text>
+      <rect class="actor" x="270" y="82" width="160" height="68" rx="6"/><rect class="actor-tag" x="280" y="90" width="52" height="14" rx="2"/><text class="actor-tagtext" x="306" y="100">CLIENTE</text><text class="actor-name" x="350" y="124">App del chofer</text><text class="actor-sub" x="350" y="140">dueña de la cola</text>
+      <rect class="actor" x="500" y="82" width="160" height="68" rx="6"/><rect class="actor-tag" x="510" y="90" width="48" height="14" rx="2"/><text class="actor-tagtext" x="534" y="100">DATOS</text><text class="actor-name" x="580" y="124">IndexedDB</text><text class="actor-sub" x="580" y="140">marcas locales</text>
+      <rect class="actor" x="730" y="82" width="160" height="68" rx="6"/><rect class="actor-tag" x="740" y="90" width="38" height="14" rx="2"/><text class="actor-tagtext" x="759" y="100">API</text><text class="actor-name" x="810" y="124">API Hono</text><text class="actor-sub" x="810" y="140">sesión / dispositivo</text>
+      <rect class="actor" x="990" y="82" width="160" height="68" rx="6"/><rect class="actor-tag" x="1000" y="90" width="52" height="14" rx="2"/><text class="actor-tagtext" x="1026" y="100">ACTOR</text><text class="actor-name" x="1070" y="124">Oficina</text><text class="actor-sub" x="1070" y="140">solo marcas faltantes</text>
+      <line class="legendline" x1="40" y1="652" x2="1240" y2="652"/><text class="legend-title" x="40" y="674">REFERENCIAS</text><line x1="126" y1="671" x2="164" y2="671" stroke="#2e5aa8" stroke-width="1.2" marker-end="url(#offline-recovery-arrow-link)"/><text class="legend" x="174" y="675">llamada / acción local</text><line x1="300" y1="671" x2="338" y2="671" stroke="#4f5d75" stroke-width="1.1" stroke-dasharray="5 4" marker-end="url(#offline-recovery-arrow)"/><text class="legend" x="348" y="675">respuesta</text>
     </svg></div>
   </section>
 
-  <section class="figure"><h2>03 / Restore and close the day</h2><p>Restore rotates the server epoch; on mismatch, the phone resends today's confirmed marks and keeps them until end of day.</p>
+  <section class="figure"><h2>03 / Restauración y cierre del día</h2><p>Una restauración cambia la época del servidor; si no coincide, el celular reenvía las marcas confirmadas del día y las guarda hasta el final del día.</p>
     <div class="diagram-container"><svg viewBox="0 0 1280 800" xmlns="http://www.w3.org/2000/svg" role="img" aria-labelledby="offline-restore-title offline-restore-desc">
-      <title id="offline-restore-title">Reconcile confirmed marks after a server restore</title><desc id="offline-restore-desc">A restore rotates the server epoch. On app open, the phone compares epochs, resends today's confirmed marks if the epoch changed, and idempotently upserts each client UUID. The phone keeps confirmed marks until the end-of-day wipe.</desc>
+      <title id="offline-restore-title">Conciliar marcas después de restaurar el servidor</title><desc id="offline-restore-desc">Una restauración cambia la época del servidor. Al abrir la app, el celular compara épocas y, si cambió, reenvía las marcas confirmadas del día; el servidor hace un upsert idempotente por UUID. El celular guarda las marcas confirmadas hasta el borrado de fin del día.</desc>
       <defs>
         <marker id="offline-restore-arrow" markerWidth="8" markerHeight="6" refX="7" refY="3" orient="auto"><polygon points="0 0,8 3,0 6" fill="#4f5d75"/></marker>
         <marker id="offline-restore-arrow-accent" markerWidth="8" markerHeight="6" refX="7" refY="3" orient="auto"><polygon points="0 0,8 3,0 6" fill="#bf4520"/></marker>
@@ -98,25 +98,25 @@
       <path class="message-focus" d="M110 190 H360" marker-end="url(#offline-restore-arrow-accent)"/><path class="message" d="M1110 240 H610" marker-end="url(#offline-restore-arrow-link)"/><path class="message" d="M610 280 H360" marker-end="url(#offline-restore-arrow-link)"/><path class="message-return" d="M360 320 H610" marker-end="url(#offline-restore-arrow)"/>
       <path class="message" d="M610 360 H860" marker-end="url(#offline-restore-arrow-link)"/><path class="message-return" d="M860 400 H610" marker-end="url(#offline-restore-arrow)"/><path class="message" d="M610 440 H360" marker-end="url(#offline-restore-arrow-link)"/><path class="message" d="M360 480 H110" marker-end="url(#offline-restore-arrow-link)"/><path class="message-return" d="M110 520 H360" marker-end="url(#offline-restore-arrow)"/>
       <path class="message-return" d="M360 560 H610" marker-end="url(#offline-restore-arrow)"/><path class="message" d="M610 600 H860" marker-end="url(#offline-restore-arrow-link)"/><path class="message" d="M610 640 H860" marker-end="url(#offline-restore-arrow-link)"/>
-      <rect class="labelmask" x="126" y="168" width="218" height="12" rx="2"/><text class="focus-label" x="235" y="177">ROTATE EPOCH ON RESTORE</text>
-      <rect class="labelmask" x="806" y="218" width="108" height="12" rx="2"/><text class="message-label" x="860" y="227">REOPEN APP</text>
-      <rect class="labelmask" x="446" y="258" width="78" height="12" rx="2"/><text class="message-label" x="485" y="267">CHECK EPOCH</text>
-      <rect class="labelmask" x="446" y="298" width="78" height="12" rx="2"/><text class="return-label" x="485" y="307">EPOCH ID</text>
-      <rect class="labelmask" x="686" y="338" width="98" height="12" rx="2"/><text class="message-label" x="735" y="347">READ MARKS</text>
-      <rect class="labelmask" x="686" y="378" width="98" height="12" rx="2"/><text class="return-label" x="735" y="387">TODAY MARKS</text>
-      <rect class="labelmask" x="408" y="418" width="154" height="12" rx="2"/><text class="message-label" x="485" y="427">RESEND DAY IF CHANGED</text>
-      <rect class="labelmask" x="142" y="458" width="186" height="12" rx="2"/><text class="focus-label" x="235" y="467">UPSERT UUIDS (IDEMPOTENT)</text>
+      <rect class="labelmask" x="126" y="168" width="218" height="12" rx="2"/><text class="focus-label" x="235" y="177">CAMBIA ÉPOCA AL RESTAURAR</text>
+      <rect class="labelmask" x="806" y="218" width="108" height="12" rx="2"/><text class="message-label" x="860" y="227">ABRE LA APP</text>
+      <rect class="labelmask" x="446" y="258" width="78" height="12" rx="2"/><text class="message-label" x="485" y="267">COMPARA ÉPOCA</text>
+      <rect class="labelmask" x="446" y="298" width="78" height="12" rx="2"/><text class="return-label" x="485" y="307">ID DE ÉPOCA</text>
+      <rect class="labelmask" x="686" y="338" width="98" height="12" rx="2"/><text class="message-label" x="735" y="347">LEE MARCAS</text>
+      <rect class="labelmask" x="686" y="378" width="98" height="12" rx="2"/><text class="return-label" x="735" y="387">MARCAS DEL DÍA</text>
+      <rect class="labelmask" x="408" y="418" width="154" height="12" rx="2"/><text class="message-label" x="485" y="427">REENVÍA EL DÍA SI CAMBIÓ</text>
+      <rect class="labelmask" x="142" y="458" width="186" height="12" rx="2"/><text class="focus-label" x="235" y="467">UPSERT POR UUID (IDEMPOTENTE)</text>
       <rect class="labelmask" x="236" y="498" width="78" height="12" rx="2"/><text class="return-label" x="275" y="507">COMMIT</text>
-      <rect class="labelmask" x="410" y="538" width="150" height="12" rx="2"/><text class="return-label" x="485" y="547">CONFIRMED + EPOCH ID</text>
-      <rect class="labelmask" x="662" y="578" width="146" height="12" rx="2"/><text class="message-label" x="735" y="587">KEEP CONFIRMED MARKS</text>
-      <rect class="labelmask" x="672" y="618" width="126" height="12" rx="2"/><text class="message-label" x="735" y="627">WIPE AT EOD ONLY</text>
-      <rect class="note-box" x="40" y="668" width="1200" height="58" rx="6"/><text class="note-text" x="58" y="689">Every API response carries the server epoch ID; a restore changes it. On mismatch, resend today's confirmed marks.</text><text class="note-text" x="58" y="707">UUID upserts are idempotent; retain confirmed marks until end of day, then wipe local day data.</text>
-      <rect class="actor" x="30" y="82" width="160" height="68" rx="6"/><rect class="actor-tag" x="40" y="90" width="48" height="14" rx="2"/><text class="actor-tagtext" x="64" y="100">STORE</text><text class="actor-name" x="110" y="124">PostgreSQL</text><text class="actor-sub" x="110" y="140">restore epoch</text>
-      <rect class="actor" x="280" y="82" width="160" height="68" rx="6"/><rect class="actor-tag" x="290" y="90" width="38" height="14" rx="2"/><text class="actor-tagtext" x="309" y="100">API</text><text class="actor-name" x="360" y="124">Hono API</text><text class="actor-sub" x="360" y="140">epoch + mark upsert</text>
-      <rect class="actor" x="530" y="82" width="160" height="68" rx="6"/><rect class="actor-tag" x="540" y="90" width="52" height="14" rx="2"/><text class="actor-tagtext" x="566" y="100">CLIENT</text><text class="actor-name" x="610" y="124">Driver app</text><text class="actor-sub" x="610" y="140">today's confirmed marks</text>
-      <rect class="actor" x="780" y="82" width="160" height="68" rx="6"/><rect class="actor-tag" x="790" y="90" width="48" height="14" rx="2"/><text class="actor-tagtext" x="814" y="100">STORE</text><text class="actor-name" x="860" y="124">IndexedDB</text><text class="actor-sub" x="860" y="140">mark history</text>
-      <rect class="actor" x="1030" y="82" width="160" height="68" rx="6"/><rect class="actor-tag" x="1040" y="90" width="52" height="14" rx="2"/><text class="actor-tagtext" x="1066" y="100">ACTOR</text><text class="actor-name" x="1110" y="124">Chofer</text><text class="actor-sub" x="1110" y="140">opens app</text>
-      <line class="legendline" x1="40" y1="742" x2="1240" y2="742"/><text class="legend-title" x="40" y="764">LEGEND</text><line x1="126" y1="761" x2="164" y2="761" stroke="#2e5aa8" stroke-width="1.2" marker-end="url(#offline-restore-arrow-link)"/><text class="legend" x="174" y="765">call / local action</text><line x1="300" y1="761" x2="338" y2="761" stroke="#4f5d75" stroke-width="1.1" stroke-dasharray="5 4" marker-end="url(#offline-restore-arrow)"/><text class="legend" x="348" y="765">return / restore event</text><rect x="496" y="756" width="14" height="10" rx="2" fill="rgba(191,69,32,.08)" stroke="#bf4520"/><text class="legend" x="518" y="765">epoch / idempotent upsert focal path</text>
+      <rect class="labelmask" x="410" y="538" width="150" height="12" rx="2"/><text class="return-label" x="485" y="547">CONFIRMADAS + ID DE ÉPOCA</text>
+      <rect class="labelmask" x="662" y="578" width="146" height="12" rx="2"/><text class="message-label" x="735" y="587">CONSERVA LAS CONFIRMADAS</text>
+      <rect class="labelmask" x="672" y="618" width="126" height="12" rx="2"/><text class="message-label" x="735" y="627">BORRA AL FIN DEL DÍA</text>
+      <rect class="note-box" x="40" y="668" width="1200" height="58" rx="6"/><text class="note-text" x="58" y="689">Cada respuesta de la API trae el ID de época del servidor; una restauración lo cambia. Si no coincide, se reenvían las marcas confirmadas del día.</text><text class="note-text" x="58" y="707">Los upserts por UUID son idempotentes; las marcas confirmadas se guardan hasta el final del día y después se borran.</text>
+      <rect class="actor" x="30" y="82" width="160" height="68" rx="6"/><rect class="actor-tag" x="40" y="90" width="48" height="14" rx="2"/><text class="actor-tagtext" x="64" y="100">DATOS</text><text class="actor-name" x="110" y="124">PostgreSQL</text><text class="actor-sub" x="110" y="140">época de restauración</text>
+      <rect class="actor" x="280" y="82" width="160" height="68" rx="6"/><rect class="actor-tag" x="290" y="90" width="38" height="14" rx="2"/><text class="actor-tagtext" x="309" y="100">API</text><text class="actor-name" x="360" y="124">API Hono</text><text class="actor-sub" x="360" y="140">época + upsert de marcas</text>
+      <rect class="actor" x="530" y="82" width="160" height="68" rx="6"/><rect class="actor-tag" x="540" y="90" width="52" height="14" rx="2"/><text class="actor-tagtext" x="566" y="100">CLIENTE</text><text class="actor-name" x="610" y="124">App del chofer</text><text class="actor-sub" x="610" y="140">marcas confirmadas del día</text>
+      <rect class="actor" x="780" y="82" width="160" height="68" rx="6"/><rect class="actor-tag" x="790" y="90" width="48" height="14" rx="2"/><text class="actor-tagtext" x="814" y="100">DATOS</text><text class="actor-name" x="860" y="124">IndexedDB</text><text class="actor-sub" x="860" y="140">historial de marcas</text>
+      <rect class="actor" x="1030" y="82" width="160" height="68" rx="6"/><rect class="actor-tag" x="1040" y="90" width="52" height="14" rx="2"/><text class="actor-tagtext" x="1066" y="100">ACTOR</text><text class="actor-name" x="1110" y="124">Chofer</text><text class="actor-sub" x="1110" y="140">abre la app</text>
+      <line class="legendline" x1="40" y1="742" x2="1240" y2="742"/><text class="legend-title" x="40" y="764">REFERENCIAS</text><line x1="126" y1="761" x2="164" y2="761" stroke="#2e5aa8" stroke-width="1.2" marker-end="url(#offline-restore-arrow-link)"/><text class="legend" x="174" y="765">llamada / acción local</text><line x1="300" y1="761" x2="338" y2="761" stroke="#4f5d75" stroke-width="1.1" stroke-dasharray="5 4" marker-end="url(#offline-restore-arrow)"/><text class="legend" x="348" y="765">respuesta / restauración</text><rect x="496" y="756" width="14" height="10" rx="2" fill="rgba(191,69,32,.08)" stroke="#bf4520"/><text class="legend" x="518" y="765">época / upsert idempotente (clave)</text>
     </svg></div>
   </section>
 </main></body></html>
