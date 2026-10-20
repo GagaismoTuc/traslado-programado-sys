@@ -32,7 +32,11 @@
     ".github/workflows/**",
     "**/*.env*",
     "**/deploy/**",
-    "infra/**"
+    "infra/**",
+    "packages/api/drizzle/**",
+    "packages/api/db/**",
+    "packages/api/src/migrate.ts",
+    "packages/api/src/bootstrap.ts"
   ],
   "merge": true,
   "despliegue": {
