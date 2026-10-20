@@ -27,7 +27,7 @@ A person the family names as allowed to receive a Pasajero at home.
 _Avoid_: responsable, tutor (as a delivery role)
 
 **Receptor** (Receiver):
-The person who actually received a Pasajero when it was marked Entregado: an Adulto autorizado, the Destino, or, only when the Pasajero's Consentimiento allows it, another adult identified by name and DNI.
+The person who actually received a Pasajero when it was marked Entregado: an Adulto autorizado, the Destino, the receiving Chofer in a Traspaso, or, only when the Pasajero's Consentimiento allows it, another adult identified by name and DNI.
 _Avoid_: quien recibe, firmante
 
 **Adaptación** (Vehicle feature):
@@ -99,6 +99,10 @@ The Chofer's mark that a Pasajero was not there to be picked up.
 **Entregado** (Delivered):
 The Chofer's mark that a Pasajero was handed over at the end of a Traslado. Its time is the proof given to families and institutions.
 _Avoid_: llegó, presente
+
+**Traspaso** (Transfer):
+The handover of a Pasajero who is on board from one Chofer to another during a Traslado, for example when a Vehículo breaks down. It is recorded as an Entregado to the receiving Chofer and a Subió in the receiving Recorrido.
+_Avoid_: transbordo, cambio de vehículo
 
 **Incidente** (Incident):
 A problem reported by a Chofer during a Recorrido, such as a delay, a vehicle fault or an accident.
