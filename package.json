@@ -1,0 +1,22 @@
+{
+  "name": "traslado-programado",
+  "private": true,
+  "packageManager": "pnpm@11.28.4",
+  "engines": {
+    "node": "24.14.0"
+  },
+  "scripts": {
+    "build": "pnpm --filter @traslado/office build && pnpm --filter @traslado/driver build && pnpm --filter @traslado/api build",
+    "typecheck": "pnpm --filter @traslado/office typecheck && pnpm --filter @traslado/driver typecheck && pnpm --filter @traslado/api typecheck && pnpm --filter @traslado/shared typecheck",
+    "test": "pnpm --filter @traslado/office test && pnpm --filter @traslado/driver test && pnpm --filter @traslado/api test",
+    "db:generate": "pnpm --filter @traslado/api db:generate",
+    "db:migrate": "pnpm --filter @traslado/api db:migrate"
+  },
+  "devDependencies": {
+    "@types/node": "^24.0.0",
+    "@types/react": "^19.0.0",
+    "@types/react-dom": "^19.0.0",
+    "typescript": "^5.9.0",
+    "vitest": "^4.0.0"
+  }
+}

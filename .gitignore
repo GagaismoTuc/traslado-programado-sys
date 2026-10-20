@@ -1,3 +1,11 @@
+node_modules/
+dist/
+coverage/
+.env
+.env.*
+!.env.example
+.pnpm-store/
+*.log
 .orca-stack.local.json
 odd/
 .atl/
