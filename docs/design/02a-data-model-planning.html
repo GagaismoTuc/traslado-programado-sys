@@ -1,0 +1,130 @@
+<!doctype html>
+<html lang="es">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Modelo de datos de planificación | Traslado programado</title>
+  <link href="https://fonts.googleapis.com/css2?family=Instrument+Serif:ital@0;1&family=Geist:wght@400;500;600&family=Geist+Mono:wght@400;500;600&display=swap" rel="stylesheet">
+  <style>
+    :root{--paper:#f5f5f5;--ink:#2d3142;--muted:#4f5d75;--soft:#5a6580;--rule:rgba(45,49,66,.12);--accent:#bf4520;--accent-tint:rgba(191,69,32,.08);--sans:'Geist',system-ui,sans-serif;--serif:'Instrument Serif',serif;--mono:'Geist Mono',ui-monospace,monospace}
+    *{box-sizing:border-box}body{margin:0;background:var(--paper);color:var(--ink);font-family:var(--sans)}main{max-width:1360px;margin:0 auto;padding:48px 32px 72px}.eyebrow{margin:0 0 8px;color:var(--muted);font:500 8px var(--mono);letter-spacing:.18em;text-transform:uppercase}h1{margin:0;font:400 36px/1.1 var(--serif)}.intro{max-width:780px;color:var(--muted);font-size:14px;line-height:1.6;margin:12px 0 40px}.figure{margin:42px 0 56px}.figure h2{margin:0 0 6px;font:600 16px var(--sans)}.figure p{margin:0 0 14px;color:var(--muted);font-size:12px;line-height:1.5}.diagram-container{width:100%;overflow-x:auto;border-top:1px solid var(--rule);border-bottom:1px solid var(--rule)}svg{width:100%;min-width:1280px;display:block;height:auto}.entity{fill:#fff;stroke:rgba(45,49,66,.3);stroke-width:1}.entity-head{fill:rgba(45,49,66,.04)}.entity-focus{fill:var(--accent-tint);stroke:var(--accent);stroke-width:1.2}.tag{fill:var(--paper);stroke:rgba(79,93,117,.5);stroke-width:.8}.tagtext{fill:var(--muted);font:500 8px var(--mono);letter-spacing:.08em;text-anchor:middle}.name{fill:var(--ink);font:600 14px var(--sans);text-anchor:middle}.field{fill:var(--muted);font:400 9px var(--mono)}.note{fill:var(--soft);font:400 9px var(--sans)}.connector{fill:none;stroke:var(--muted);stroke-width:1.1}.labelmask{fill:var(--paper)}.cardinality{fill:var(--soft);font:400 8px var(--mono);text-anchor:middle}.legend-title{fill:var(--muted);font:500 8px var(--mono);letter-spacing:.16em}.legend{fill:var(--muted);font:400 8.5px var(--sans)}.legendline{stroke:var(--rule);stroke-width:1}
+    @media print{main{padding:16px}.diagram-container{overflow-x:visible}svg{min-width:0}}
+  </style>
+</head>
+<body><main>
+  <p class="eyebrow">Modelo de datos / planificación</p>
+  <h1>Cómo un Plan diario se convierte en Recorridos</h1>
+  <p class="intro">Dos vistas ER acotadas mantienen legible la cadena de planificación: Traslados con fecha, Recorridos versionados, asignaciones, restricciones y Ausencias.</p>
+
+  <section class="figure" aria-labelledby="planning-core-heading">
+    <h2 id="planning-core-heading">Cadena de planificación</h2>
+    <p>Se versiona el Recorrido, no el Plan diario. El Plan diario le da fecha a sus Traslados aunque queden sin asignar o cancelados.</p>
+    <div class="diagram-container">
+      <svg viewBox="0 0 1280 720" xmlns="http://www.w3.org/2000/svg" role="img" aria-labelledby="plan-core-title plan-core-desc">
+        <title id="plan-core-title">Modelo ER de la cadena de planificación</title>
+        <desc id="plan-core-desc">El Plan diario tiene muchos Recorridos y muchos Traslados con fecha. El Recorrido tiene versiones del plan y Paradas; cada Parada apunta a un Traslado, que pertenece a un Pasajero y a un Destino.</desc>
+        <defs>
+          <marker id="plan-core-arrow" markerWidth="8" markerHeight="6" refX="7" refY="3" orient="auto"><polygon points="0 0,8 3,0 6" fill="#4f5d75"/></marker>
+          <marker id="plan-core-arrow-accent" markerWidth="8" markerHeight="6" refX="7" refY="3" orient="auto"><polygon points="0 0,8 3,0 6" fill="#bf4520"/></marker>
+          <marker id="plan-core-arrow-link" markerWidth="8" markerHeight="6" refX="7" refY="3" orient="auto"><polygon points="0 0,8 3,0 6" fill="#2e5aa8"/></marker>
+        </defs>
+        <rect width="1280" height="720" fill="#f5f5f5"/>
+        <!-- Relationship connectors and cardinalities are behind the entity boxes. -->
+        <path class="connector" d="M220 194 H270"/>
+        <path class="connector" d="M450 194 H510"/>
+        <path class="connector" d="M730 194 H790"/>
+        <path class="connector" d="M885 260 V390"/>
+        <path class="connector" d="M790 450 H730"/>
+        <path class="connector" d="M900 540 V572 H380 Q372 572 372 564 V488 Q372 480 364 480"/>
+        <path class="connector" d="M100 240 V602 Q100 610 108 610 H1032 Q1040 610 1040 602 V473 Q1040 465 1032 465 H1010"/>
+        <rect class="labelmask" x="224" y="170" width="20" height="12" rx="2"/><text class="cardinality" x="234" y="179">1</text>
+        <rect class="labelmask" x="246" y="170" width="20" height="12" rx="2"/><text class="cardinality" x="256" y="179">N</text>
+        <rect class="labelmask" x="454" y="170" width="20" height="12" rx="2"/><text class="cardinality" x="464" y="179">1</text>
+        <rect class="labelmask" x="486" y="170" width="20" height="12" rx="2"/><text class="cardinality" x="496" y="179">N</text>
+        <rect class="labelmask" x="734" y="170" width="20" height="12" rx="2"/><text class="cardinality" x="744" y="179">1</text>
+        <rect class="labelmask" x="766" y="170" width="20" height="12" rx="2"/><text class="cardinality" x="776" y="179">N</text>
+        <rect class="labelmask" x="844" y="286" width="24" height="12" rx="2"/><text class="cardinality" x="856" y="295">N</text>
+        <rect class="labelmask" x="844" y="350" width="24" height="12" rx="2"/><text class="cardinality" x="856" y="359">1</text>
+        <rect class="labelmask" x="738" y="426" width="24" height="12" rx="2"/><text class="cardinality" x="750" y="435">1</text>
+        <rect class="labelmask" x="762" y="426" width="24" height="12" rx="2"/><text class="cardinality" x="774" y="435">N</text>
+        <rect class="labelmask" x="574" y="548" width="82" height="12" rx="2"/><text class="cardinality" x="615" y="557">DESTINO</text>
+        <rect class="labelmask" x="910" y="544" width="24" height="12" rx="2"/><text class="cardinality" x="922" y="553">N</text>
+        <rect class="labelmask" x="332" y="520" width="24" height="12" rx="2"/><text class="cardinality" x="344" y="529">1</text>
+        <rect class="labelmask" x="108" y="252" width="24" height="12" rx="2"/><text class="cardinality" x="120" y="261">1</text>
+        <rect class="labelmask" x="1014" y="444" width="24" height="12" rx="2"/><text class="cardinality" x="1026" y="453">N</text>
+        <!-- Entities. -->
+        <rect class="entity" x="40" y="150" width="180" height="90" rx="6"/><rect class="entity-head" x="41" y="151" width="178" height="34" rx="5"/>
+        <rect class="tag" x="50" y="153" width="48" height="10" rx="2"/><text class="tagtext" x="74" y="163">ENTIDAD</text><text class="name" x="130" y="177">Plan diario</text><text class="field" x="56" y="215">plan del día / fecha</text>
+        <rect class="entity" x="270" y="150" width="180" height="90" rx="6"/><rect class="entity-head" x="271" y="151" width="178" height="34" rx="5"/>
+        <rect class="tag" x="280" y="153" width="48" height="10" rx="2"/><text class="tagtext" x="304" y="163">ENTIDAD</text><text class="name" x="360" y="177">Recorrido</text><text class="field" x="286" y="215">vehículo + chofer + franja</text>
+        <rect class="entity" x="510" y="130" width="220" height="130" rx="6"/><rect class="entity-head" x="511" y="131" width="218" height="34" rx="5"/>
+        <rect class="tag" x="520" y="133" width="48" height="10" rx="2"/><text class="tagtext" x="544" y="143">ENTIDAD</text><text class="name" x="620" y="157">Versión del plan</text>
+        <text class="field" x="526" y="188">versión N</text><text class="field" x="526" y="204">published_at</text><text class="field" x="526" y="220">published_by</text><text class="field" x="526" y="236">override_reason</text>
+        <rect class="entity" x="790" y="130" width="190" height="130" rx="6"/><rect class="entity-head" x="791" y="131" width="188" height="34" rx="5"/>
+        <rect class="tag" x="800" y="133" width="48" height="10" rx="2"/><text class="tagtext" x="824" y="143">ENTIDAD</text><text class="name" x="885" y="157">Parada</text>
+        <text class="field" x="806" y="188">orden</text><text class="field" x="806" y="204">tipo: subida / bajada</text><text class="field" x="806" y="220">hora planificada</text><text class="field" x="806" y="236">bloqueada al cumplirse</text>
+        <rect class="entity" x="790" y="390" width="220" height="150" rx="6"/><rect class="entity-head" x="791" y="391" width="218" height="34" rx="5"/>
+        <rect class="tag" x="800" y="393" width="48" height="10" rx="2"/><text class="tagtext" x="824" y="403">ENTIDAD</text><text class="name" x="900" y="417">Traslado</text>
+        <text class="field" x="806" y="450">sentido: entrada / salida</text><text class="field" x="806" y="468">hora objetivo local</text><text class="field" x="806" y="486">km planificados</text><text class="field" x="806" y="504">estado</text><text class="field" x="806" y="522">con fecha aunque no se asigne</text>
+        <rect class="entity" x="510" y="390" width="220" height="110" rx="6"/><rect class="entity-head" x="511" y="391" width="218" height="34" rx="5"/>
+        <rect class="tag" x="520" y="393" width="48" height="10" rx="2"/><text class="tagtext" x="544" y="403">ENTIDAD</text><text class="name" x="620" y="417">Pasajero</text><text class="field" x="526" y="455">datos del pasajero</text>
+        <rect class="entity" x="270" y="390" width="190" height="90" rx="6"/><rect class="entity-head" x="271" y="391" width="188" height="34" rx="5"/>
+        <rect class="tag" x="280" y="393" width="48" height="10" rx="2"/><text class="tagtext" x="304" y="403">ENTIDAD</text><text class="name" x="365" y="417">Destino</text><text class="field" x="286" y="455">datos del destino</text>
+        <line class="legendline" x1="40" y1="652" x2="1240" y2="652"/>
+        <text class="legend-title" x="40" y="674">REFERENCIAS</text>
+        <rect x="126" y="666" width="14" height="10" rx="2" fill="#fff" stroke="rgba(45,49,66,.3)"/><text class="legend" x="148" y="675">entidad / atributos debajo del título</text>
+        <line x1="420" y1="671" x2="460" y2="671" stroke="#4f5d75" stroke-width="1.1"/><text class="legend" x="470" y="675">relación</text>
+        <text class="legend" x="610" y="675">1 / N = cardinalidad en cada extremo</text>
+      </svg>
+    </div>
+  </section>
+
+  <section class="figure" aria-labelledby="planning-constraints-heading">
+    <h2 id="planning-constraints-heading">Asignaciones, restricciones y excepciones</h2>
+    <p>Un Vehículo tiene N Recorridos; cada Recorrido tiene 1 Vehículo. Las Adaptaciones del pasajero y del vehículo son relaciones n:m independientes; una Ausencia pertenece a un Traslado.</p>
+    <div class="diagram-container">
+      <svg viewBox="0 0 1280 720" xmlns="http://www.w3.org/2000/svg" role="img" aria-labelledby="plan-constraints-title plan-constraints-desc">
+        <title id="plan-constraints-title">Asignaciones y restricciones</title>
+        <desc id="plan-constraints-desc">Un Vehículo tiene muchos Recorridos y cada Recorrido tiene un Vehículo y un Chofer; las Adaptaciones se relacionan con Pasajeros y Vehículos, y las Ausencias con Traslados.</desc>
+        <defs>
+          <marker id="plan-constraints-arrow" markerWidth="8" markerHeight="6" refX="7" refY="3" orient="auto"><polygon points="0 0,8 3,0 6" fill="#4f5d75"/></marker>
+          <marker id="plan-constraints-arrow-accent" markerWidth="8" markerHeight="6" refX="7" refY="3" orient="auto"><polygon points="0 0,8 3,0 6" fill="#bf4520"/></marker>
+          <marker id="plan-constraints-arrow-link" markerWidth="8" markerHeight="6" refX="7" refY="3" orient="auto"><polygon points="0 0,8 3,0 6" fill="#2e5aa8"/></marker>
+        </defs>
+        <rect width="1280" height="720" fill="#f5f5f5"/>
+        <path class="connector" d="M300 200 H520"/><path class="connector" d="M740 200 H980"/>
+        <path class="connector" d="M190 250 V322 Q190 330 198 330 H612 Q620 330 620 338 V390"/>
+        <path class="connector" d="M400 450 H520"/><path class="connector" d="M1020 500 V530"/>
+        <rect class="labelmask" x="326" y="176" width="20" height="12" rx="2"/><text class="cardinality" x="336" y="185">1</text>
+        <rect class="labelmask" x="474" y="176" width="20" height="12" rx="2"/><text class="cardinality" x="484" y="185">N</text>
+        <rect class="labelmask" x="764" y="176" width="20" height="12" rx="2"/><text class="cardinality" x="774" y="185">N</text>
+        <rect class="labelmask" x="936" y="176" width="20" height="12" rx="2"/><text class="cardinality" x="946" y="185">1</text>
+        <rect class="labelmask" x="374" y="306" width="70" height="12" rx="2"/><text class="cardinality" x="409" y="315">M:N</text>
+        <rect class="labelmask" x="430" y="426" width="60" height="12" rx="2"/><text class="cardinality" x="460" y="435">N:M</text>
+        <rect class="labelmask" x="990" y="464" width="24" height="12" rx="2"/><text class="cardinality" x="1002" y="473">1</text>
+        <rect class="labelmask" x="1028" y="504" width="24" height="12" rx="2"/><text class="cardinality" x="1040" y="513">N</text>
+        <!-- Assignment and constraint entities. -->
+        <rect class="entity" x="80" y="150" width="220" height="100" rx="6"/><rect class="entity-head" x="81" y="151" width="218" height="34" rx="5"/>
+        <rect class="tag" x="90" y="153" width="48" height="10" rx="2"/><text class="tagtext" x="114" y="163">ENTIDAD</text><text class="name" x="190" y="177">Vehículo</text><text class="field" x="96" y="216">patente / modelo / asientos</text>
+        <rect class="entity" x="520" y="150" width="220" height="100" rx="6"/><rect class="entity-head" x="521" y="151" width="218" height="34" rx="5"/>
+        <rect class="tag" x="530" y="153" width="48" height="10" rx="2"/><text class="tagtext" x="554" y="163">ENTIDAD</text><text class="name" x="630" y="177">Recorrido</text><text class="field" x="536" y="216">vehículo + chofer + franja</text>
+        <rect class="entity" x="980" y="150" width="220" height="100" rx="6"/><rect class="entity-head" x="981" y="151" width="218" height="34" rx="5"/>
+        <rect class="tag" x="990" y="153" width="48" height="10" rx="2"/><text class="tagtext" x="1014" y="163">ENTIDAD</text><text class="name" x="1090" y="177">Chofer</text><text class="field" x="996" y="216">chofer asignado</text>
+        <rect class="entity" x="80" y="370" width="320" height="180" rx="6"/><rect class="entity-head" x="81" y="371" width="318" height="34" rx="5"/>
+        <rect class="tag" x="90" y="373" width="48" height="10" rx="2"/><text class="tagtext" x="114" y="383">ENTIDAD</text><text class="name" x="240" y="397">Pasajero</text>
+        <text class="field" x="96" y="428">pin del domicilio: lat / lng; dirección</text><text class="field" x="96" y="446">indicaciones de acceso; requiere Acompañante</text>
+        <text class="field" x="96" y="464">Tiempo máximo a bordo</text><text class="field" x="96" y="482">minutos de subida / bajada</text>
+        <text class="field" x="96" y="500">alerta médica corta; sin diagnóstico</text>
+        <rect class="entity" x="520" y="390" width="220" height="100" rx="6"/><rect class="entity-head" x="521" y="391" width="218" height="34" rx="5"/>
+        <rect class="tag" x="530" y="393" width="48" height="10" rx="2"/><text class="tagtext" x="554" y="403">ENTIDAD</text><text class="name" x="630" y="417">Adaptación</text><text class="field" x="536" y="456">requiere / tiene</text>
+        <rect class="entity" x="900" y="350" width="240" height="150" rx="6"/><rect class="entity-head" x="901" y="351" width="238" height="34" rx="5"/>
+        <rect class="tag" x="910" y="353" width="48" height="10" rx="2"/><text class="tagtext" x="934" y="363">ENTIDAD</text><text class="name" x="1020" y="377">Traslado</text><text class="field" x="916" y="420">sentido / hora objetivo local</text><text class="field" x="916" y="438">km planificados / estado</text>
+        <rect class="entity" x="900" y="530" width="240" height="80" rx="6"/><rect class="entity-head" x="901" y="531" width="238" height="34" rx="5"/>
+        <rect class="tag" x="910" y="533" width="48" height="10" rx="2"/><text class="tagtext" x="934" y="543">ENTIDAD</text><text class="name" x="1020" y="557">Ausencia</text><text class="field" x="916" y="587">aviso de ausencia</text>
+        <line class="legendline" x1="40" y1="652" x2="1240" y2="652"/>
+        <text class="legend-title" x="40" y="674">REFERENCIAS</text><rect x="126" y="666" width="14" height="10" rx="2" fill="#fff" stroke="rgba(45,49,66,.3)"/><text class="legend" x="148" y="675">entidad</text>
+        <line x1="250" y1="671" x2="290" y2="671" stroke="#4f5d75" stroke-width="1.1"/><text class="legend" x="300" y="675">relación</text><text class="legend" x="440" y="675">1 / N = cardinalidad; M:N = muchos a muchos</text>
+      </svg>
+    </div>
+  </section>
+</main></body></html>

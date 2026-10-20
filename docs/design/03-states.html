@@ -1,0 +1,121 @@
+<!doctype html>
+<html lang="es">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Estados | Traslado programado</title>
+  <link href="https://fonts.googleapis.com/css2?family=Instrument+Serif:ital@0;1&family=Geist:wght@400;500;600&family=Geist+Mono:wght@400;500;600&display=swap" rel="stylesheet">
+  <style>
+    :root{--paper:#f5f5f5;--ink:#2d3142;--muted:#4f5d75;--soft:#5a6580;--rule:rgba(45,49,66,.12);--accent:#bf4520;--accent-tint:rgba(191,69,32,.08);--sans:'Geist',system-ui,sans-serif;--serif:'Instrument Serif',serif;--mono:'Geist Mono',ui-monospace,monospace}
+    *{box-sizing:border-box}body{margin:0;background:var(--paper);color:var(--ink);font-family:var(--sans)}main{max-width:1360px;margin:0 auto;padding:48px 32px 72px}.eyebrow{margin:0 0 8px;color:var(--muted);font:500 8px var(--mono);letter-spacing:.18em;text-transform:uppercase}h1{margin:0;font:400 36px/1.1 var(--serif)}.intro{max-width:780px;color:var(--muted);font-size:14px;line-height:1.6;margin:12px 0 40px}.figure{margin:42px 0 56px}.figure h2{margin:0 0 6px;font:600 16px var(--sans)}.figure p{margin:0 0 14px;color:var(--muted);font-size:12px;line-height:1.5}.diagram-container{width:100%;overflow-x:auto;border-top:1px solid var(--rule);border-bottom:1px solid var(--rule)}svg{width:100%;min-width:1280px;display:block;height:auto}.state{fill:#fff;stroke:rgba(45,49,66,.32);stroke-width:1}.state-focus{fill:var(--accent-tint);stroke:var(--accent);stroke-width:1.2}.state-name{fill:var(--ink);font:600 12px var(--sans);text-anchor:middle}.connector{fill:none;stroke:var(--muted);stroke-width:1.2}.connector-focus{fill:none;stroke:var(--accent);stroke-width:1.3}.labelmask{fill:var(--paper)}.label{fill:var(--soft);font:400 8px var(--mono);letter-spacing:.04em;text-anchor:middle}.label-focus{fill:var(--accent);font:400 8px var(--mono);letter-spacing:.04em;text-anchor:middle}.note-box{fill:#fff;stroke:rgba(45,49,66,.24);stroke-width:1}.note-focus{fill:var(--accent-tint);stroke:var(--accent);stroke-width:1}.note-title{fill:var(--ink);font:600 12px var(--sans)}.note-text{fill:var(--muted);font:400 9px var(--sans)}.legend-title{fill:var(--muted);font:500 8px var(--mono);letter-spacing:.16em}.legend{fill:var(--muted);font:400 8.5px var(--sans)}.legendline{stroke:var(--rule);stroke-width:1}
+    @media print{main{padding:16px}.diagram-container{overflow-x:visible}svg{min-width:0}}
+  </style>
+</head>
+<body><main>
+  <p class="eyebrow">Máquinas de estado / ejecución</p>
+  <h1>¿Qué transiciones se permiten?</h1>
+  <p class="intro">El estado del Traslado y el del Recorrido son dos máquinas separadas en el servidor. "Pendiente de sincronizar" es una marca local del celular, no otro estado del servidor.</p>
+
+  <section class="figure" aria-labelledby="transfer-state-heading">
+    <h2 id="transfer-state-heading">Traslado</h2>
+    <p>Un Traslado puede pasar a otro Recorrido solo mientras está Planificado. Las correcciones agregan un evento nuevo y conservan la Marca original.</p>
+    <div class="diagram-container">
+      <svg viewBox="0 0 1280 720" xmlns="http://www.w3.org/2000/svg" role="img" aria-labelledby="state-transfer-title state-transfer-desc">
+        <title id="state-transfer-title">Máquina de estados del Traslado</title>
+        <desc id="state-transfer-desc">Un Traslado pasa de Planificado a Subió y a Entregado, o queda Ausente o Cancelado por Ausencia; puede pasar a otro Recorrido solo mientras está Planificado. El Chofer puede corregir su última marca dentro de los dos minutos; después solo la Oficina la corrige, con un motivo, agregando un evento que apunta a la Marca original.</desc>
+        <defs>
+          <marker id="state-transfer-arrow" markerWidth="8" markerHeight="6" refX="7" refY="3" orient="auto"><polygon points="0 0,8 3,0 6" fill="#4f5d75"/></marker>
+          <marker id="state-transfer-arrow-accent" markerWidth="8" markerHeight="6" refX="7" refY="3" orient="auto"><polygon points="0 0,8 3,0 6" fill="#bf4520"/></marker>
+          <marker id="state-transfer-arrow-link" markerWidth="8" markerHeight="6" refX="7" refY="3" orient="auto"><polygon points="0 0,8 3,0 6" fill="#2e5aa8"/></marker>
+        </defs>
+        <rect width="1280" height="720" fill="#f5f5f5"/>
+        <path class="connector" d="M300 324 H410" marker-end="url(#state-transfer-arrow)"/>
+        <path class="connector" d="M630 324 H740" marker-end="url(#state-transfer-arrow)"/>
+        <path class="connector" d="M190 280 V233" marker-end="url(#state-transfer-arrow)"/>
+        <path class="connector" d="M190 368 V465" marker-end="url(#state-transfer-arrow)"/>
+        <path class="connector" d="M115 280 V258 Q115 250 123 250 H152 Q160 250 160 258 V280" marker-end="url(#state-transfer-arrow)"/>
+        <path class="connector" d="M300 190 H326 Q334 190 334 198 V302 Q334 310 326 310 H300" marker-end="url(#state-transfer-arrow)"/>
+        <path class="connector" d="M740 302 V260 H638 Q630 260 630 268 V302" marker-end="url(#state-transfer-arrow)"/>
+        <path class="connector" d="M685 324 V430 H980 V345 H990"/>
+        <rect class="labelmask" x="308" y="300" width="90" height="12" rx="2"/><text class="label" x="353" y="309">MARCA SUBIÓ</text>
+        <rect class="labelmask" x="648" y="300" width="88" height="12" rx="2"/><text class="label" x="692" y="309">ENTREGADO</text>
+        <rect class="labelmask" x="202" y="246" width="70" height="12" rx="2"/><text class="label" x="237" y="255">NO ESTABA</text>
+        <rect class="labelmask" x="202" y="400" width="72" height="12" rx="2"/><text class="label" x="238" y="409">AUSENCIA</text>
+        <rect class="labelmask" x="86" y="237" width="100" height="12" rx="2"/><text class="label" x="136" y="246">CAMBIA DE RECORRIDO</text>
+        <rect class="labelmask" x="340" y="246" width="96" height="12" rx="2"/><text class="label" x="388" y="255">CORRECCIÓN</text>
+        <rect class="labelmask" x="635" y="238" width="100" height="12" rx="2"/><text class="label" x="685" y="247">CORRECCIÓN</text>
+        <!-- States. -->
+        <rect class="state" x="80" y="280" width="220" height="88" rx="8"/><text class="state-name" x="190" y="327">Planificado</text>
+        <rect class="state" x="410" y="280" width="220" height="88" rx="8"/><text class="state-name" x="520" y="327">Subió</text>
+        <rect class="state-focus" x="740" y="280" width="220" height="88" rx="8"/><text class="state-name" x="850" y="327">Entregado</text>
+        <rect class="state" x="80" y="145" width="220" height="88" rx="8"/><text class="state-name" x="190" y="192">Ausente</text>
+        <rect class="state" x="80" y="465" width="220" height="88" rx="8"/><text class="state-name" x="190" y="512">Cancelado por Ausencia</text>
+        <!-- Consent is a guard, not another status. -->
+        <rect class="note-box" x="990" y="274" width="240" height="142" rx="6"/>
+        <text class="note-title" x="1008" y="302">Entrega a otro adulto</text>
+        <text class="note-text" x="1008" y="328">Solo si el Consentimiento</text><text class="note-text" x="1008" y="344">lo permite.</text>
+        <text class="note-text" x="1008" y="374">Si no: se bloquea; el Chofer</text><text class="note-text" x="1008" y="390">llama a la Oficina.</text>
+        <rect class="note-box" x="410" y="455" width="430" height="155" rx="6"/>
+        <text class="note-title" x="430" y="480">Las correcciones se agregan, nunca editan</text>
+        <text class="note-text" x="430" y="508">El Chofer deshace su última marca dentro de 2 minutos.</text>
+        <text class="note-text" x="430" y="526">Después solo la Oficina corrige, con un motivo.</text>
+        <text class="note-text" x="430" y="544">La Corrección apunta a la Marca original.</text>
+        <text class="note-text" x="430" y="572">"Pendiente de sincronizar" es local del celular, no un estado del servidor.</text>
+        <line class="legendline" x1="40" y1="652" x2="1240" y2="652"/>
+        <text class="legend-title" x="40" y="674">REFERENCIAS</text>
+        <rect x="126" y="666" width="14" height="10" rx="4" fill="#fff" stroke="rgba(45,49,66,.32)"/><text class="legend" x="148" y="675">estado del servidor</text>
+        <rect x="270" y="666" width="14" height="10" rx="2" fill="#fff" stroke="rgba(45,49,66,.24)"/><text class="legend" x="292" y="675">condición / nota local</text>
+        <line x1="470" y1="671" x2="510" y2="671" stroke="#4f5d75" stroke-width="1.2" marker-end="url(#state-transfer-arrow)"/><text class="legend" x="520" y="675">evento o transición</text>
+      </svg>
+    </div>
+  </section>
+
+  <section class="figure" aria-labelledby="route-state-heading">
+    <h2 id="route-state-heading">Recorrido</h2>
+    <p>El Recorrido tiene cuatro estados; publicar la versión N+1 cambia un atributo en Publicado o En curso.</p>
+    <div class="diagram-container">
+      <svg viewBox="0 0 1280 720" xmlns="http://www.w3.org/2000/svg" role="img" aria-labelledby="state-route-title state-route-desc">
+        <title id="state-route-title">Máquina de estados del Recorrido</title>
+        <desc id="state-route-desc">Un Recorrido pasa de Borrador a Publicado, En curso y Cerrado. Publicar crea la versión N+1 como un lazo con condición sobre Publicado y En curso. Cerrar se bloquea, con alarma a la Oficina, si algún Traslado sigue Planificado o está en Subió sin Entregado.</desc>
+        <defs>
+          <marker id="state-route-arrow" markerWidth="8" markerHeight="6" refX="7" refY="3" orient="auto"><polygon points="0 0,8 3,0 6" fill="#4f5d75"/></marker>
+          <marker id="state-route-arrow-accent" markerWidth="8" markerHeight="6" refX="7" refY="3" orient="auto"><polygon points="0 0,8 3,0 6" fill="#bf4520"/></marker>
+          <marker id="state-route-arrow-link" markerWidth="8" markerHeight="6" refX="7" refY="3" orient="auto"><polygon points="0 0,8 3,0 6" fill="#2e5aa8"/></marker>
+        </defs>
+        <rect width="1280" height="720" fill="#f5f5f5"/>
+        <circle cx="56" cy="324" r="6" fill="#2d3142"/>
+        <path class="connector" d="M62 324 H80" marker-end="url(#state-route-arrow)"/>
+        <path class="connector" d="M230 324 H340" marker-end="url(#state-route-arrow)"/>
+        <path class="connector" d="M510 324 H650" marker-end="url(#state-route-arrow)"/>
+        <path class="connector-focus" d="M820 324 H1010" marker-end="url(#state-route-arrow-accent)"/>
+        <path class="connector" d="M390 280 V250 Q390 242 398 242 H452 Q460 242 460 250 V280" marker-end="url(#state-route-arrow)"/>
+        <path class="connector" d="M700 280 V250 Q700 242 708 242 H762 Q770 242 770 250 V280" marker-end="url(#state-route-arrow)"/>
+        <path class="connector-focus" d="M1180 324 H1222" marker-end="url(#state-route-arrow-accent)"/>
+        <circle cx="1230" cy="324" r="8" fill="none" stroke="#bf4520" stroke-width="1.2"/><circle cx="1230" cy="324" r="5" fill="#bf4520"/>
+        <path class="connector-focus" d="M1000 440 V324"/>
+        <rect class="labelmask" x="258" y="300" width="54" height="12" rx="2"/><text class="label" x="285" y="309">PUBLICAR</text>
+        <rect class="labelmask" x="555" y="300" width="50" height="12" rx="2"/><text class="label" x="580" y="309">INICIAR</text>
+        <rect class="labelmask" x="873" y="300" width="84" height="12" rx="2"/><text class="label-focus" x="915" y="309">CERRAR</text>
+        <rect class="labelmask" x="365" y="214" width="120" height="12" rx="2"/><text class="label" x="425" y="223">PUBLICAR N+1</text>
+        <rect class="labelmask" x="675" y="214" width="120" height="12" rx="2"/><text class="label" x="735" y="223">PUBLICAR N+1</text>
+        <!-- Version is an attribute on these states, not a separate Recorrido state. -->
+        <rect class="state" x="80" y="280" width="150" height="88" rx="8"/><text class="state-name" x="155" y="327">Borrador</text>
+        <rect class="state" x="340" y="280" width="170" height="88" rx="8"/><text class="state-name" x="425" y="319">Publicado</text><text class="label" x="425" y="341">VERSIÓN N</text>
+        <rect class="state" x="650" y="280" width="170" height="88" rx="8"/><text class="state-name" x="735" y="319">En curso</text><text class="label" x="735" y="341">VERSIÓN N</text>
+        <rect class="state-focus" x="1010" y="280" width="170" height="88" rx="8"/><text class="state-name" x="1095" y="327">Cerrado</text>
+        <rect class="note-focus" x="260" y="440" width="760" height="160" rx="6"/>
+        <text class="note-title" x="284" y="466">Condición para publicar y para cerrar</text>
+        <text class="note-text" x="284" y="490">PUBLICAR y los dos lazos: pasa el validador, o la Oficina fuerza con un motivo registrado.</text>
+        <text class="note-text" x="284" y="514">Cada cambio publica la versión N+1; la versión es un atributo, no un estado.</text>
+        <text class="note-text" x="284" y="538">Cerrar se bloquea con alarma a la Oficina si algún Traslado sigue Planificado o está en Subió sin Entregado.</text>
+        <text class="note-text" x="284" y="562">Antes: el Chofer marca Ausente, o la Oficina reasigna o cancela el Traslado.</text>
+        <line class="legendline" x1="40" y1="652" x2="1240" y2="652"/>
+        <text class="legend-title" x="40" y="674">REFERENCIAS</text>
+        <circle cx="136" cy="671" r="5" fill="#2d3142"/><text class="legend" x="150" y="675">inicio</text>
+        <rect x="220" y="666" width="14" height="10" rx="4" fill="#fff" stroke="rgba(45,49,66,.32)"/><text class="legend" x="242" y="675">estado del servidor</text>
+        <rect x="368" y="666" width="14" height="10" rx="2" fill="rgba(191,69,32,.08)" stroke="#bf4520"/><text class="legend" x="390" y="675">final / bloqueo de cierre</text>
+        <circle cx="590" cy="671" r="7" fill="none" stroke="#bf4520"/><circle cx="590" cy="671" r="4" fill="#bf4520"/><text class="legend" x="604" y="675">fin</text>
+      </svg>
+    </div>
+  </section>
+</main></body></html>
