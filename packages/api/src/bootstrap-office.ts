@@ -43,6 +43,16 @@ export async function runBootstrapOffice(pool: BootstrapPool, args: string[], en
   }
 }
 
+export async function runBootstrapOfficeCommand(
+  pool: BootstrapPool,
+  args: string[],
+  env: Environment,
+  writeOutput: (message: string) => void = (message) => console.info(message),
+) {
+  const user = await runBootstrapOffice(pool, args, env);
+  writeOutput(`Created initial Office account: ${user.username}`);
+}
+
 function required(name: string, env: Environment) {
   const value = env[name];
   if (!value) throw new Error(`${name} is required`);
@@ -52,8 +62,7 @@ function required(name: string, env: Environment) {
 async function main() {
   const pool = new Pool({ connectionString: required("BOOTSTRAP_DATABASE_URL", process.env), options: "-c timezone=UTC" });
   try {
-    const user = await runBootstrapOffice(pool, process.argv.slice(2), process.env);
-    console.info(`Created initial Office account: ${user.username}`);
+    await runBootstrapOfficeCommand(pool, process.argv.slice(2), process.env);
   } finally {
     await pool.end();
   }

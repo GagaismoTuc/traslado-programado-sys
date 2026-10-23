@@ -12,20 +12,25 @@ afterAll(async () => {
   await migrationPool.end();
 });
 
-describe("initial Oficina bootstrap command", () => {
-  it("creates the first Oficina from a username argument and password environment variable", async () => {
-    const { runBootstrapOffice } = await import("../src/bootstrap-office.js");
+describe("initial Office bootstrap command", () => {
+  it("creates the first Office account from a username argument and password environment variable", async () => {
+    const { runBootstrapOfficeCommand } = await import("../src/bootstrap-office.js");
     const password = "first-office-secret";
+    const output: string[] = [];
 
-    const created = await runBootstrapOffice(migrationPool, ["First.Office"], {
-      BOOTSTRAP_OFFICE_PASSWORD: password,
-    });
+    await runBootstrapOfficeCommand(
+      migrationPool,
+      ["First.Office"],
+      { BOOTSTRAP_OFFICE_PASSWORD: password },
+      (message) => output.push(message),
+    );
     const users = await migrationPool.query("SELECT username, role, password_hash FROM users");
     const audit = await migrationPool.query(
       "SELECT actor_user_id, actor_label, entity, action, after_data FROM change_log",
     );
 
-    expect(created.username).toBe("first.office");
+    expect(output).toEqual(["Created initial Office account: first.office"]);
+    expect(output.join(" ")).not.toContain(password);
     expect(users.rows).toHaveLength(1);
     expect(users.rows[0].role).toBe("office");
     expect(users.rows[0].password_hash).not.toBe(password);
@@ -39,10 +44,9 @@ describe("initial Oficina bootstrap command", () => {
       after_data: { username: "first.office", role: "office" },
     });
     expect(JSON.stringify(audit.rows)).not.toContain(password);
-    expect(JSON.stringify(created)).not.toContain(password);
   });
 
-  it("refuses when an Oficina account already exists and does not accept a password argument", async () => {
+  it("refuses when an Office account already exists and does not accept a password argument", async () => {
     const { runBootstrapOffice } = await import("../src/bootstrap-office.js");
     await migrationPool.query("INSERT INTO users (username, password_hash, role) VALUES ($1, $2, 'office')", [
       "existing-office",
@@ -67,7 +71,7 @@ describe("initial Oficina bootstrap command", () => {
     expect(audit.rows[0].count).toBe(0);
   });
 
-  it("serializes concurrent commands so only one initial Oficina account is created", async () => {
+  it("serializes concurrent commands so only one initial Office account is created", async () => {
     const { runBootstrapOffice } = await import("../src/bootstrap-office.js");
     const outcomes = await Promise.allSettled([
       runBootstrapOffice(migrationPool, ["first-office"], { BOOTSTRAP_OFFICE_PASSWORD: "first-secret" }),
