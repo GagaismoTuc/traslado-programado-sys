@@ -92,6 +92,16 @@ describe("API test seam", () => {
     expect(() => readConfig({ DATABASE_URL: "postgres://app:secret@localhost:5432/app" } as NodeJS.ProcessEnv)).toThrow("SERVER_EPOCH is required");
   });
 
+  it("reads the configured trusted browser origins", () => {
+    expect(readConfig({
+      SERVER_EPOCH: "epoch",
+      DATABASE_URL: "postgres://app:secret@localhost:5432/app",
+      OSRM_URL: "http://127.0.0.1:5000",
+      VROOM_URL: "http://127.0.0.1:3001",
+      AUTH_ALLOWED_ORIGINS: "https://office.example,https://driver.example",
+    } as NodeJS.ProcessEnv).trustedOrigins).toEqual(["https://office.example", "https://driver.example"]);
+  });
+
   it("requires OSRM_URL and VROOM_URL before the server can start", () => {
     const environment = { SERVER_EPOCH: "routing", DATABASE_URL: "postgres://app:secret@localhost:5432/app" };
     expect(() => readConfig({ ...environment, VROOM_URL: "http://127.0.0.1:3001" } as NodeJS.ProcessEnv)).toThrow("OSRM_URL must be a valid URL");

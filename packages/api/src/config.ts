@@ -14,7 +14,29 @@ export type ServerConfig = {
   osrmUrl: string;
   vroomUrl: string;
   port: number;
+  trustedOrigins: string[];
 };
+
+const DEFAULT_TRUSTED_ORIGINS = [
+  "http://localhost:5173",
+  "http://localhost:5174",
+  "http://127.0.0.1:5173",
+  "http://127.0.0.1:5174",
+];
+
+function readTrustedOrigins(value: string | undefined) {
+  if (!value?.trim()) return DEFAULT_TRUSTED_ORIGINS;
+  return value.split(",").map((entry) => {
+    const origin = entry.trim();
+    try {
+      const url = new URL(origin);
+      if (url.origin !== origin || !["http:", "https:"].includes(url.protocol)) throw new Error();
+      return origin;
+    } catch {
+      throw new Error("AUTH_ALLOWED_ORIGINS must be a comma-separated list of origins");
+    }
+  });
+}
 
 export function readConfig(environment: NodeJS.ProcessEnv = process.env): ServerConfig {
   if (!environment.SERVER_EPOCH?.trim()) throw new Error("SERVER_EPOCH is required");
@@ -30,5 +52,6 @@ export function readConfig(environment: NodeJS.ProcessEnv = process.env): Server
     osrmUrl: result.data.OSRM_URL,
     vroomUrl: result.data.VROOM_URL,
     port: result.data.PORT,
+    trustedOrigins: readTrustedOrigins(environment.AUTH_ALLOWED_ORIGINS),
   };
 }
