@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 import {
   type ServerEpoch,
   validateRoute,
+  parseTimeToMinutes,
   addCapacity,
   subtractCapacity,
   isCapacityExceeded,
@@ -11,6 +12,7 @@ import {
   type Vehicle,
   type Transfer,
   type CapacityVector,
+  type Stop,
 } from "./index.js";
 
 describe("Route validator and capacity vector", () => {
@@ -77,6 +79,32 @@ describe("Route validator and capacity vector", () => {
     expect(violations).toHaveLength(1);
     expect(violations[0].rule).toBe("max_ride_time_exceeded");
     expect(violations[0].details?.rideTimeMinutes).toBe(31);
+  });
+
+  it("R2 with epoch-millisecond numbers (Date.getTime())", () => {
+    const t: Transfer = { id: "t", passengerId: "p" };
+    const p0 = Date.parse("2026-10-23T08:00:00Z");
+    const route: Stop[] = [
+      { id: "a", transferId: "t", type: "pickup", plannedTime: p0 },
+      { id: "b", transferId: "t", type: "dropoff", plannedTime: p0 + 30 * 60_000 },
+    ];
+    expect(validateRoute({ route, passengers: [{ id: "p", maxRideTimeMinutes: 45 }], vehicle: { id: "v", capacity: { seats: 4 } }, transfers: [t] })).toEqual([]);
+  });
+
+  it("parseTimeToMinutes parses Date, epoch milliseconds, epoch seconds, HH:mm, and relative minutes correctly", () => {
+    const epochMs = Date.parse("2026-10-23T08:00:00Z");
+    const epochSec = Math.floor(epochMs / 1000);
+    const expectedMinutes = epochMs / 60000;
+
+    expect(parseTimeToMinutes(new Date(epochMs))).toBe(expectedMinutes);
+    expect(parseTimeToMinutes(epochMs)).toBe(expectedMinutes);
+    expect(parseTimeToMinutes(String(epochMs))).toBe(expectedMinutes);
+    expect(parseTimeToMinutes(epochSec)).toBe(expectedMinutes);
+    expect(parseTimeToMinutes("08:30")).toBe(510);
+    expect(parseTimeToMinutes("08:30:30")).toBe(510.5);
+    expect(parseTimeToMinutes(45)).toBe(45);
+    expect(parseTimeToMinutes(undefined)).toBeUndefined();
+    expect(parseTimeToMinutes(null as unknown as undefined)).toBeUndefined();
   });
 
   // AC: capacity over the Vehículo's (an Acompañante takes a seat)

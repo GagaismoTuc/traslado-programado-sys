@@ -148,22 +148,24 @@ export function parseTimeToMinutes(value: Date | string | number | undefined): n
   if (value === undefined || value === null) return undefined;
   if (value instanceof Date) return value.getTime() / 60000;
   if (typeof value === "number") {
-    if (value > 10_000_000_000_000) return value / 60000;
-    if (value > 10_000_000_00) return value / 60;
+    if (isNaN(value)) return undefined;
+    if (value > 1e11) return value / 60000;
+    if (value > 1e8) return value / 60;
     return value;
   }
   if (typeof value === "string") {
-    const timeMatch = /^(\d{1,2}):(\d{2})(?::(\d{2}))?$/.exec(value.trim());
+    const trimmed = value.trim();
+    const timeMatch = /^(\d{1,2}):(\d{2})(?::(\d{2}))?$/.exec(trimmed);
     if (timeMatch) {
       const h = parseInt(timeMatch[1], 10);
       const m = parseInt(timeMatch[2], 10);
       const s = timeMatch[3] ? parseInt(timeMatch[3], 10) : 0;
       return h * 60 + m + s / 60;
     }
-    const parsed = new Date(value);
+    const parsed = new Date(trimmed);
     if (!isNaN(parsed.getTime())) return parsed.getTime() / 60000;
-    const num = Number(value);
-    if (!isNaN(num)) return num;
+    const num = Number(trimmed);
+    if (!isNaN(num)) return parseTimeToMinutes(num);
   }
   return undefined;
 }
