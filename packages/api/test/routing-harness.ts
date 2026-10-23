@@ -73,8 +73,10 @@ export async function startRoutingStack(): Promise<RoutingStack> {
     const { OSRM_IMAGE } = await readRecipe();
     await mkdir(join(work, "image"));
     await copyFile(syntheticExtract, join(work, "synthetic-grid.osm"));
+    // Same as build.sh: on Linux the container writes as the host user, so the files stay readable and removable.
+    const user = process.getuid && process.getgid ? ["--user", `${process.getuid()}:${process.getgid()}`] : [];
     await run("docker", [
-      "run", "--rm", "-v", `${work}:/work`, "-v", `${osrmRecipe}:/recipe:ro`, "--entrypoint", "sh", OSRM_IMAGE,
+      "run", "--rm", ...user, "-v", `${work}:/work`, "-v", `${osrmRecipe}:/recipe:ro`, "--entrypoint", "sh", OSRM_IMAGE,
       "/recipe/preprocess.sh", "/work/synthetic-grid.osm", "/work/image/data", artifactVersion,
     ]);
     await copyFile(join(osrmRecipe, "Dockerfile"), join(work, "image/Dockerfile"));
@@ -82,7 +84,8 @@ export async function startRoutingStack(): Promise<RoutingStack> {
     await run("docker", ["build", "-q", "--build-arg", `OSRM_IMAGE=${OSRM_IMAGE}`, "-t", image, join(work, "image")]);
     await compose("up", "-d", "--wait");
   } catch (error) {
-    await stop();
+    // A cleanup failure must not hide the startup error.
+    await stop().catch(() => undefined);
     const detail = error instanceof Error ? error.message : String(error);
     throw new Error(`C2 routing harness requires Docker with Compose; startup failed: ${detail}`, { cause: error });
   }
