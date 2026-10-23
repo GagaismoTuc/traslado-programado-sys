@@ -1,6 +1,7 @@
 CREATE TABLE "change_log" (
 	"id" integer PRIMARY KEY GENERATED ALWAYS AS IDENTITY (sequence name "change_log_id_seq" INCREMENT BY 1 MINVALUE 1 MAXVALUE 2147483647 START WITH 1 CACHE 1),
 	"actor_user_id" integer,
+	"actor_label" text,
 	"entity" text NOT NULL,
 	"entity_id" text NOT NULL,
 	"action" text NOT NULL,

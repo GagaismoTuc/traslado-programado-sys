@@ -15,6 +15,8 @@ pnpm install
 
 Set `SERVER_EPOCH` and `DATABASE_URL` before starting the API. Database connections use UTC. To create the migration and application roles, connect as a PostgreSQL administrator and run `pnpm --filter @traslado/api db:bootstrap` with `BOOTSTRAP_DATABASE_URL`, `MIGRATION_PASSWORD`, and `APPLICATION_PASSWORD` set. Run `pnpm db:migrate` as the migration role.
 
+After migrations are applied, create the initial Office account once with `pnpm --filter @traslado/api db:bootstrap-office <username>`, using `BOOTSTRAP_DATABASE_URL` and `BOOTSTRAP_OFFICE_PASSWORD` in the environment. The command refuses if an Office account already exists and records the actor as `bootstrap`; do not pass the password on the command line.
+
 Browser mutations must include an allowed `Origin`. The API trusts the local Office/Driver Vite origins by default; set `AUTH_ALLOWED_ORIGINS` to a comma-separated list of exact origins in other deployments. Same-origin requests are always accepted.
 
 ## Checks

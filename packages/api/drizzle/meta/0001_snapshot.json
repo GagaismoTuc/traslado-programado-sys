@@ -1,5 +1,5 @@
 {
-  "id": "d1cb3ab4-2054-479b-81ad-db6dd55a8597",
+  "id": "4db692ff-c6bd-4e25-b90d-9cb1fe72b754",
   "prevId": "cc31619a-f37c-4fd0-bbdb-621322d304ed",
   "version": "7",
   "dialect": "postgresql",
@@ -28,6 +28,12 @@
         "actor_user_id": {
           "name": "actor_user_id",
           "type": "integer",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "actor_label": {
+          "name": "actor_label",
+          "type": "text",
           "primaryKey": false,
           "notNull": false
         },

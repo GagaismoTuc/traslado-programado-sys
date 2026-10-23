@@ -14,6 +14,7 @@
     "test": "vitest run",
     "start": "tsx src/server.ts",
     "db:bootstrap": "tsx src/bootstrap.ts",
+    "db:bootstrap-office": "tsx src/bootstrap-office.ts",
     "db:generate": "drizzle-kit generate",
     "db:migrate": "tsx src/migrate.ts"
   },
