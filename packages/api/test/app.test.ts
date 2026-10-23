@@ -91,6 +91,14 @@ describe("API test seam", () => {
     expect(() => readConfig({ DATABASE_URL: "postgres://app:secret@localhost:5432/app" } as NodeJS.ProcessEnv)).toThrow("SERVER_EPOCH is required");
   });
 
+  it("reads the configured trusted browser origins", () => {
+    expect(readConfig({
+      SERVER_EPOCH: "epoch",
+      DATABASE_URL: "postgres://app:secret@localhost:5432/app",
+      AUTH_ALLOWED_ORIGINS: "https://office.example,https://driver.example",
+    } as NodeJS.ProcessEnv).trustedOrigins).toEqual(["https://office.example", "https://driver.example"]);
+  });
+
   it("refuses to start the server command without SERVER_EPOCH", () => {
     const result = spawnSync(process.execPath, ["./node_modules/tsx/dist/cli.mjs", "src/server.ts"], {
       cwd: process.cwd(),

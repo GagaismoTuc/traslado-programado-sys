@@ -8,6 +8,13 @@
       "when": 1792530076909,
       "tag": "0000_closed_madrox",
       "breakpoints": true
+    },
+    {
+      "idx": 1,
+      "version": "7",
+      "when": 1792780678434,
+      "tag": "0001_milky_mindworm",
+      "breakpoints": true
     }
   ]
 }
