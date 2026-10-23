@@ -1,13 +1,14 @@
 import { spawnSync } from "node:child_process";
 import { hc } from "hono/client";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
-import { createApp, type AppType } from "../src/app.js";
+import { createApp, type AppType, type RoutingHealth } from "../src/app.js";
 import { readConfig } from "../src/config.js";
 import { createPool } from "../src/db.js";
 import { createSyntheticRecord, SYNTHETIC_DNI_RANGE, TUCUMAN_BOUNDS } from "./factories/synthetic.js";
 
 const appPool = createPool(process.env.TEST_DATABASE_URL!);
 const migrationPool = createPool(process.env.TEST_MIGRATION_DATABASE_URL!);
+const routingUp: RoutingHealth = { osrm: async () => undefined, vroom: async () => undefined };
 
 function clientFor(app: AppType) {
   return hc<AppType>("http://localhost", {
@@ -29,8 +30,8 @@ describe("API test seam", () => {
   });
 
   it("uses the newly configured epoch on the same database across API starts", async () => {
-    const first = createApp({ db: appPool, config: { serverEpoch: "epoch-one" } });
-    const second = createApp({ db: appPool, config: { serverEpoch: "epoch-two" } });
+    const first = createApp({ routing: routingUp, db: appPool, config: { serverEpoch: "epoch-one" } });
+    const second = createApp({ routing: routingUp, db: appPool, config: { serverEpoch: "epoch-two" } });
 
     const firstResponse = await clientFor(first).health.$get();
     const secondResponse = await clientFor(second).health.$get();
@@ -56,12 +57,12 @@ describe("API test seam", () => {
   it("allows application role inserts into a table created by the Drizzle migration", async () => {
     await appPool.query("INSERT INTO foundation_permission_probe (marker) VALUES ($1)", [createSyntheticRecord().marker]);
     await expect(appPool.query("SELECT count(*)::int AS count FROM foundation_permission_probe")).resolves.toMatchObject({ rows: [{ count: 1 }] });
-    const response = await clientFor(createApp({ db: appPool, config: { serverEpoch: "synthetic" } })).health.$get();
+    const response = await clientFor(createApp({ routing: routingUp, db: appPool, config: { serverEpoch: "synthetic" } })).health.$get();
     expect(response.status).toBe(200);
   });
 
   it("returns an empty successful health response with the configured epoch", async () => {
-    const response = await clientFor(createApp({ db: appPool, config: { serverEpoch: "healthy" } })).health.$get();
+    const response = await clientFor(createApp({ routing: routingUp, db: appPool, config: { serverEpoch: "healthy" } })).health.$get();
     expect(response.status).toBe(200);
     expect(response.headers.get("X-Server-Epoch")).toBe("healthy");
     expect(await response.text()).toBe("");
@@ -73,7 +74,7 @@ describe("API test seam", () => {
   });
 
   it("returns 503 with no body when the database is down", async () => {
-    const app = createApp({ db: { query: async () => { throw new Error("database unavailable"); } }, config: { serverEpoch: "down" } });
+    const app = createApp({ routing: routingUp, db: { query: async () => { throw new Error("database unavailable"); } }, config: { serverEpoch: "down" } });
     const response = await clientFor(app).health.$get();
     expect(response.status).toBe(503);
     expect(response.headers.get("X-Server-Epoch")).toBe("down");
@@ -81,7 +82,7 @@ describe("API test seam", () => {
   });
 
   it("returns 503 when the database health query times out", async () => {
-    const app = createApp({ db: { query: () => new Promise(() => undefined) }, config: { serverEpoch: "timeout", healthTimeoutMs: 10 } });
+    const app = createApp({ routing: routingUp, db: { query: () => new Promise(() => undefined) }, config: { serverEpoch: "timeout", healthTimeoutMs: 10 } });
     const response = await clientFor(app).health.$get();
     expect(response.status).toBe(503);
     expect(await response.text()).toBe("");
@@ -89,6 +90,12 @@ describe("API test seam", () => {
 
   it("requires SERVER_EPOCH before the server can start", () => {
     expect(() => readConfig({ DATABASE_URL: "postgres://app:secret@localhost:5432/app" } as NodeJS.ProcessEnv)).toThrow("SERVER_EPOCH is required");
+  });
+
+  it("requires OSRM_URL and VROOM_URL before the server can start", () => {
+    const environment = { SERVER_EPOCH: "routing", DATABASE_URL: "postgres://app:secret@localhost:5432/app" };
+    expect(() => readConfig({ ...environment, VROOM_URL: "http://127.0.0.1:3001" } as NodeJS.ProcessEnv)).toThrow("OSRM_URL must be a valid URL");
+    expect(() => readConfig({ ...environment, OSRM_URL: "http://127.0.0.1:5000" } as NodeJS.ProcessEnv)).toThrow("VROOM_URL must be a valid URL");
   });
 
   it("refuses to start the server command without SERVER_EPOCH", () => {
@@ -102,13 +109,13 @@ describe("API test seam", () => {
   });
 
   it("adds the epoch header to not-found responses", async () => {
-    const response = await createApp({ db: appPool, config: { serverEpoch: "not-found" } }).request("/missing");
+    const response = await createApp({ routing: routingUp, db: appPool, config: { serverEpoch: "not-found" } }).request("/missing");
     expect(response.status).toBe(404);
     expect(response.headers.get("X-Server-Epoch")).toBe("not-found");
   });
 
   it("adds the epoch header to unhandled server errors", async () => {
-    const app = createApp({ db: appPool, config: { serverEpoch: "server-error" } });
+    const app = createApp({ routing: routingUp, db: appPool, config: { serverEpoch: "server-error" } });
     app.get("/error", () => { throw new Error("unexpected failure"); });
     const response = await app.request("/error");
     expect(response.status).toBe(500);
