@@ -1,15 +1,17 @@
 import { beforeAll, afterAll, beforeEach, describe, expect, it } from "vitest";
-import { createApp } from "../src/app.js";
+import { createApp, type RoutingHealth } from "../src/app.js";
 import { hashPassword } from "../src/auth.js";
 import { createPool } from "../src/db.js";
 
 const appPool = createPool(process.env.TEST_DATABASE_URL!);
 const migrationPool = createPool(process.env.TEST_MIGRATION_DATABASE_URL!);
+const routingUp: RoutingHealth = { osrm: async () => undefined, vroom: async () => undefined };
 let requestIp = "192.0.2.1";
 let testNumber = 0;
-const app = createApp({ db: appPool, config: { serverEpoch: "auth-test", getClientIp: () => requestIp } });
+const app = createApp({ db: appPool, routing: routingUp, config: { serverEpoch: "auth-test", getClientIp: () => requestIp } });
 const burstApp = createApp({
   db: appPool,
+  routing: routingUp,
   config: { serverEpoch: "auth-burst-test", getClientIp: (context) => context.req.header("X-Test-Client-IP") ?? "unknown" },
 });
 

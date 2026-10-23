@@ -1,7 +1,8 @@
 import { describe, expect, it } from "vitest";
-import { createApp } from "../src/app.js";
+import { createApp, type RoutingHealth } from "../src/app.js";
 
-const app = createApp({ db: { query: async () => ({ rows: [], rowCount: 0 }) }, config: { serverEpoch: "authorization-test" } });
+const routingUp: RoutingHealth = { osrm: async () => undefined, vroom: async () => undefined };
+const app = createApp({ db: { query: async () => ({ rows: [], rowCount: 0 }) }, routing: routingUp, config: { serverEpoch: "authorization-test" } });
 const authorizationEvidence = new Map([
   ["ALL /*", "rejects unauthenticated requests for protected routes"],
   ["GET /health", "returns an empty successful health response with the configured epoch"],

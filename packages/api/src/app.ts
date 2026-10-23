@@ -10,6 +10,13 @@ type DatabaseClient = Queryable & { release: () => void };
 
 export type HealthDatabase = Queryable & { connect?: () => Promise<DatabaseClient> };
 
+export type HealthProbe = (signal: AbortSignal) => Promise<unknown>;
+
+export type RoutingHealth = {
+  osrm: HealthProbe;
+  vroom: HealthProbe;
+};
+
 export type AppConfig = {
   serverEpoch: ServerEpoch;
   healthTimeoutMs?: number;
@@ -131,7 +138,7 @@ function isOffice(user: AuthenticatedUser) {
   return user.role === "office";
 }
 
-export function createApp({ db, config }: { db: HealthDatabase; config: AppConfig }) {
+export function createApp({ db, routing, config }: { db: HealthDatabase; routing: RoutingHealth; config: AppConfig }) {
   if (!config.serverEpoch.trim()) throw new Error("SERVER_EPOCH is required");
   const healthTimeoutMs = config.healthTimeoutMs ?? 1000;
   const app = new Hono()
@@ -159,12 +166,13 @@ export function createApp({ db, config }: { db: HealthDatabase; config: AppConfi
       await next();
     })
     .get("/health", async (context) => {
+      const probes = new AbortController();
       let timer: ReturnType<typeof setTimeout> | undefined;
       try {
         await Promise.race([
-          db.query("SELECT 1"),
+          Promise.all([db.query("SELECT 1"), routing.osrm(probes.signal), routing.vroom(probes.signal)]),
           new Promise<never>((_, reject) => {
-            timer = setTimeout(() => reject(new Error("Database health check timed out")), healthTimeoutMs);
+            timer = setTimeout(() => reject(new Error("Health check timed out")), healthTimeoutMs);
           }),
         ]);
         return context.body(null, 200);
@@ -172,6 +180,7 @@ export function createApp({ db, config }: { db: HealthDatabase; config: AppConfi
         return context.body(null, 503);
       } finally {
         if (timer) clearTimeout(timer);
+        probes.abort();
       }
     })
     .post("/auth/login", async (context) => {
@@ -183,7 +192,6 @@ export function createApp({ db, config }: { db: HealthDatabase; config: AppConfi
       const password = body.password;
       const deviceLabel = body.deviceLabel.trim();
       if (!username || !password || !deviceLabel || deviceLabel.length > 100) return context.json({ error: "Invalid request" }, 400);
-
       const ip = clientIp(context, config);
       const reservation = reserveLoginAttempt(username, ip);
       if (!reservation) {

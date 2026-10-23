@@ -3,12 +3,16 @@ import { z } from "zod";
 const configSchema = z.object({
   SERVER_EPOCH: z.string().trim().min(1, "SERVER_EPOCH is required"),
   DATABASE_URL: z.string().url("DATABASE_URL must be a valid URL"),
+  OSRM_URL: z.string({ error: "OSRM_URL must be a valid URL" }).url("OSRM_URL must be a valid URL"),
+  VROOM_URL: z.string({ error: "VROOM_URL must be a valid URL" }).url("VROOM_URL must be a valid URL"),
   PORT: z.coerce.number().int().min(1).max(65535).default(3000),
 });
 
 export type ServerConfig = {
   serverEpoch: string;
   databaseUrl: string;
+  osrmUrl: string;
+  vroomUrl: string;
   port: number;
   trustedOrigins: string[];
 };
@@ -45,6 +49,8 @@ export function readConfig(environment: NodeJS.ProcessEnv = process.env): Server
   return {
     serverEpoch: result.data.SERVER_EPOCH,
     databaseUrl: result.data.DATABASE_URL,
+    osrmUrl: result.data.OSRM_URL,
+    vroomUrl: result.data.VROOM_URL,
     port: result.data.PORT,
     trustedOrigins: readTrustedOrigins(environment.AUTH_ALLOWED_ORIGINS),
   };
