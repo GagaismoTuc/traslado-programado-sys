@@ -10,6 +10,10 @@ on:
       - .github/workflows/osrm-artifact.yml
   workflow_dispatch:
 
+concurrency:
+  group: osrm-artifact-${{ github.ref }}
+  cancel-in-progress: false
+
 permissions:
   contents: read
   packages: write
@@ -59,3 +63,4 @@ jobs:
             exit 0
           fi
           docker push "$image"
+          echo "Published $(docker image inspect --format '{{index .RepoDigests 0}}' "$image")" | tee -a "$GITHUB_STEP_SUMMARY"

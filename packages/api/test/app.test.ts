@@ -92,6 +92,12 @@ describe("API test seam", () => {
     expect(() => readConfig({ DATABASE_URL: "postgres://app:secret@localhost:5432/app" } as NodeJS.ProcessEnv)).toThrow("SERVER_EPOCH is required");
   });
 
+  it("requires OSRM_URL and VROOM_URL before the server can start", () => {
+    const environment = { SERVER_EPOCH: "routing", DATABASE_URL: "postgres://app:secret@localhost:5432/app" };
+    expect(() => readConfig({ ...environment, VROOM_URL: "http://127.0.0.1:3001" } as NodeJS.ProcessEnv)).toThrow("OSRM_URL must be a valid URL");
+    expect(() => readConfig({ ...environment, OSRM_URL: "http://127.0.0.1:5000" } as NodeJS.ProcessEnv)).toThrow("VROOM_URL must be a valid URL");
+  });
+
   it("refuses to start the server command without SERVER_EPOCH", () => {
     const result = spawnSync(process.execPath, ["./node_modules/tsx/dist/cli.mjs", "src/server.ts"], {
       cwd: process.cwd(),

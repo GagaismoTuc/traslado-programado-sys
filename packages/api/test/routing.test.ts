@@ -1,5 +1,7 @@
+import { execFile } from "node:child_process";
 import { readFile } from "node:fs/promises";
 import { join } from "node:path";
+import { promisify } from "node:util";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { createApp } from "../src/app.js";
 import { createPool } from "../src/db.js";
@@ -49,12 +51,14 @@ function jobStep(solution: Solution) {
 
 describe("routing infrastructure", () => {
   it("never runs OSRM preprocessing in the Compose services or the artifact entrypoint", async () => {
-    const { ARTIFACT_REPOSITORY } = await readRecipe();
+    const { ARTIFACT_REPOSITORY, ARTIFACT_VERSION } = await readRecipe();
     const { services } = await composeConfig();
     for (const service of Object.values(services)) {
       expect([...(service.command ?? []), ...(service.entrypoint ?? [])].join(" ")).not.toMatch(preprocessing);
     }
-    expect(services.osrm!.image.startsWith(`${ARTIFACT_REPOSITORY}:`)).toBe(true);
+    expect(services.osrm!.image).toBe(`${ARTIFACT_REPOSITORY}:${ARTIFACT_VERSION}`);
+    const { stdout } = await promisify(execFile)("docker", ["image", "inspect", "--format", "{{json .Config.Entrypoint}}", stack.osrmImage]);
+    expect(JSON.parse(stdout)).toEqual(["/usr/local/bin/serve-osrm"]);
     expect(await readFile(join(osrmRecipe, "serve.sh"), "utf8")).not.toMatch(preprocessing);
   });
 

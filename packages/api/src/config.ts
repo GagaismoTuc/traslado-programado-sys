@@ -3,8 +3,8 @@ import { z } from "zod";
 const configSchema = z.object({
   SERVER_EPOCH: z.string().trim().min(1, "SERVER_EPOCH is required"),
   DATABASE_URL: z.string().url("DATABASE_URL must be a valid URL"),
-  OSRM_URL: z.string().url("OSRM_URL must be a valid URL"),
-  VROOM_URL: z.string().url("VROOM_URL must be a valid URL"),
+  OSRM_URL: z.string({ error: "OSRM_URL must be a valid URL" }).url("OSRM_URL must be a valid URL"),
+  VROOM_URL: z.string({ error: "VROOM_URL must be a valid URL" }).url("VROOM_URL must be a valid URL"),
   PORT: z.coerce.number().int().min(1).max(65535).default(3000),
 });
 

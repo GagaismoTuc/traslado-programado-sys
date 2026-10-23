@@ -14,6 +14,7 @@ export const composeFile = join(repositoryRoot, "compose.yaml");
 const syntheticExtract = join(import.meta.dirname, "fixtures/routing/synthetic-grid.osm");
 
 export type RoutingStack = {
+  osrmImage: string;
   osrmUrl: string;
   vroomUrl: string;
   artifactVersion: string;
@@ -23,12 +24,12 @@ export type RoutingStack = {
 
 export async function readRecipe(): Promise<Record<string, string>> {
   const text = await readFile(join(osrmRecipe, "source.env"), "utf8");
-  return Object.fromEntries(
-    text
-      .split(/\r?\n/)
-      .filter((line) => /^[A-Z_]+=/.test(line))
-      .map((line) => [line.slice(0, line.indexOf("=")), line.slice(line.indexOf("=") + 1)]),
-  );
+  const recipe: Record<string, string> = {};
+  for (const line of text.split(/\r?\n/).filter((candidate) => /^[A-Z_]+=/.test(candidate))) {
+    const value = line.slice(line.indexOf("=") + 1);
+    recipe[line.slice(0, line.indexOf("="))] = value.replace(/\$\{([A-Z_]+)\}/g, (_, name: string) => recipe[name] ?? "");
+  }
+  return recipe;
 }
 
 export async function composeConfig(): Promise<{ services: Record<string, { image: string; command: string[] | null; entrypoint: string[] | null }> }> {
@@ -87,6 +88,7 @@ export async function startRoutingStack(): Promise<RoutingStack> {
   }
 
   return {
+    osrmImage: image,
     osrmUrl: `http://127.0.0.1:${osrmPort}`,
     vroomUrl: `http://127.0.0.1:${vroomPort}`,
     artifactVersion,
