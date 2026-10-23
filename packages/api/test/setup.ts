@@ -31,10 +31,14 @@ process.env.TEST_MIGRATION_DATABASE_URL = withCredentials(
   databaseName,
 );
 
-const applicationPool = new Pool({ connectionString: process.env.TEST_DATABASE_URL, options: "-c timezone=UTC" });
+const migrationPool = new Pool({ connectionString: process.env.TEST_MIGRATION_DATABASE_URL, options: "-c timezone=UTC" });
 beforeEach(async () => {
-  await applicationPool.query("DELETE FROM foundation_permission_probe");
+  const result = await migrationPool.query(
+    "SELECT string_agg(format('%I.%I', schemaname, tablename), ', ') AS tables FROM pg_tables WHERE schemaname = 'public'",
+  );
+  const tables = result.rows[0].tables as string | null;
+  if (tables) await migrationPool.query(`TRUNCATE TABLE ${tables} RESTART IDENTITY CASCADE`);
 });
 afterAll(async () => {
-  await applicationPool.end();
+  await migrationPool.end();
 });

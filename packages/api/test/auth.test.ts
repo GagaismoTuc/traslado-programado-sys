@@ -43,9 +43,8 @@ function getSessionCookie(response: Response) {
 beforeAll(async () => {
   await appPool.query("SELECT 1");
 });
-beforeEach(async () => {
+beforeEach(() => {
   requestIp = `192.0.2.${++testNumber}`;
-  await migrationPool.query("TRUNCATE change_log, sessions, users RESTART IDENTITY CASCADE");
 });
 afterAll(async () => {
   await Promise.all([appPool.end(), migrationPool.end()]);
@@ -114,6 +113,18 @@ describe("account authentication", () => {
     expect(missing.status).toBe(403);
     expect(untrusted.status).toBe(403);
     expect(trusted.status).toBe(401);
+  });
+
+  it("rejects Chofer on every Oficina-only user route", async () => {
+    await seedUser("driver", "driver-password", "driver");
+    const driverCookie = getSessionCookie(await login("driver", "driver-password")).cookie;
+    const probes = [
+      await request("/users", "GET", undefined, driverCookie),
+      await request("/users", "POST", { username: "new", password: "secret", role: "driver" }, driverCookie),
+      await request("/users/1/password", "PATCH", { password: "new-secret" }, driverCookie),
+      await request("/users/1/disable", "PATCH", {}, driverCookie),
+    ];
+    expect(probes.map((response) => response.status)).toEqual([403, 403, 403, 403]);
   });
 
   it("lets Oficina manage users and immediately invalidates a disabled user's sessions", async () => {
