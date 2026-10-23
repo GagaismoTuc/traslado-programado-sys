@@ -124,6 +124,7 @@ describe("account authentication", () => {
     ));
 
     expect(burst.filter((response) => response.status === 401)).toHaveLength(5);
+    expect(burst.filter((response) => response.status === 429)).toHaveLength(15);
   });
 
   it("does not mutate change log rows when the application role deletes an actor", async () => {
