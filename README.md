@@ -3,7 +3,7 @@ Sistema de Traslado Programado
 
 ## Requirements
 
-- Node.js 24.14.0 and Corepack
+- Node.js 24.22.1 and Corepack
 - Docker Desktop with Compose (the integration tests start PostgreSQL with Testcontainers and the routing services with Compose)
 
 ## Setup

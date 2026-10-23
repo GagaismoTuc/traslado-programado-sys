@@ -3,7 +3,7 @@
   "private": true,
   "packageManager": "pnpm@11.28.4",
   "engines": {
-    "node": "24.14.0"
+    "node": "24.22.1"
   },
   "scripts": {
     "build": "pnpm --filter @traslado/office build && pnpm --filter @traslado/driver build && pnpm --filter @traslado/api build",
