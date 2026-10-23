@@ -8,7 +8,7 @@
   "scripts": {
     "build": "pnpm --filter @traslado/office build && pnpm --filter @traslado/driver build && pnpm --filter @traslado/api build",
     "typecheck": "pnpm --filter @traslado/office typecheck && pnpm --filter @traslado/driver typecheck && pnpm --filter @traslado/api typecheck && pnpm --filter @traslado/shared typecheck",
-    "test": "pnpm --filter @traslado/office test && pnpm --filter @traslado/driver test && pnpm --filter @traslado/api test",
+    "test": "pnpm --filter @traslado/office test && pnpm --filter @traslado/driver test && pnpm --filter @traslado/api test && pnpm --filter @traslado/shared test",
     "db:generate": "pnpm --filter @traslado/api db:generate",
     "db:migrate": "pnpm --filter @traslado/api db:migrate"
   },
