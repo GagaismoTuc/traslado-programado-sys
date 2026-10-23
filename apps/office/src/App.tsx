@@ -120,12 +120,12 @@ function UsersPage() {
       <h2>Create user</h2>
       <label>Username<input name="username" autoComplete="off" required /></label>
       <label>Temporary password<input name="password" type="password" autoComplete="new-password" required /></label>
-      <label>Role<select name="role"><option value="office">Oficina</option><option value="driver">Chofer</option></select></label>
+      <label>Role<select name="role"><option value="office">Office</option><option value="driver">Driver</option></select></label>
       <button type="submit">Create user</button>
     </form>
     <h2>Current users</h2>
     <ul>{users.map((user) => <li key={user.id}>
-      <strong>{user.username}</strong> — {user.role === "office" ? "Oficina" : "Chofer"} {user.disabled_at ? "(disabled)" : ""}
+      <strong>{user.username}</strong> - {user.role === "office" ? "Office" : "Driver"} {user.disabled_at ? "(disabled)" : ""}
       {!user.disabled_at && <>
         <form onSubmit={(event) => void resetPassword(event, user.id)}>
           <label>New password<input name="password" type="password" autoComplete="new-password" required /></label>

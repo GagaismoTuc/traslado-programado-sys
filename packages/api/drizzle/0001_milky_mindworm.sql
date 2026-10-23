@@ -34,4 +34,3 @@ CREATE UNIQUE INDEX "users_username_unique" ON "users" USING btree ("username");
 --> statement-breakpoint
 REVOKE UPDATE, DELETE ON TABLE "change_log" FROM traslado_app;
 --> statement-breakpoint
-REVOKE UPDATE, DELETE ON TABLE "change_log" FROM traslado_app;

@@ -14,7 +14,10 @@ describe("office screens", () => {
 
   it("renders the user-management page at /users", () => {
     vi.stubGlobal("window", { location: { pathname: "/users" } });
-    expect(renderToStaticMarkup(<App />)).toContain("<h1>Users</h1>");
-    expect(renderToStaticMarkup(<App />)).toContain("Create user");
+    const markup = renderToStaticMarkup(<App />);
+    expect(markup).toContain("<h1>Users</h1>");
+    expect(markup).toContain("Create user");
+    expect(markup).toContain('<option value="office">Office</option>');
+    expect(markup).toContain('<option value="driver">Driver</option>');
   });
 });
