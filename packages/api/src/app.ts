@@ -25,6 +25,7 @@ const SESSION_MAX_AGE_SECONDS = 60 * 60 * 24 * 30;
 const LOGIN_FAILURE_LIMIT = 5;
 const LOGIN_WINDOW_MS = 15 * 60 * 1000;
 const loginFailures = new Map<string, { count: number; expiresAt: number }>();
+const loginAttempts = new Map<string, number>();
 const dummyPasswordHash = hashPassword("not-a-real-user-password");
 
 function isObject(value: unknown): value is Record<string, unknown> {
@@ -50,10 +51,15 @@ function clientIp(context: Context, config: AppConfig) {
   }
 }
 
-function loginRateLimited(username: string, ip: string) {
+function reserveLoginAttempt(username: string, ip: string) {
   const now = Date.now();
   for (const [key, value] of loginFailures) if (value.expiresAt <= now) loginFailures.delete(key);
-  return [`username:${username}`, `ip:${ip}`].some((key) => (loginFailures.get(key)?.count ?? 0) >= LOGIN_FAILURE_LIMIT);
+  const keys = [`username:${username}`, `ip:${ip}`];
+  if (keys.some((key) => (loginFailures.get(key)?.count ?? 0) + (loginAttempts.get(key) ?? 0) >= LOGIN_FAILURE_LIMIT)) {
+    return null;
+  }
+  for (const key of keys) loginAttempts.set(key, (loginAttempts.get(key) ?? 0) + 1);
+  return { keys, username, ip };
 }
 
 function recordLoginFailure(username: string, ip: string) {
@@ -62,6 +68,15 @@ function recordLoginFailure(username: string, ip: string) {
     const previous = loginFailures.get(key);
     loginFailures.set(key, { count: (previous && previous.expiresAt > Date.now() ? previous.count : 0) + 1, expiresAt });
   }
+}
+
+function finishLoginAttempt(reservation: NonNullable<ReturnType<typeof reserveLoginAttempt>>, failed: boolean) {
+  for (const key of reservation.keys) {
+    const pending = loginAttempts.get(key) ?? 0;
+    if (pending <= 1) loginAttempts.delete(key);
+    else loginAttempts.set(key, pending - 1);
+  }
+  if (failed) recordLoginFailure(reservation.username, reservation.ip);
 }
 
 async function inTransaction<T>(db: HealthDatabase, work: (client: Queryable) => Promise<T>) {
@@ -170,40 +185,46 @@ export function createApp({ db, config }: { db: HealthDatabase; config: AppConfi
       if (!username || !password || !deviceLabel || deviceLabel.length > 100) return context.json({ error: "Invalid request" }, 400);
 
       const ip = clientIp(context, config);
-      if (loginRateLimited(username, ip)) {
+      const reservation = reserveLoginAttempt(username, ip);
+      if (!reservation) {
         context.header("Retry-After", String(Math.ceil(LOGIN_WINDOW_MS / 1000)));
         return context.json({ error: "Too many login attempts" }, 429);
       }
 
-      const accountResult = await db.query(
-        "SELECT id, username, password_hash, role, disabled_at FROM users WHERE username = $1",
-        [username],
-      ) as QueryResult;
-      const account = accountResult.rows[0] as UserRow | undefined;
-      const verified = await verifyPassword(password, account?.password_hash ?? await dummyPasswordHash);
-      if (!account || !verified || account.disabled_at) {
-        recordLoginFailure(username, ip);
-        return invalidCredentials(context);
-      }
-
-      const token = createSessionToken();
-      const sessionId = await inTransaction(db, async (client) => {
-        const inserted = await client.query(
-          "INSERT INTO sessions (user_id, token_hash, device_label) VALUES ($1, $2, $3) RETURNING id",
-          [account.id, hashSessionToken(token), deviceLabel],
+      let failedLogin = false;
+      try {
+        const accountResult = await db.query(
+          "SELECT id, username, password_hash, role, disabled_at FROM users WHERE username = $1",
+          [username],
         ) as QueryResult;
-        const id = Number(inserted.rows[0]?.id);
-        await appendChange(client, account.id, "session", String(id), "created", null, { deviceLabel });
-        return id;
-      });
-      setCookie(context, SESSION_COOKIE, token, {
-        httpOnly: true,
-        secure: true,
-        sameSite: "Lax",
-        path: "/",
-        maxAge: SESSION_MAX_AGE_SECONDS,
-      });
-      return context.json({ user: { id: account.id, username: account.username, role: account.role }, sessionId });
+        const account = accountResult.rows[0] as UserRow | undefined;
+        const verified = await verifyPassword(password, account?.password_hash ?? await dummyPasswordHash);
+        if (!account || !verified || account.disabled_at) {
+          failedLogin = true;
+          return invalidCredentials(context);
+        }
+
+        const token = createSessionToken();
+        const sessionId = await inTransaction(db, async (client) => {
+          const inserted = await client.query(
+            "INSERT INTO sessions (user_id, token_hash, device_label) VALUES ($1, $2, $3) RETURNING id",
+            [account.id, hashSessionToken(token), deviceLabel],
+          ) as QueryResult;
+          const id = Number(inserted.rows[0]?.id);
+          await appendChange(client, account.id, "session", String(id), "created", null, { deviceLabel });
+          return id;
+        });
+        setCookie(context, SESSION_COOKIE, token, {
+          httpOnly: true,
+          secure: true,
+          sameSite: "Lax",
+          path: "/",
+          maxAge: SESSION_MAX_AGE_SECONDS,
+        });
+        return context.json({ user: { id: account.id, username: account.username, role: account.role }, sessionId });
+      } finally {
+        finishLoginAttempt(reservation, failedLogin);
+      }
     })
     .get("/auth/me", async (context) => {
       const user = await currentUser(db, context);

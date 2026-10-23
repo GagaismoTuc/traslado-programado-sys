@@ -8,6 +8,10 @@ const migrationPool = createPool(process.env.TEST_MIGRATION_DATABASE_URL!);
 let requestIp = "192.0.2.1";
 let testNumber = 0;
 const app = createApp({ db: appPool, config: { serverEpoch: "auth-test", getClientIp: () => requestIp } });
+const burstApp = createApp({
+  db: appPool,
+  config: { serverEpoch: "auth-burst-test", getClientIp: (context) => context.req.header("X-Test-Client-IP") ?? "unknown" },
+});
 
 async function request(path: string, method: string, body?: unknown, cookie?: string, origin = "http://localhost") {
   return await app.request(path, {
@@ -103,6 +107,38 @@ describe("account authentication", () => {
       expect((await login(`user-${attempt}`, "wrong-password")).status).toBe(401);
     }
     expect((await login("another-user", "wrong-password")).status).toBe(429);
+  });
+
+  it("does not allow a concurrent burst to exceed the per-username failure limit", async () => {
+    await seedUser("burst-user", "right-password", "driver");
+    const burst = await Promise.all(Array.from({ length: 20 }, (_, index) =>
+      burstApp.request("/auth/login", {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          Origin: "http://localhost",
+          "X-Test-Client-IP": `203.0.113.${index + 1}`,
+        },
+        body: JSON.stringify({ username: "burst-user", password: "wrong-password", deviceLabel: "device" }),
+      }),
+    ));
+
+    expect(burst.filter((response) => response.status === 401)).toHaveLength(5);
+  });
+
+  it("does not mutate change log rows when the application role deletes an actor", async () => {
+    const actorId = await seedUser("audit-actor", "actor-password", "office");
+    const inserted = await migrationPool.query(
+      "INSERT INTO change_log (actor_user_id, entity, entity_id, action) VALUES ($1, 'user', 'audit-actor', 'created') RETURNING id",
+      [actorId],
+    );
+    const before = await migrationPool.query("SELECT id, actor_user_id FROM change_log WHERE id = $1", [inserted.rows[0].id]);
+
+    await appPool.query("DELETE FROM sessions WHERE user_id = $1", [actorId]).catch(() => undefined);
+    await appPool.query("DELETE FROM users WHERE id = $1", [actorId]).catch(() => undefined);
+
+    const after = await migrationPool.query("SELECT id, actor_user_id FROM change_log WHERE id = $1", [inserted.rows[0].id]);
+    expect(after.rows).toEqual(before.rows);
   });
 
   it("requires an allowed Origin on credential-changing requests", async () => {

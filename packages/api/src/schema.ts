@@ -26,7 +26,7 @@ export const sessions = pgTable("sessions", {
 
 export const changeLog = pgTable("change_log", {
   id: integer().generatedAlwaysAsIdentity().primaryKey(),
-  actorUserId: integer("actor_user_id").references(() => users.id, { onDelete: "set null" }),
+  actorUserId: integer("actor_user_id").references(() => users.id, { onDelete: "restrict" }),
   actorLabel: text("actor_label"),
   entity: text().notNull(),
   entityId: text("entity_id").notNull(),
