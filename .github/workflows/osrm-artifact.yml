@@ -1,0 +1,61 @@
+name: OSRM artifact
+
+# Builds the Tucumán OSRM artifact on a CI runner, never on the production server.
+# Every push that changes the recipe builds and measures it; only main (or a manual run on main)
+# publishes, and an already published version is never overwritten.
+on:
+  push:
+    paths:
+      - infra/osrm/**
+      - .github/workflows/osrm-artifact.yml
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  packages: write
+
+jobs:
+  build:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build artifact
+        run: sh infra/osrm/build.sh "$RUNNER_TEMP/osrm"
+      - name: Measure serving memory
+        run: |
+          . infra/osrm/source.env
+          image="$ARTIFACT_REPOSITORY:$ARTIFACT_VERSION"
+          docker run -d --name osrm-probe -p 127.0.0.1:5000:5000 "$image"
+          for attempt in $(seq 1 60); do
+            curl -fsS -o /dev/null "http://127.0.0.1:5000/nearest/v1/driving/-65.2036,-26.8241" && break
+            sleep 2
+          done
+          curl -fsS -o /dev/null "http://127.0.0.1:5000/route/v1/driving/-65.2036,-26.8241;-65.2950,-26.7600"
+          curl -fsS -o /dev/null "http://127.0.0.1:5000/table/v1/driving/-65.2036,-26.8241;-65.2950,-26.7600;-65.1700,-27.0000"
+          echo "osrm-routed: peak memory $(docker exec osrm-probe cat /sys/fs/cgroup/memory.peak || echo unavailable) bytes (cgroup, includes page cache)" >> "$RUNNER_TEMP/osrm/build-stats.txt"
+          docker logs osrm-probe 2>&1 | grep "OSRM artifact version"
+          docker rm -f osrm-probe
+      - name: Summary
+        run: |
+          . infra/osrm/source.env
+          { echo "### $ARTIFACT_REPOSITORY:$ARTIFACT_VERSION"; echo '```'; cat "$RUNNER_TEMP/osrm/build-stats.txt"; echo '```'; } >> "$GITHUB_STEP_SUMMARY"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: osrm-artifact-metadata
+          path: |
+            ${{ runner.temp }}/osrm/build-stats.txt
+            ${{ runner.temp }}/osrm/image/data/VERSION
+            ${{ runner.temp }}/osrm/image/data/SHA256SUMS
+      - name: Publish
+        if: github.ref == 'refs/heads/main'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          . infra/osrm/source.env
+          image="$ARTIFACT_REPOSITORY:$ARTIFACT_VERSION"
+          echo "$GH_TOKEN" | docker login ghcr.io -u "${{ github.actor }}" --password-stdin
+          if docker manifest inspect "$image" > /dev/null 2>&1; then
+            echo "$image is already published; bump ARTIFACT_REVISION to publish a new version"
+            exit 0
+          fi
+          docker push "$image"
