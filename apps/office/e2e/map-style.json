@@ -1,0 +1,11 @@
+{
+  "version": 8,
+  "name": "C3 local style",
+  "sources": {
+    "probe": { "type": "geojson", "data": { "type": "Point", "coordinates": [-65.2036, -26.8241] } }
+  },
+  "layers": [
+    { "id": "background", "type": "background", "paint": { "background-color": "#e5e7eb" } },
+    { "id": "probe", "type": "circle", "source": "probe", "paint": { "circle-radius": 4, "circle-color": "#6b7280" } }
+  ]
+}

@@ -35,3 +35,5 @@ The Office "Suggest pin" button geocodes an address through the API. Geocoding i
 pnpm typecheck
 pnpm build && pnpm test
 ```
+
+`pnpm test:e2e` runs the C3 browser tests (Playwright on Chromium) against the real API and a PostgreSQL container; it needs Docker and `pnpm --filter @traslado/office exec playwright install chromium` once. The tests fail on any request that leaves localhost, use a local empty map style and seed the Oficina session directly instead of signing in. CI runs them in the separate `e2e` job.
