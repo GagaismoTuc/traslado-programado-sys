@@ -54,8 +54,14 @@ export function PinPicker({ value, onChange, suggestion }: PinPickerProps) {
   useEffect(() => {
     let cancelled = false;
     let instance: MapLibreMap | undefined;
-    void Promise.all([import("maplibre-gl"), import("maplibre-gl/dist/maplibre-gl.css")]).then(([library]) => {
+    void Promise.all([
+      import("maplibre-gl"),
+      // Bundling moves maplibre-gl away from its worker file, so the worker URL is set explicitly.
+      import("maplibre-gl/dist/maplibre-gl-worker.mjs?url"),
+      import("maplibre-gl/dist/maplibre-gl.css"),
+    ]).then(([library, worker]) => {
       if (cancelled || !container.current) return;
+      library.setWorkerUrl(worker.default);
       instance = new library.Map({
         container: container.current,
         style: MAP_STYLE_URL,

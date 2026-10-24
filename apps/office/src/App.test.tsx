@@ -37,7 +37,7 @@ describe("office screens", () => {
 
   it("keeps the pin picker free of Destino code with value, onChange and suggestion props", () => {
     const imports = [...pinPickerSource.matchAll(/from\s+["']([^"']+)["']|import\(["']([^"']+)["']\)/g)].map((match) => match[1] ?? match[2]);
-    expect(new Set(imports)).toEqual(new Set(["react", "maplibre-gl", "maplibre-gl/dist/maplibre-gl.css"]));
+    expect(new Set(imports)).toEqual(new Set(["react", "maplibre-gl", "maplibre-gl/dist/maplibre-gl-worker.mjs?url", "maplibre-gl/dist/maplibre-gl.css"]));
     expect(pinPickerSource).not.toMatch(/destination/i);
     const markup = renderToStaticMarkup(<PinPicker value={{ lat: -26.8241, lng: -65.2036 }} onChange={() => undefined} suggestion={null} />);
     expect(markup).toContain("Pin: -26.824100, -65.203600");
