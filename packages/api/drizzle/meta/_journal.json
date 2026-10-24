@@ -15,6 +15,13 @@
       "when": 1792780678434,
       "tag": "0001_milky_mindworm",
       "breakpoints": true
+    },
+    {
+      "idx": 2,
+      "version": "7",
+      "when": 1792808922438,
+      "tag": "0002_condemned_sue_storm",
+      "breakpoints": true
     }
   ]
 }

@@ -34,6 +34,9 @@ const LOGIN_WINDOW_MS = 15 * 60 * 1000;
 const loginFailures = new Map<string, { count: number; expiresAt: number }>();
 const loginAttempts = new Map<string, number>();
 const dummyPasswordHash = hashPassword("not-a-real-user-password");
+const DESTINATION_KINDS = ["school", "clinic", "therapy", "day_centre", "other"];
+const DESTINATION_COLUMNS =
+  `id, name, kind, address, access_notes AS "accessNotes", latitude AS lat, longitude AS lng, created_at AS "createdAt"`;
 
 function isObject(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
@@ -136,6 +139,30 @@ function invalidCredentials(context: Context) {
 
 function isOffice(user: AuthenticatedUser) {
   return user.role === "office";
+}
+
+function boundedText(value: unknown, maxLength: number) {
+  if (typeof value !== "string") return null;
+  const text = value.trim();
+  return text && text.length <= maxLength ? text : null;
+}
+
+function coordinate(value: unknown, limit: number) {
+  return typeof value === "number" && Number.isFinite(value) && Math.abs(value) <= limit ? value : null;
+}
+
+function parseDestination(body: unknown) {
+  if (!isObject(body)) return null;
+  const name = boundedText(body.name, 200);
+  const address = boundedText(body.address, 500);
+  const lat = coordinate(body.lat, 90);
+  const lng = coordinate(body.lng, 180);
+  const notes = body.accessNotes ?? "";
+  const accessNotes = typeof notes === "string" ? notes.trim() || null : undefined;
+  const kind = typeof body.kind === "string" && DESTINATION_KINDS.includes(body.kind) ? body.kind : null;
+  if (!name || !address || lat === null || lng === null || !kind) return null;
+  if (accessNotes === undefined || (accessNotes && accessNotes.length > 1000)) return null;
+  return { name, kind, address, accessNotes, lat, lng };
 }
 
 export function createApp({ db, routing, config }: { db: HealthDatabase; routing: RoutingHealth; config: AppConfig }) {
@@ -341,6 +368,30 @@ export function createApp({ db, routing, config }: { db: HealthDatabase; routing
         return existing.rows.length ? context.body(null, 204) : context.json({ error: "User not found" }, 404);
       }
       return context.body(null, 204);
+    })
+    .get("/destinations", async (context) => {
+      const user = await currentUser(db, context);
+      if (!user) return context.json({ error: "Authentication required" }, 401);
+      if (!isOffice(user)) return context.json({ error: "Office role required" }, 403);
+      const result = await db.query(`SELECT ${DESTINATION_COLUMNS} FROM destinations ORDER BY name, id`) as QueryResult;
+      return context.json({ destinations: result.rows });
+    })
+    .post("/destinations", async (context) => {
+      const actor = await currentUser(db, context);
+      if (!actor) return context.json({ error: "Authentication required" }, 401);
+      if (!isOffice(actor)) return context.json({ error: "Office role required" }, 403);
+      const destination = parseDestination(await context.req.json().catch(() => null));
+      if (!destination) return context.json({ error: "Invalid request" }, 400);
+      const created = await inTransaction(db, async (client) => {
+        const result = await client.query(
+          `INSERT INTO destinations (name, kind, address, access_notes, latitude, longitude) VALUES ($1, $2, $3, $4, $5, $6) RETURNING ${DESTINATION_COLUMNS}`,
+          [destination.name, destination.kind, destination.address, destination.accessNotes, destination.lat, destination.lng],
+        ) as QueryResult;
+        const row = result.rows[0];
+        await appendChange(client, actor.id, "destination", String(row.id), "created", null, destination);
+        return row;
+      });
+      return context.json({ destination: created }, 201);
     })
     .onError((_error, context) => {
       context.header("X-Server-Epoch", config.serverEpoch);
