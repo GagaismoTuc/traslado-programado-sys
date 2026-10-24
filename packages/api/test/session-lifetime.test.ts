@@ -232,7 +232,10 @@ describe("session lifetime and responses", () => {
     await h.seed("driver", "driver");
     h.advance(DAY);
     const phone = await h.login("driver");
-    const stored = await h.migrationPool.query("SELECT created_at, last_used_at FROM sessions WHERE id = $1", [phone.body.sessionId]);
-    expect(stored.rows).toEqual([{ created_at: h.clock.now, last_used_at: h.clock.now }]);
+    const loggedInAt = h.clock.now;
+    h.advance(HOUR);
+    await h.request("/auth/logout", "POST", {}, phone.cookie);
+    const stored = await h.migrationPool.query("SELECT created_at, last_used_at, revoked_at FROM sessions WHERE id = $1", [phone.body.sessionId]);
+    expect(stored.rows).toEqual([{ created_at: loggedInAt, last_used_at: loggedInAt, revoked_at: h.clock.now }]);
   });
 });

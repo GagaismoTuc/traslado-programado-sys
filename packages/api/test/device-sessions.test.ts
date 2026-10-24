@@ -103,11 +103,14 @@ describe("device sessions and accounts", () => {
         h.request("/users/2/disable", "PATCH", {}, admin.cookie),
         h.request("/users/1/disable", "PATCH", {}, planner.cookie),
       ]);
-      for (let attempt = 0; attempt < 100; attempt++) {
-        const waiting = await h.migrationPool.query("SELECT count(*)::int AS count FROM pg_locks WHERE NOT granted");
-        if (waiting.rows[0].count >= 2) break;
+      let waiting = 0;
+      for (let attempt = 0; attempt < 100 && waiting < 2; attempt++) {
         await new Promise((resolve) => setTimeout(resolve, 20));
+        waiting = (await h.appPool.query(
+          "SELECT count(*)::int AS count FROM pg_stat_activity WHERE datname = current_database() AND wait_event_type = 'Lock'",
+        )).rows[0].count;
       }
+      expect(waiting).toBe(2);
       await blocker.query("COMMIT");
       statuses = (await requests).map((response) => response.status);
     } finally {
