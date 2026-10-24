@@ -20,4 +20,11 @@ describe("office screens", () => {
     expect(markup).toContain('<option value="office">Office</option>');
     expect(markup).toContain('<option value="driver">Driver</option>');
   });
+
+  it("renders the second-factor page at /second-factor", () => {
+    vi.stubGlobal("window", { location: { pathname: "/second-factor" } });
+    const markup = renderToStaticMarkup(<App />);
+    expect(markup).toContain("<h1>Two-factor authentication</h1>");
+    expect(markup).toContain("Checking sign-in...");
+  });
 });
