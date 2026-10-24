@@ -1,6 +1,6 @@
 import { generateHOTP } from "@oslojs/otp";
 import { afterAll } from "vitest";
-import { createApp, type RoutingHealth } from "../../src/app.js";
+import { createApp, type AppType, type RoutingHealth } from "../../src/app.js";
 import { hashPassword } from "../../src/auth.js";
 import { createPool } from "../../src/db.js";
 
@@ -22,33 +22,36 @@ export function createHarness(name: string) {
     routing: routingUp,
     config: { serverEpoch: name, now: () => clock.now, getClientIp: () => `198.51.100.${ip}` },
   });
-  const harness = {
+  const app = newApp();
+  async function request(path: string, method = "GET", body?: unknown, cookie?: string, target: AppType = app): Promise<Response> {
+    return await target.request(path, {
+      method,
+      headers: {
+        Origin: "http://localhost",
+        ...(body !== undefined ? { "Content-Type": "application/json" } : {}),
+        ...(cookie ? { Cookie: cookie } : {}),
+      },
+      ...(body !== undefined ? { body: JSON.stringify(body) } : {}),
+    });
+  }
+  async function login(username: string, password = "password", deviceLabel = "Test device", cookie?: string, target: AppType = app) {
+    const response = await request("/auth/login", "POST", { username, password, deviceLabel }, cookie, target);
+    return { response, cookie: cookieFrom(response, "session"), body: await response.clone().json() };
+  }
+  return {
     appPool,
     migrationPool,
     clock,
-    app: newApp(),
+    app,
     newApp,
+    request,
+    login,
     reset() {
       clock.now = new Date(START);
       ip++;
     },
     advance(ms: number) {
       clock.now = new Date(clock.now.getTime() + ms);
-    },
-    async request(path: string, method = "GET", body?: unknown, cookie?: string, app = harness.app) {
-      return await app.request(path, {
-        method,
-        headers: {
-          Origin: "http://localhost",
-          ...(body !== undefined ? { "Content-Type": "application/json" } : {}),
-          ...(cookie ? { Cookie: cookie } : {}),
-        },
-        ...(body !== undefined ? { body: JSON.stringify(body) } : {}),
-      });
-    },
-    async login(username: string, password = "password", deviceLabel = "Test device", cookie?: string, app = harness.app) {
-      const response = await harness.request("/auth/login", "POST", { username, password, deviceLabel }, cookie, app);
-      return { response, cookie: cookieFrom(response, "session"), body: await response.clone().json() };
     },
     async seed(username: string, role: "office" | "driver", options: { enrolled?: boolean; persistent?: boolean } = {}) {
       const enrolled = role === "office" && (options.enrolled ?? true);
@@ -63,7 +66,6 @@ export function createHarness(name: string) {
       return generateHOTP(key, BigInt(Math.floor(clock.now.getTime() / 30000) + offset), 6);
     },
   };
-  return harness;
 }
 
 export function cookieFrom(response: Response, name: string) {
