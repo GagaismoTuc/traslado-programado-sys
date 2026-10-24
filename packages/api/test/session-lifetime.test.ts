@@ -234,7 +234,7 @@ describe("session lifetime and responses", () => {
     const phone = await h.login("driver");
     const loggedInAt = h.clock.now;
     h.advance(HOUR);
-    await h.request("/auth/logout", "POST", {}, phone.cookie);
+    expect((await h.request("/auth/logout", "POST", {}, phone.cookie)).status).toBe(204);
     const stored = await h.migrationPool.query("SELECT created_at, last_used_at, revoked_at FROM sessions WHERE id = $1", [phone.body.sessionId]);
     expect(stored.rows).toEqual([{ created_at: loggedInAt, last_used_at: loggedInAt, revoked_at: h.clock.now }]);
   });

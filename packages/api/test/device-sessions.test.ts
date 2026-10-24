@@ -96,6 +96,7 @@ describe("device sessions and accounts", () => {
     // Hold the Oficina rows so both requests authenticate and then queue on the same lock.
     const blocker = await h.migrationPool.connect();
     let statuses: number[];
+    let waiting = 0;
     try {
       await blocker.query("BEGIN");
       await blocker.query("SELECT id FROM users WHERE role = 'office' FOR UPDATE");
@@ -103,19 +104,18 @@ describe("device sessions and accounts", () => {
         h.request("/users/2/disable", "PATCH", {}, admin.cookie),
         h.request("/users/1/disable", "PATCH", {}, planner.cookie),
       ]);
-      let waiting = 0;
-      for (let attempt = 0; attempt < 100 && waiting < 2; attempt++) {
+      for (let attempt = 0; attempt < 250 && waiting < 2; attempt++) {
         await new Promise((resolve) => setTimeout(resolve, 20));
         waiting = (await h.appPool.query(
           "SELECT count(*)::int AS count FROM pg_stat_activity WHERE datname = current_database() AND wait_event_type = 'Lock'",
         )).rows[0].count;
       }
-      expect(waiting).toBe(2);
       await blocker.query("COMMIT");
       statuses = (await requests).map((response) => response.status);
     } finally {
       blocker.release();
     }
+    expect(waiting).toBe(2);
     expect(statuses.sort()).toEqual([204, 409]);
     const enabled = await h.migrationPool.query("SELECT count(*)::int AS count FROM users WHERE role = 'office' AND disabled_at IS NULL");
     expect(enabled.rows[0].count).toBe(1);
