@@ -7,6 +7,16 @@ const h = createHarness("second-factor-test");
 beforeEach(() => h.reset());
 
 const SECOND_FACTOR_REQUIRED = { error: "Authentication required", code: "second_factor_required" };
+// Routes a pending second-factor session may use (Regla 4); `ALL /*` is middleware, not a route.
+const PENDING_ALLOWED = new Set([
+  "ALL /*",
+  "GET /health",
+  "POST /auth/login",
+  "GET /auth/me",
+  "POST /auth/logout",
+  "POST /auth/totp/enrol",
+  "POST /auth/totp/verify",
+]);
 
 async function storedKey(username: string) {
   const result = await h.migrationPool.query("SELECT totp_secret FROM users WHERE username = $1", [username]);
@@ -41,20 +51,19 @@ describe("Oficina second factor", () => {
     expect(pending.response.status).toBe(200);
     expect(pending.body).toEqual({ user: { id: 1, username: "office", role: "office" }, sessionId: 1, secondFactor: "code_required" });
 
-    const blocked = [
-      await h.request("/users", "GET", undefined, pending.cookie),
-      await h.request("/users", "POST", { username: "new", password: "secret", role: "driver" }, pending.cookie),
-      await h.request("/users/2/password", "PATCH", { password: "new-secret" }, pending.cookie),
-      await h.request("/users/2/disable", "PATCH", {}, pending.cookie),
-      await h.request("/users/1/persistent-session", "PATCH", { persistent: true }, pending.cookie),
-      await h.request("/users/2/sessions", "GET", undefined, pending.cookie),
-      await h.request("/users/2/sessions/1", "DELETE", undefined, pending.cookie),
-      await h.request("/auth/sessions", "GET", undefined, pending.cookie),
-    ];
-    for (const response of blocked) {
-      expect(response.status).toBe(401);
-      expect(await response.json()).toEqual(SECOND_FACTOR_REQUIRED);
+    // Every registered route outside the pending allow-list, so routes added later are covered too.
+    const blocked = h.app.routes
+      .map((route) => `${route.method} ${route.path}`)
+      .filter((route) => !PENDING_ALLOWED.has(route));
+    expect(blocked).toEqual(expect.arrayContaining(["GET /users", "GET /destinations", "POST /destinations", "POST /geocode"]));
+    for (const route of blocked) {
+      const [method, path] = route.split(" ");
+      const body = method === "GET" || method === "DELETE" ? undefined : {};
+      const response = await h.request(path.replace(":sessionId", "1").replace(":id", "2"), method, body, pending.cookie);
+      expect(response.status, route).toBe(401);
+      expect(await response.json(), route).toEqual(SECOND_FACTOR_REQUIRED);
     }
+    await expect(h.migrationPool.query("SELECT count(*)::int AS count FROM destinations")).resolves.toMatchObject({ rows: [{ count: 0 }] });
     expect((await h.request("/auth/me", "GET", undefined, pending.cookie)).status).toBe(200);
     expect((await h.request("/auth/totp/enrol", "POST", {}, pending.cookie)).status).toBe(409);
     expect((await h.request("/auth/totp/verify", "POST", { code: h.code() }, pending.cookie)).status).toBe(204);
