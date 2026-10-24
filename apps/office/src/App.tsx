@@ -2,6 +2,7 @@ import { useEffect, useState, type FormEvent } from "react";
 import { hc } from "hono/client";
 import type { AppType } from "@traslado/api";
 import { apiUrl, isSecondFactorRequired, readError, send } from "./api";
+import { DestinationsPage } from "./DestinationsPage";
 import { SecondFactorPage } from "./SecondFactor";
 import { DeviceSessions, PersistentSessionToggle } from "./UserAccess";
 
@@ -113,6 +114,7 @@ function UsersPage() {
   return <main>
     <h1>Users</h1>
     <button type="button" onClick={() => void logout()}>Sign out</button>
+    <a href="/destinations">Destinations</a>
     {message && <p role="status">{message}</p>}
     <form onSubmit={createUser}>
       <h2>Create user</h2>
@@ -140,5 +142,6 @@ function UsersPage() {
 export function App() {
   const path = typeof window !== "undefined" ? window.location.pathname : "/";
   if (path === "/second-factor") return <SecondFactorPage />;
+  if (path === "/destinations") return <DestinationsPage />;
   return path === "/users" ? <UsersPage /> : <SignInPage />;
 }

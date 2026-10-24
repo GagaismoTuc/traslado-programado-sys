@@ -19,6 +19,9 @@ const authorizationEvidence = new Map([
   ["PATCH /users/:id/persistent-session", "lets only the Oficina change the persistent-session setting of Oficina accounts and logs each change"],
   ["GET /users/:id/sessions", "lists and revokes a user's device sessions only for the Oficina and only by a matching user and session"],
   ["DELETE /users/:id/sessions/:sessionId", "lists and revokes a user's device sessions only for the Oficina and only by a matching user and session"],
+  ["GET /destinations", "allows only an authenticated Oficina user to create or list Destinos"],
+  ["POST /destinations", "allows only an authenticated Oficina user to create or list Destinos"],
+  ["POST /geocode", "answers Suggest pin through an Oficina-only POST with a validated query and returns only lat, lng and displayName"],
 ]);
 
 describe("API route authorization coverage", () => {
@@ -44,6 +47,9 @@ describe("API route authorization coverage", () => {
       ["PATCH", "/users/1/persistent-session", { persistent: true }],
       ["GET", "/users/1/sessions"],
       ["DELETE", "/users/1/sessions/1"],
+      ["GET", "/destinations"],
+      ["POST", "/destinations", { name: "Escuela", kind: "school", address: "Calle Inventada 101", lat: -26.8, lng: -65.2 }],
+      ["POST", "/geocode", { query: "Calle Inventada 101" }],
     ];
     for (const [method, path, body] of probes) {
       const response = await app.request(path, {

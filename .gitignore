@@ -9,3 +9,5 @@ coverage/
 .orca-stack.local.json
 odd/
 .atl/
+test-results/
+playwright-report/

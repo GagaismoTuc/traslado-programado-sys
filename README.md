@@ -35,9 +35,13 @@ If nobody can sign in to the Office, reset an active Office account's password a
 
 Browser mutations must include an allowed `Origin`. The API trusts the local Office/Driver Vite origins by default; set `AUTH_ALLOWED_ORIGINS` to a comma-separated list of exact origins in other deployments. Same-origin requests are always accepted.
 
+The Office "Suggest pin" button geocodes an address through the API. Geocoding is off unless `GEOCODER=nominatim`; then the API calls `NOMINATIM_URL` (default `https://nominatim.openstreetmap.org`) with the `NOMINATIM_USER_AGENT` header, at most once per second for the whole process, caching repeated queries. Tests, CI and development keep it off. The Office map loads its style from `VITE_MAP_STYLE_URL` (OpenFreeMap Liberty by default).
+
 ## Checks
 
 ```sh
 pnpm typecheck
 pnpm build && pnpm test
 ```
+
+`pnpm test:e2e` runs the C3 browser tests (Playwright on Chromium) against the real API and a PostgreSQL container; it needs Docker and `pnpm --filter @traslado/office exec playwright install chromium` once. The tests fail on any request that leaves localhost, use a local empty map style and seed the Oficina session directly instead of signing in. CI runs them in the separate `e2e` job.
