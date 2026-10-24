@@ -1,6 +1,6 @@
 import { generateHOTP } from "@oslojs/otp";
 import { afterAll } from "vitest";
-import { createApp, type AppType, type RoutingHealth } from "../../src/app.js";
+import { createApp, type AppType, type HealthDatabase, type RoutingHealth } from "../../src/app.js";
 import { hashPassword } from "../../src/auth.js";
 import { createPool } from "../../src/db.js";
 
@@ -17,8 +17,8 @@ export function createHarness(name: string) {
   });
   let ip = 0;
   const clock = { now: new Date(START) };
-  const newApp = () => createApp({
-    db: appPool,
+  const newApp = (db: HealthDatabase = appPool) => createApp({
+    db,
     routing: routingUp,
     config: { serverEpoch: name, now: () => clock.now, getClientIp: () => `198.51.100.${ip}` },
   });

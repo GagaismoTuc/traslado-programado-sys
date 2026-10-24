@@ -1,4 +1,5 @@
 import { beforeEach, describe, expect, it } from "vitest";
+import type { HealthDatabase } from "../src/app.js";
 import { cookieFrom, createHarness } from "./helpers/harness.js";
 import { signInOffice } from "./helpers/office-session.js";
 
@@ -7,6 +8,31 @@ beforeEach(() => h.reset());
 
 async function office(username = "office", deviceLabel = "Office browser") {
   return await signInOffice(h.app, h.migrationPool, username, "password", deviceLabel);
+}
+
+/** An app whose transactions pause at the first statement matching `pauseAt` until `release` is called. */
+function gatedApp(pauseAt: string) {
+  let release!: () => void;
+  let reached!: () => void;
+  const gate = new Promise<void>((resolve) => { release = resolve; });
+  const paused = new Promise<void>((resolve) => { reached = resolve; });
+  const db: HealthDatabase = {
+    query: (sql, values) => h.appPool.query(sql, values),
+    connect: async () => {
+      const client = await h.appPool.connect();
+      return {
+        query: async (sql: string, values?: unknown[]) => {
+          if (sql.includes(pauseAt)) {
+            reached();
+            await gate;
+          }
+          return await client.query(sql, values);
+        },
+        release: () => client.release(),
+      };
+    },
+  };
+  return { app: h.newApp(db), paused, release };
 }
 
 describe("device sessions and accounts", () => {
@@ -72,6 +98,45 @@ describe("device sessions and accounts", () => {
     expect(ended.rows).toEqual([{ ended_reason: "password_reset" }]);
     expect(await (await h.request("/auth/me", "GET", undefined, planner.cookie)).json()).toEqual({ error: "Authentication required", code: "session_expired" });
     expect((await h.login("planner", "new-password", "Test device", remember)).body.secondFactor).toBe("enrolment_required");
+  });
+
+  it("refuses a login that checked the old password when the reset commits before its session is created", async () => {
+    await h.seed("office", "office");
+    await h.seed("planner", "office");
+    const admin = await office();
+    const racing = gatedApp("BEGIN");
+    const login = h.login("planner", "password", "Planner laptop", undefined, racing.app);
+    await racing.paused;
+    expect((await h.request("/users/2/password", "PATCH", { password: "new-password" }, admin.cookie)).status).toBe(204);
+    racing.release();
+    const refused = await login;
+
+    expect(refused.response.status).toBe(401);
+    expect(refused.body).toEqual({ error: "Invalid username or password" });
+    expect(refused.cookie).toBe("");
+    const alive = await h.migrationPool.query("SELECT count(*)::int AS count FROM sessions WHERE user_id = 2 AND revoked_at IS NULL");
+    expect(alive.rows[0].count).toBe(0);
+    expect((await h.login("planner", "new-password")).body.secondFactor).toBe("enrolment_required");
+  });
+
+  it("ends the session of a login that holds the user row when a concurrent reset starts", async () => {
+    await h.seed("office", "office");
+    await h.seed("planner", "office");
+    const admin = await office();
+    const racing = gatedApp("INSERT INTO sessions (user_id");
+    const login = h.login("planner", "password", "Planner laptop", undefined, racing.app);
+    await racing.paused;
+    const reset = h.request("/users/2/password", "PATCH", { password: "new-password" }, admin.cookie);
+    // The reset must queue behind the login's row lock instead of finishing first.
+    expect(await Promise.race([reset.then(() => "finished"), new Promise((resolve) => setTimeout(() => resolve("waiting"), 500))])).toBe("waiting");
+    racing.release();
+    const [loggedIn, resetResponse] = await Promise.all([login, reset]);
+
+    expect(loggedIn.response.status).toBe(200);
+    expect(resetResponse.status).toBe(204);
+    expect(await (await h.request("/auth/totp/enrol", "POST", {}, loggedIn.cookie)).json()).toEqual({ error: "Authentication required", code: "session_expired" });
+    const ended = await h.migrationPool.query("SELECT ended_reason FROM sessions WHERE user_id = 2");
+    expect(ended.rows).toEqual([{ ended_reason: "password_reset" }]);
   });
 
   it("refuses to disable the last active Oficina account with a clear message", async () => {

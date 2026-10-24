@@ -326,7 +326,14 @@ export function createApp({ db, routing, geocoder, config }: {
         const token = createSessionToken();
         const rememberToken = account.role === "office" ? getCookie(context, REMEMBER_COOKIE) : undefined;
         const current = now();
-        const { sessionId, remembered } = await inTransaction(db, async (client) => {
+        const created = await inTransaction(db, async (client) => {
+          // The password was checked before this transaction; a reset or disable that committed since then wins.
+          const locked = await client.query(
+            "SELECT password_hash, disabled_at, totp_confirmed_at FROM users WHERE id = $1 FOR UPDATE",
+            [account.id],
+          ) as QueryResult;
+          const still = locked.rows[0] as Pick<UserRow, "password_hash" | "disabled_at" | "totp_confirmed_at"> | undefined;
+          if (!still || still.password_hash !== account.password_hash || still.disabled_at) return null;
           const inserted = await client.query(
             "INSERT INTO sessions (user_id, token_hash, device_label, created_at, last_used_at) VALUES ($1, $2, $3, $4, $4) RETURNING id",
             [account.id, hashSessionToken(token), deviceLabel, current],
@@ -339,12 +346,14 @@ export function createApp({ db, routing, geocoder, config }: {
           ) as QueryResult : null;
           if (rebound?.rowCount) await client.query("UPDATE sessions SET second_factor_at = $2 WHERE id = $1", [id, current]);
           await appendChange(client, account.id, "session", String(id), "created", null, { deviceLabel });
-          return { sessionId: id, remembered: Boolean(rebound?.rowCount) };
+          return { sessionId: id, remembered: Boolean(rebound?.rowCount), totpConfirmed: Boolean(still.totp_confirmed_at) };
         });
+        if (!created) return invalidCredentials(context);
+        const { sessionId, remembered, totpConfirmed } = created;
         setSessionCookie(context, token);
         const user = { id: account.id, username: account.username, role: account.role };
         if (account.role !== "office" || remembered) return context.json({ user, sessionId });
-        const secondFactor: SecondFactorStep = account.totp_confirmed_at ? "code_required" : "enrolment_required";
+        const secondFactor: SecondFactorStep = totpConfirmed ? "code_required" : "enrolment_required";
         return context.json({ user, sessionId, secondFactor });
       } finally {
         finishLoginAttempt(reservation, failedLogin);
