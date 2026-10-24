@@ -20,8 +20,12 @@ export async function runBootstrapOffice(pool: BootstrapPool, args: string[], en
   try {
     await client.query("BEGIN");
     await client.query("SELECT pg_advisory_xact_lock($1, $2)", [BOOTSTRAP_LOCK_NAMESPACE, BOOTSTRAP_LOCK_KEY]);
-    const existingOffice = await client.query("SELECT id FROM users WHERE role = 'office' LIMIT 1");
+    const existingOffice = await client.query("SELECT id FROM users WHERE role = 'office' AND disabled_at IS NULL LIMIT 1");
     if (existingOffice.rows.length > 0) throw new Error("An Office account already exists");
+    const sameName = await client.query("SELECT disabled_at FROM users WHERE username = $1", [username]);
+    if (sameName.rows[0]?.disabled_at) {
+      throw new Error(`Username ${username} belongs to a disabled account; choose another username (db:break-glass-office recovers an active Office account)`);
+    }
 
     const passwordHash = await hashPassword(password);
     const created = await client.query(

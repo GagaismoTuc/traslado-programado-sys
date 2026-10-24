@@ -1,4 +1,4 @@
-import { integer, jsonb, pgTable, text, timestamp, uniqueIndex } from "drizzle-orm/pg-core";
+import { boolean, integer, jsonb, pgTable, text, timestamp, uniqueIndex } from "drizzle-orm/pg-core";
 
 export const foundationPermissionProbe = pgTable("foundation_permission_probe", {
   id: integer().generatedAlwaysAsIdentity().primaryKey(),
@@ -13,6 +13,10 @@ export const users = pgTable("users", {
   role: text().notNull(),
   disabledAt: timestamp("disabled_at", { withTimezone: true, mode: "string" }),
   createdAt: timestamp("created_at", { withTimezone: true, mode: "string" }).defaultNow().notNull(),
+  persistentSession: boolean("persistent_session").default(false).notNull(),
+  totpSecret: text("totp_secret"),
+  totpConfirmedAt: timestamp("totp_confirmed_at", { withTimezone: true, mode: "string" }),
+  totpLastStep: integer("totp_last_step"),
 }, (table) => [uniqueIndex("users_username_unique").on(table.username)]);
 
 export const sessions = pgTable("sessions", {
@@ -22,6 +26,17 @@ export const sessions = pgTable("sessions", {
   deviceLabel: text("device_label").notNull(),
   createdAt: timestamp("created_at", { withTimezone: true, mode: "string" }).defaultNow().notNull(),
   revokedAt: timestamp("revoked_at", { withTimezone: true, mode: "string" }),
+  endedReason: text("ended_reason"),
+  lastUsedAt: timestamp("last_used_at", { withTimezone: true, mode: "string" }).defaultNow().notNull(),
+  secondFactorAt: timestamp("second_factor_at", { withTimezone: true, mode: "string" }),
+});
+
+export const rememberedDevices = pgTable("remembered_devices", {
+  id: integer().generatedAlwaysAsIdentity().primaryKey(),
+  userId: integer("user_id").notNull().references(() => users.id),
+  sessionId: integer("session_id").notNull().references(() => sessions.id),
+  tokenHash: text("token_hash").notNull().unique(),
+  expiresAt: timestamp("expires_at", { withTimezone: true, mode: "string" }).notNull(),
 });
 
 export const changeLog = pgTable("change_log", {

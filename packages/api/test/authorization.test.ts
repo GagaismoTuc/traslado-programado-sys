@@ -14,6 +14,11 @@ const authorizationEvidence = new Map([
   ["POST /users", "lets Oficina manage users and immediately invalidates a disabled user's sessions"],
   ["PATCH /users/:id/password", "lets Oficina manage users and immediately invalidates a disabled user's sessions"],
   ["PATCH /users/:id/disable", "lets Oficina manage users and immediately invalidates a disabled user's sessions"],
+  ["POST /auth/totp/enrol", "keeps an Oficina password login in a pending state outside TOTP, me and logout while the Chofer login stays as before"],
+  ["POST /auth/totp/verify", "keeps an Oficina password login in a pending state outside TOTP, me and logout while the Chofer login stays as before"],
+  ["PATCH /users/:id/persistent-session", "lets only the Oficina change the persistent-session setting of Oficina accounts and logs each change"],
+  ["GET /users/:id/sessions", "lists and revokes a user's device sessions only for the Oficina and only by a matching user and session"],
+  ["DELETE /users/:id/sessions/:sessionId", "lists and revokes a user's device sessions only for the Oficina and only by a matching user and session"],
 ]);
 
 describe("API route authorization coverage", () => {
@@ -34,6 +39,11 @@ describe("API route authorization coverage", () => {
       ["POST", "/users", { username: "new", password: "secret", role: "driver" }],
       ["PATCH", "/users/1/password", { password: "new-secret" }],
       ["PATCH", "/users/1/disable", {}],
+      ["POST", "/auth/totp/enrol", {}],
+      ["POST", "/auth/totp/verify", { code: "123456" }],
+      ["PATCH", "/users/1/persistent-session", { persistent: true }],
+      ["GET", "/users/1/sessions"],
+      ["DELETE", "/users/1/sessions/1"],
     ];
     for (const [method, path, body] of probes) {
       const response = await app.request(path, {

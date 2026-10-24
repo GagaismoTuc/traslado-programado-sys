@@ -15,12 +15,14 @@
     "start": "tsx src/server.ts",
     "db:bootstrap": "tsx src/bootstrap.ts",
     "db:bootstrap-office": "tsx src/bootstrap-office.ts",
+    "db:break-glass-office": "tsx src/break-glass-office.ts",
     "db:generate": "drizzle-kit generate",
     "db:migrate": "tsx src/migrate.ts"
   },
   "dependencies": {
-    "@traslado/shared": "workspace:*",
     "@hono/node-server": "2.0.12",
+    "@oslojs/otp": "1.1.0",
+    "@traslado/shared": "workspace:*",
     "drizzle-orm": "0.45.3",
     "hono": "4.13.13",
     "pg": "8.23.1",
