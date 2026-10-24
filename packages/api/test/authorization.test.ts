@@ -16,6 +16,7 @@ const authorizationEvidence = new Map([
   ["PATCH /users/:id/disable", "lets Oficina manage users and immediately invalidates a disabled user's sessions"],
   ["GET /destinations", "allows only an authenticated Oficina user to create or list Destinos"],
   ["POST /destinations", "allows only an authenticated Oficina user to create or list Destinos"],
+  ["POST /geocode", "answers Suggest pin through an Oficina-only POST with a validated query and returns only lat, lng and displayName"],
 ]);
 
 describe("API route authorization coverage", () => {
@@ -38,6 +39,7 @@ describe("API route authorization coverage", () => {
       ["PATCH", "/users/1/disable", {}],
       ["GET", "/destinations"],
       ["POST", "/destinations", { name: "Escuela", kind: "school", address: "Calle Inventada 101", lat: -26.8, lng: -65.2 }],
+      ["POST", "/geocode", { query: "Calle Inventada 101" }],
     ];
     for (const [method, path, body] of probes) {
       const response = await app.request(path, {

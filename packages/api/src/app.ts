@@ -3,6 +3,7 @@ import { getConnInfo } from "@hono/node-server/conninfo";
 import { Hono, type Context } from "hono";
 import type { ServerEpoch } from "@traslado/shared";
 import { createSessionToken, hashPassword, hashSessionToken, normalizeUsername, verifyPassword } from "./auth.js";
+import type { GeocodeResult, Geocoder } from "./geocoding.js";
 
 type QueryResult = { rows: Record<string, unknown>[]; rowCount: number | null };
 type Queryable = { query: (sql: string, values?: unknown[]) => Promise<unknown> };
@@ -22,6 +23,7 @@ export type AppConfig = {
   healthTimeoutMs?: number;
   trustedOrigins?: string[];
   getClientIp?: (context: Context) => string;
+  now?: () => number;
 };
 
 type UserRow = { id: number; username: string; password_hash: string; role: string; disabled_at: string | null };
@@ -34,6 +36,8 @@ const LOGIN_WINDOW_MS = 15 * 60 * 1000;
 const loginFailures = new Map<string, { count: number; expiresAt: number }>();
 const loginAttempts = new Map<string, number>();
 const dummyPasswordHash = hashPassword("not-a-real-user-password");
+const GEOCODE_INTERVAL_MS = 1000;
+const GEOCODE_CACHE_LIMIT = 500;
 const DESTINATION_KINDS = ["school", "clinic", "therapy", "day_centre", "other"];
 const DESTINATION_COLUMNS =
   `id, name, kind, address, access_notes AS "accessNotes", latitude AS lat, longitude AS lng, created_at AS "createdAt"`;
@@ -165,9 +169,18 @@ function parseDestination(body: unknown) {
   return { name, kind, address, accessNotes, lat, lng };
 }
 
-export function createApp({ db, routing, config }: { db: HealthDatabase; routing: RoutingHealth; config: AppConfig }) {
+export function createApp({ db, routing, geocoder, config }: {
+  db: HealthDatabase;
+  routing: RoutingHealth;
+  geocoder?: Geocoder;
+  config: AppConfig;
+}) {
   if (!config.serverEpoch.trim()) throw new Error("SERVER_EPOCH is required");
   const healthTimeoutMs = config.healthTimeoutMs ?? 1000;
+  const now = config.now ?? Date.now;
+  // One geocoder request per second for the whole process; cached answers do not use the slot.
+  const geocodeCache = new Map<string, GeocodeResult | null>();
+  let nextGeocodeAt = 0;
   const app = new Hono()
     .use("*", async (context, next) => {
       try {
@@ -392,6 +405,36 @@ export function createApp({ db, routing, config }: { db: HealthDatabase; routing
         return row;
       });
       return context.json({ destination: created }, 201);
+    })
+    .post("/geocode", async (context) => {
+      const user = await currentUser(db, context);
+      if (!user) return context.json({ error: "Authentication required" }, 401);
+      if (!isOffice(user)) return context.json({ error: "Office role required" }, 403);
+      const body = await context.req.json().catch(() => null);
+      const query = isObject(body) ? boundedText(body.query, 500) : null;
+      if (!query) return context.json({ error: "Invalid request" }, 400);
+      if (!geocoder) return context.json({ error: "Address search is turned off" }, 503);
+      const key = query.toLowerCase();
+      let result = geocodeCache.get(key);
+      if (geocodeCache.has(key)) {
+        geocodeCache.delete(key);
+      } else {
+        const startedAt = now();
+        if (startedAt < nextGeocodeAt) {
+          context.header("Retry-After", String(Math.ceil((nextGeocodeAt - startedAt) / 1000)));
+          return context.json({ error: "Too many address searches" }, 429);
+        }
+        nextGeocodeAt = startedAt + GEOCODE_INTERVAL_MS;
+        try {
+          result = await geocoder(query);
+        } catch {
+          return context.json({ error: "Address search is unavailable" }, 502);
+        }
+        if (geocodeCache.size >= GEOCODE_CACHE_LIMIT) geocodeCache.delete(geocodeCache.keys().next().value!);
+      }
+      geocodeCache.set(key, result ?? null);
+      if (!result) return context.json({ error: "No match for this address" }, 404);
+      return context.json({ lat: result.lat, lng: result.lng, displayName: result.displayName });
     })
     .onError((_error, context) => {
       context.header("X-Server-Epoch", config.serverEpoch);
