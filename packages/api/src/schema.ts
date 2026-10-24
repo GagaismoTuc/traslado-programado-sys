@@ -1,4 +1,5 @@
-import { integer, jsonb, pgTable, text, timestamp, uniqueIndex } from "drizzle-orm/pg-core";
+import { sql } from "drizzle-orm";
+import { check, doublePrecision, integer, jsonb, pgTable, text, timestamp, uniqueIndex } from "drizzle-orm/pg-core";
 
 export const foundationPermissionProbe = pgTable("foundation_permission_probe", {
   id: integer().generatedAlwaysAsIdentity().primaryKey(),
@@ -35,3 +36,18 @@ export const changeLog = pgTable("change_log", {
   after: jsonb("after_data"),
   occurredAt: timestamp("occurred_at", { withTimezone: true, mode: "string" }).defaultNow().notNull(),
 });
+
+export const destinations = pgTable("destinations", {
+  id: integer().generatedAlwaysAsIdentity().primaryKey(),
+  name: text().notNull(),
+  kind: text().notNull(),
+  address: text().notNull(),
+  accessNotes: text("access_notes"),
+  latitude: doublePrecision().notNull(),
+  longitude: doublePrecision().notNull(),
+  createdAt: timestamp("created_at", { withTimezone: true, mode: "string" }).defaultNow().notNull(),
+}, (table) => [
+  check("destinations_kind_check", sql`${table.kind} IN ('school', 'clinic', 'therapy', 'day_centre', 'other')`),
+  check("destinations_latitude_check", sql`${table.latitude} BETWEEN -90 AND 90`),
+  check("destinations_longitude_check", sql`${table.longitude} BETWEEN -180 AND 180`),
+]);

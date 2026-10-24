@@ -6,6 +6,9 @@ const configSchema = z.object({
   OSRM_URL: z.string({ error: "OSRM_URL must be a valid URL" }).url("OSRM_URL must be a valid URL"),
   VROOM_URL: z.string({ error: "VROOM_URL must be a valid URL" }).url("VROOM_URL must be a valid URL"),
   PORT: z.coerce.number().int().min(1).max(65535).default(3000),
+  GEOCODER: z.enum(["off", "nominatim"], { error: "GEOCODER must be off or nominatim" }).default("off"),
+  NOMINATIM_URL: z.string().url("NOMINATIM_URL must be a valid URL").default("https://nominatim.openstreetmap.org"),
+  NOMINATIM_USER_AGENT: z.string().trim().min(1).default("traslado-programado (+https://github.com/GagaismoTuc/traslado-programado-sys)"),
 });
 
 export type ServerConfig = {
@@ -15,6 +18,9 @@ export type ServerConfig = {
   vroomUrl: string;
   port: number;
   trustedOrigins: string[];
+  geocoder: "off" | "nominatim";
+  nominatimUrl: string;
+  nominatimUserAgent: string;
 };
 
 const DEFAULT_TRUSTED_ORIGINS = [
@@ -53,5 +59,8 @@ export function readConfig(environment: NodeJS.ProcessEnv = process.env): Server
     vroomUrl: result.data.VROOM_URL,
     port: result.data.PORT,
     trustedOrigins: readTrustedOrigins(environment.AUTH_ALLOWED_ORIGINS),
+    geocoder: result.data.GEOCODER,
+    nominatimUrl: result.data.NOMINATIM_URL,
+    nominatimUserAgent: result.data.NOMINATIM_USER_AGENT,
   };
 }

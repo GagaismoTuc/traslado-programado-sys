@@ -1,6 +1,7 @@
 import { useEffect, useState, type FormEvent } from "react";
 import { hc } from "hono/client";
 import type { AppType } from "@traslado/api";
+import { DestinationsPage } from "./DestinationsPage";
 
 const apiUrl = import.meta.env.VITE_API_URL ?? "http://localhost:3000";
 const api = hc<AppType>(apiUrl);
@@ -115,6 +116,7 @@ function UsersPage() {
   return <main>
     <h1>Users</h1>
     <button type="button" onClick={() => void logout()}>Sign out</button>
+    <a href="/destinations">Destinations</a>
     {message && <p role="status">{message}</p>}
     <form onSubmit={createUser}>
       <h2>Create user</h2>
@@ -138,5 +140,7 @@ function UsersPage() {
 }
 
 export function App() {
-  return typeof window !== "undefined" && window.location.pathname === "/users" ? <UsersPage /> : <SignInPage />;
+  const path = typeof window !== "undefined" ? window.location.pathname : "/";
+  if (path === "/destinations") return <DestinationsPage />;
+  return path === "/users" ? <UsersPage /> : <SignInPage />;
 }

@@ -2,11 +2,15 @@ import { serve } from "@hono/node-server";
 import { createApp } from "./app.js";
 import { readConfig } from "./config.js";
 import { createPool } from "./db.js";
+import { createNominatimGeocoder } from "./geocoding.js";
 import { createRoutingHealth } from "./routing.js";
 
 const config = readConfig();
 const pool = createPool(config.databaseUrl);
-const app = createApp({ db: pool, routing: createRoutingHealth(config), config });
+const geocoder = config.geocoder === "nominatim"
+  ? createNominatimGeocoder({ url: config.nominatimUrl, userAgent: config.nominatimUserAgent })
+  : undefined;
+const app = createApp({ db: pool, routing: createRoutingHealth(config), geocoder, config });
 const server = serve({ fetch: app.fetch, port: config.port, hostname: "0.0.0.0" });
 
 async function shutdown() {
