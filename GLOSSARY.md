@@ -15,8 +15,12 @@ An adult who must travel with a specific Pasajero and takes a seat in the Vehíc
 _Avoid_: tutor, asistente
 
 **Chofer** (Driver):
-A person who drives one Vehículo and carries out its Recorridos.
+A person who drives a Vehículo on each of their Recorridos, usually the same one; when it breaks down they carry on with a replacement Vehículo.
 _Avoid_: conductor, chango
+
+**Chofer habitual** (Usual driver):
+The Chofer a Pasajero usually travels with. The Oficina keeps it when it can, because the child bonds with the driver.
+_Avoid_: chofer fijo, chofer asignado
 
 **Vehículo** (Vehicle):
 A van of the fleet, identified by its plate, with a fixed number of seats for Pasajeros and Acompañantes.
@@ -26,13 +30,29 @@ _Avoid_: móvil, unidad, camioneta
 A person the family names as allowed to receive a Pasajero at home.
 _Avoid_: responsable, tutor (as a delivery role)
 
+**Responsable legal** (Legal guardian):
+The Adulto autorizado who signed the Pasajero's Consentimiento. Only they can give an Autorización puntual.
+_Avoid_: tutor, padre, titular
+
+**Autorización puntual** (One-off authorization):
+Permission a Responsable legal gives by phone, recorded by the Oficina, to hand a Pasajero to one named adult on one Traslado when nobody else can receive them. It is used once.
+_Avoid_: permiso, excepción
+
 **Receptor** (Receiver):
-The person who actually received a Pasajero when it was marked Entregado: an Adulto autorizado, the Destino, the receiving Chofer in a Traspaso, or, only when the Pasajero's Consentimiento allows it, another adult identified by name and DNI.
+The person who actually received a Pasajero when it was marked Entregado: an Adulto autorizado, the Destino, the receiving Chofer in a Trasbordo, another adult identified by name and DNI when the Pasajero's Consentimiento or an Autorización puntual allows it, or, when nobody can receive the Pasajero, the company's staff at its base.
 _Avoid_: quien recibe, firmante
 
 **Adaptación** (Vehicle feature):
 Equipment a Vehículo has that some Pasajeros require, such as a wheelchair ramp.
 _Avoid_: equipamiento, accesorio
+
+**Asiento delantero** (Front seat):
+The seat next to the Chofer. A Vehículo has one, and some Pasajeros must always travel in it.
+_Avoid_: adelante, copiloto
+
+**Vencimiento** (Expiry):
+The date on which a document of a Vehículo or a Chofer stops being valid, such as the VTV, the driving licence or the health certificate.
+_Avoid_: caducidad, renovación
 
 **Oficina** (Office):
 The staff who plan and follow the day: the owner, the planner and the secretary. All of them have the same permissions.
@@ -41,12 +61,20 @@ _Avoid_: administrador, secretario (as role names)
 ## Planning
 
 **Destino** (Destination):
-An institution a Pasajero attends, such as a school, clinic, therapy centre or day centre.
+An institution, or one of its sites, that a Pasajero attends, such as a school, clinic, therapy centre or day centre. Each site of an institution is its own Destino.
 _Avoid_: institución, escuela, lugar
 
+**Tolerancia de llegada** (Arrival tolerance):
+How many minutes after the target time a Pasajero may still arrive at a Destino. Therapy centres allow none; schools and day centres allow half an hour.
+_Avoid_: margen, demora permitida
+
 **Traslado** (Transfer):
-One leg of one Pasajero between their home and a Destino, with a target time. An *entrada* goes home → Destino and targets the arrival time; a *salida* goes Destino → home and targets the pick-up time.
+One leg of one Pasajero between their home and a Destino, or between two Destinos, with a target time. An *entrada* ends at a Destino and targets the arrival time; it usually starts at home but may start at another Destino. A *salida* goes Destino → home and targets the pick-up time.
 _Avoid_: viaje, servicio
+
+**Distancia directa** (Direct distance):
+The road distance of a Traslado as if the Pasajero travelled alone between home and the Destino, without the detours of a shared Recorrido. It is what obras sociales pay for.
+_Avoid_: km recorridos, kilometraje
 
 **Recorrido** (Route):
 The ordered stops one Vehículo with its Chofer makes in one part of the day, serving several Traslados.
@@ -100,9 +128,9 @@ The Chofer's mark that a Pasajero was not there to be picked up.
 The Chofer's mark that a Pasajero was handed over at the end of a Traslado. Its time is the proof given to families and institutions.
 _Avoid_: llegó, presente
 
-**Traspaso** (Transfer):
-The handover of a Pasajero who is on board from one Chofer to another during a Traslado, for example when a Vehículo breaks down. It is recorded as an Entregado to the receiving Chofer and a Subió in the receiving Recorrido.
-_Avoid_: transbordo, cambio de vehículo
+**Trasbordo** (Transshipment):
+The handover of a Pasajero who is on board from one Chofer to another during a Traslado. The Oficina plans it at a fixed place and time, or it happens during a Recorrido, for example when a Vehículo breaks down. It is recorded as an Entregado to the receiving Chofer and a Subió in the receiving Recorrido.
+_Avoid_: traspaso, transbordo, cambio de vehículo
 
 **Incidente** (Incident):
 A problem reported by a Chofer during a Recorrido, such as a delay, a vehicle fault or an accident.
