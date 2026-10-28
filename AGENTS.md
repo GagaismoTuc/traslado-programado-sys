@@ -15,6 +15,7 @@ Single-context: one `GLOSSARY.md` and `docs/adr/` at the repo root. See `docs/ag
 ### Project data and migrations
 
 - Never use real personal data in development, CI, or staging; use synthetic test data only.
+- Never store a Pasajero's sex, gender or diagnosis. Seat or travel restrictions are stored as neutral requirements (for example, the Asiento delantero) without their reason.
 - Keep one database migration per ticket. If another migration lands first, merge `origin/main` and regenerate with `db:generate` before continuing.
 
 <!-- orca-stack:begin -->
