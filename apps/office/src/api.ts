@@ -11,6 +11,18 @@ export async function send(path: string, method: string, body?: unknown) {
   });
 }
 
+/** The API's own `error` text when it sent one, otherwise the fallback. */
+export async function readError(response: Response, fallback: string) {
+  const result = await response.json().catch(() => null) as { error?: unknown } | null;
+  return typeof result?.error === "string" ? result.error : fallback;
+}
+
+export async function isSecondFactorRequired(response: Response) {
+  if (response.status !== 401) return false;
+  const result = await response.clone().json().catch(() => null) as { code?: unknown } | null;
+  return result?.code === "second_factor_required";
+}
+
 const geocodeErrors: Record<number, string> = {
   404: "No match for this address. Place the pin on the map by hand.",
   429: "Too many address searches. Wait a second and try again, or place the pin on the map by hand.",

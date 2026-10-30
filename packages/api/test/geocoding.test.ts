@@ -4,6 +4,7 @@ import { hashPassword } from "../src/auth.js";
 import { readConfig } from "../src/config.js";
 import { createPool } from "../src/db.js";
 import { createNominatimGeocoder, type Geocoder } from "../src/geocoding.js";
+import { getSessionCookie, signInOffice } from "./helpers/office-session.js";
 
 const appPool = createPool(process.env.TEST_DATABASE_URL!);
 const migrationPool = createPool(process.env.TEST_MIGRATION_DATABASE_URL!);
@@ -11,7 +12,7 @@ const routingUp: RoutingHealth = { osrm: async () => undefined, vroom: async () 
 const suggestion = { lat: -26.8241, lng: -65.2036, displayName: "Calle Inventada 101, San Miguel de Tucumán" };
 
 function appWith(geocoder: Geocoder | undefined, clock = { now: 1_000_000 }) {
-  const app = createApp({ db: appPool, routing: routingUp, geocoder, config: { serverEpoch: "geocoding-test", now: () => clock.now } });
+  const app = createApp({ db: appPool, routing: routingUp, geocoder, config: { serverEpoch: "geocoding-test", now: () => new Date(clock.now) } });
   return async (path: string, method: string, body?: unknown, cookie?: string) => await app.request(path, {
     method,
     headers: {
@@ -31,10 +32,10 @@ async function signIn(role: "office" | "driver") {
     await hashPassword("password"),
     role,
   ]);
+  const signInApp = createApp({ db: appPool, routing: routingUp, config: { serverEpoch: "geocoding-test", now: () => new Date(1_000_000) } });
+  if (role === "office") return (await signInOffice(signInApp, migrationPool, username, "password")).cookie;
   const response = await appWith(undefined)("/auth/login", "POST", { username, password: "password", deviceLabel: "Test browser" });
-  const token = response.headers.get("set-cookie")?.match(/^session=([^;]+)/)?.[1];
-  if (!token) throw new Error("session cookie was not set");
-  return `session=${token}`;
+  return getSessionCookie(response).cookie;
 }
 
 beforeAll(async () => {

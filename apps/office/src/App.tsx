@@ -1,17 +1,19 @@
 import { useEffect, useState, type FormEvent } from "react";
 import { hc } from "hono/client";
 import type { AppType } from "@traslado/api";
-import { apiUrl, send } from "./api";
+import { apiUrl, isSecondFactorRequired, readError, send } from "./api";
 import { DestinationsPage } from "./DestinationsPage";
 import { DriversPage } from "./DriversPage";
 import { OfficeNav } from "./OfficeNav";
+import { SecondFactorPage } from "./SecondFactor";
+import { DeviceSessions, PersistentSessionToggle } from "./UserAccess";
 import { VehicleFeaturesPage } from "./VehicleFeaturesPage";
 import { VehiclesPage } from "./VehiclesPage";
 
 const api = hc<AppType>(apiUrl);
 void api.health.$get;
 
-type User = { id: number; username: string; role: "office" | "driver"; disabled_at: string | null };
+type User = { id: number; username: string; role: "office" | "driver"; disabled_at: string | null; persistent_session: boolean };
 
 function SignInPage() {
   const [error, setError] = useState("");
@@ -32,7 +34,8 @@ function SignInPage() {
         const result = await response.json() as { error?: string };
         setError(result.error ?? "Sign-in failed");
       } else {
-        window.location.assign("/users");
+        const result = await response.json() as { secondFactor?: string };
+        window.location.assign(result.secondFactor ? "/second-factor" : "/users");
       }
     } catch {
       setError("Unable to reach the server");
@@ -59,6 +62,10 @@ function UsersPage() {
 
   async function loadUsers() {
     const response = await send("/users", "GET");
+    if (await isSecondFactorRequired(response)) {
+      window.location.assign("/second-factor");
+      return;
+    }
     if (response.status === 401) {
       window.location.assign("/");
       return;
@@ -99,7 +106,7 @@ function UsersPage() {
 
   async function disableUser(id: number) {
     const response = await send(`/users/${id}/disable`, "PATCH", {});
-    setMessage(response.ok ? "User disabled" : "Unable to disable user");
+    setMessage(response.ok ? "User disabled" : await readError(response, "Unable to disable user"));
     if (response.ok) await loadUsers();
   }
 
@@ -129,6 +136,8 @@ function UsersPage() {
           <button type="submit">Reset password</button>
         </form>
         <button type="button" onClick={() => void disableUser(user.id)}>Disable user</button>
+        {user.role === "office" && <PersistentSessionToggle userId={user.id} persistent={user.persistent_session} />}
+        <DeviceSessions userId={user.id} />
       </>}
     </li>)}</ul>
   </main>;
@@ -136,6 +145,7 @@ function UsersPage() {
 
 export function App() {
   const path = typeof window !== "undefined" ? window.location.pathname : "/";
+  if (path === "/second-factor") return <SecondFactorPage />;
   if (path === "/destinations") return <DestinationsPage />;
   if (path === "/vehicle-features") return <VehicleFeaturesPage />;
   if (path === "/vehicles") return <VehiclesPage />;

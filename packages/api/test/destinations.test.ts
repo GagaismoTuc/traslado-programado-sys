@@ -2,6 +2,7 @@ import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { createApp, type RoutingHealth } from "../src/app.js";
 import { hashPassword } from "../src/auth.js";
 import { createPool } from "../src/db.js";
+import { getSessionCookie, signInOffice } from "./helpers/office-session.js";
 
 const appPool = createPool(process.env.TEST_DATABASE_URL!);
 const migrationPool = createPool(process.env.TEST_MIGRATION_DATABASE_URL!);
@@ -36,10 +37,9 @@ async function signIn(username: string, role: "office" | "driver") {
     await hashPassword(`${username}-password`),
     role,
   ]);
+  if (role === "office") return (await signInOffice(app, migrationPool, username, `${username}-password`)).cookie;
   const response = await request("/auth/login", "POST", { username, password: `${username}-password`, deviceLabel: "Test browser" });
-  const token = response.headers.get("set-cookie")?.match(/^session=([^;]+)/)?.[1];
-  if (!token) throw new Error("session cookie was not set");
-  return `session=${token}`;
+  return getSessionCookie(response).cookie;
 }
 
 async function counts() {

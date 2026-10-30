@@ -2,6 +2,7 @@ import { beforeAll, afterAll, beforeEach, describe, expect, it } from "vitest";
 import { createApp, type RoutingHealth } from "../src/app.js";
 import { hashPassword } from "../src/auth.js";
 import { createPool } from "../src/db.js";
+import { getSessionCookie, signInOffice } from "./helpers/office-session.js";
 
 const appPool = createPool(process.env.TEST_DATABASE_URL!);
 const migrationPool = createPool(process.env.TEST_MIGRATION_DATABASE_URL!);
@@ -39,13 +40,6 @@ async function seedUser(username: string, password: string, role: "office" | "dr
   return Number(result.rows[0].id);
 }
 
-function getSessionCookie(response: Response) {
-  const cookie = response.headers.get("set-cookie");
-  const token = cookie?.match(/^session=([^;]+)/)?.[1];
-  if (!cookie || !token) throw new Error("session cookie was not set");
-  return { cookie: `session=${token}`, header: cookie };
-}
-
 beforeAll(async () => {
   await appPool.query("SELECT 1");
 });
@@ -74,10 +68,9 @@ describe("account authentication", () => {
 
   it("creates labeled per-device sessions, sets a secure cookie, and logs out", async () => {
     await seedUser("office", "correct-password", "office");
-    const first = await login("office", "correct-password", "Office laptop");
-    const firstCookie = getSessionCookie(first);
-    const second = await login("office", "correct-password", "Office phone");
-    const secondCookie = getSessionCookie(second);
+    const firstCookie = await signInOffice(app, migrationPool, "office", "correct-password", "Office laptop");
+    const first = firstCookie.response;
+    const secondCookie = await signInOffice(app, migrationPool, "office", "correct-password", "Office phone");
 
     expect(first.status).toBe(200);
     expect(firstCookie.header).toMatch(/HttpOnly/i);
@@ -168,7 +161,7 @@ describe("account authentication", () => {
 
   it("lets Oficina manage users and immediately invalidates a disabled user's sessions", async () => {
     await seedUser("office", "office-password", "office");
-    const officeCookie = getSessionCookie(await login("office", "office-password")).cookie;
+    const officeCookie = (await signInOffice(app, migrationPool, "office", "office-password")).cookie;
     const created = await request("/users", "POST", { username: "driver", password: "driver-password", role: "driver" }, officeCookie);
     const driver = (await created.json()).user;
     const driverCookie = getSessionCookie(await login("driver", "driver-password")).cookie;
@@ -183,7 +176,7 @@ describe("account authentication", () => {
 
   it("keeps password material out of change log rows and denies application updates or deletes", async () => {
     await seedUser("office", "office-password", "office");
-    const officeCookie = getSessionCookie(await login("office", "office-password")).cookie;
+    const officeCookie = (await signInOffice(app, migrationPool, "office", "office-password")).cookie;
     const created = await request("/users", "POST", { username: "driver", password: "first-secret", role: "driver" }, officeCookie);
     const driver = (await created.json()).user;
     expect(await request(`/users/${driver.id}/password`, "PATCH", { password: "second-secret" }, officeCookie).then((response) => response.status)).toBe(204);
@@ -199,7 +192,7 @@ describe("account authentication", () => {
 
   it("rolls back an account write when its change log append fails", async () => {
     await seedUser("office", "office-password", "office");
-    const officeCookie = getSessionCookie(await login("office", "office-password")).cookie;
+    const officeCookie = (await signInOffice(app, migrationPool, "office", "office-password")).cookie;
     await migrationPool.query("REVOKE INSERT ON change_log FROM traslado_app");
     let result: Response;
     try {

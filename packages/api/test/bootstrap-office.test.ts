@@ -71,6 +71,30 @@ describe("initial Office bootstrap command", () => {
     expect(audit.rows[0].count).toBe(0);
   });
 
+  it("ignores disabled Office accounts and refuses a username that belongs to a disabled account", async () => {
+    const { runBootstrapOffice } = await import("../src/bootstrap-office.js");
+    await migrationPool.query("INSERT INTO users (username, password_hash, role, disabled_at) VALUES ($1, $2, 'office', now())", [
+      "retired-office",
+      await hashPassword("retired-password"),
+    ]);
+
+    await expect(
+      runBootstrapOffice(migrationPool, ["Retired-Office"], { BOOTSTRAP_OFFICE_PASSWORD: "new-secret" }),
+    ).rejects.toThrow("Username retired-office belongs to a disabled account; choose another username (db:break-glass-office recovers an active Office account)");
+    await expect(migrationPool.query("SELECT count(*)::int AS count FROM users")).resolves.toMatchObject({ rows: [{ count: 1 }] });
+
+    const created = await runBootstrapOffice(migrationPool, ["new-office"], { BOOTSTRAP_OFFICE_PASSWORD: "new-secret" });
+    expect(created.username).toBe("new-office");
+    const users = await migrationPool.query("SELECT username, role, disabled_at IS NULL AS active FROM users ORDER BY id");
+    expect(users.rows).toEqual([
+      { username: "retired-office", role: "office", active: false },
+      { username: "new-office", role: "office", active: true },
+    ]);
+    await expect(
+      runBootstrapOffice(migrationPool, ["third-office"], { BOOTSTRAP_OFFICE_PASSWORD: "third-secret" }),
+    ).rejects.toThrow("An Office account already exists");
+  });
+
   it("serializes concurrent commands so only one initial Office account is created", async () => {
     const { runBootstrapOffice } = await import("../src/bootstrap-office.js");
     const outcomes = await Promise.allSettled([

@@ -3,6 +3,7 @@ import { isCapacityExceeded } from "@traslado/shared";
 import { createApp, type RoutingHealth } from "../src/app.js";
 import { hashPassword } from "../src/auth.js";
 import { createPool } from "../src/db.js";
+import { getSessionCookie, signInOffice } from "./helpers/office-session.js";
 
 const appPool = createPool(process.env.TEST_DATABASE_URL!);
 const migrationPool = createPool(process.env.TEST_MIGRATION_DATABASE_URL!);
@@ -31,14 +32,16 @@ async function seedUser(username: string, role: "office" | "driver") {
 
 async function signIn(username: string, role: "office" | "driver") {
   const user = await seedUser(username, role);
+  if (role === "office") {
+    const { cookie } = await signInOffice(app, migrationPool, username, `${username}-password`);
+    return { cookie, user };
+  }
   const response = await request("/auth/login", "POST", {
     username,
     password: `${username}-password`,
     deviceLabel: "Test browser",
   });
-  const token = response.headers.get("set-cookie")?.match(/^session=([^;]+)/)?.[1];
-  if (!token) throw new Error("session cookie was not set");
-  return { cookie: `session=${token}`, user };
+  return { cookie: getSessionCookie(response).cookie, user };
 }
 
 beforeAll(async () => {
@@ -81,6 +84,7 @@ describe("Adaptaciones (vehicle features)", () => {
     expect((await updated.json()).feature).toMatchObject({ id: feature.id, name: "rampa hidráulica" });
 
     expect((await request("/vehicle-features/9999", "PATCH", { name: "inexistente" }, office)).status).toBe(404);
+    expect((await request("/vehicle-features/3000000000", "PATCH", { name: "inexistente" }, office)).status).toBe(400);
 
     const listed = await request("/vehicle-features", "GET", undefined, office);
     expect(listed.status).toBe(200);
@@ -136,6 +140,8 @@ describe("Vehículos", () => {
       { plate: "AA101BB", model: "Furgón", seats: "5", featureIds: [] },
       { plate: "AA101BB", model: "Furgón", seats: 5, front: 0, featureIds: [] },
       { plate: "AA101BB", model: "Furgón", seats: 5, front: 2, featureIds: [] },
+      { plate: "AA101BB", model: "Furgón", seats: 3_000_000_000, featureIds: [] },
+      { plate: "AA101BB", model: "Furgón", seats: 5, featureIds: [3_000_000_000] },
       { plate: "AA101BB", model: "Furgón", seats: 5, featureIds: [99999] },
       { plate: "AA101BB", model: "Furgón", seats: 5, featureIds: "not-an-array" },
     ]) {
@@ -221,6 +227,7 @@ describe("Vehículos", () => {
     expect((await request(`/vehicles/${small.id}/deactivate`, "PATCH", {}, office)).status).toBe(204);
     expect((await request(`/vehicles/${small.id}/deactivate`, "PATCH", {}, office)).status).toBe(204);
     expect((await request("/vehicles/99999/deactivate", "PATCH", {}, office)).status).toBe(404);
+    expect((await request("/vehicles/3000000000/deactivate", "PATCH", {}, office)).status).toBe(400);
     // Cannot edit a deactivated Vehículo
     expect((await request(`/vehicles/${small.id}`, "PATCH", {
       plate: "BB202CC",
@@ -318,6 +325,8 @@ describe("Choferes", () => {
       { ...validDriver, homeLat: null },
       { ...validDriver, homeLng: undefined },
       { ...validDriver, userId: officeUser.id }, // Rule 6: office user cannot be linked directly as Chofer
+      { ...validDriver, userId: 3_000_000_000 },
+      { ...validDriver, usualVehicleId: 3_000_000_000 },
       { ...validDriver, userId: 99999 },
       { ...validDriver, usualVehicleId: 99999 },
       { ...validDriver, usualVehicleId: inactiveVan.id }, // Deactivated vehicle cannot be set as usual

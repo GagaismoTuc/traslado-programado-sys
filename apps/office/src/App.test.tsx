@@ -23,6 +23,13 @@ describe("office screens", () => {
     expect(markup).toContain('<option value="driver">Driver</option>');
   });
 
+  it("renders the second-factor page at /second-factor", () => {
+    vi.stubGlobal("window", { location: { pathname: "/second-factor" } });
+    const markup = renderToStaticMarkup(<App />);
+    expect(markup).toContain("<h1>Two-factor authentication</h1>");
+    expect(markup).toContain("Checking sign-in...");
+  });
+
   it("renders the Destinos page at /destinations without loading the map library", () => {
     vi.stubGlobal("window", { location: { pathname: "/destinations" } });
     const markup = renderToStaticMarkup(<App />);
