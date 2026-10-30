@@ -3,8 +3,12 @@ import { hc } from "hono/client";
 import type { AppType } from "@traslado/api";
 import { apiUrl, isSecondFactorRequired, readError, send } from "./api";
 import { DestinationsPage } from "./DestinationsPage";
+import { DriversPage } from "./DriversPage";
+import { OfficeNav } from "./OfficeNav";
 import { SecondFactorPage } from "./SecondFactor";
 import { DeviceSessions, PersistentSessionToggle } from "./UserAccess";
+import { VehicleFeaturesPage } from "./VehicleFeaturesPage";
+import { VehiclesPage } from "./VehiclesPage";
 
 const api = hc<AppType>(apiUrl);
 void api.health.$get;
@@ -114,7 +118,7 @@ function UsersPage() {
   return <main>
     <h1>Users</h1>
     <button type="button" onClick={() => void logout()}>Sign out</button>
-    <a href="/destinations">Destinations</a>
+    <OfficeNav />
     {message && <p role="status">{message}</p>}
     <form onSubmit={createUser}>
       <h2>Create user</h2>
@@ -143,5 +147,8 @@ export function App() {
   const path = typeof window !== "undefined" ? window.location.pathname : "/";
   if (path === "/second-factor") return <SecondFactorPage />;
   if (path === "/destinations") return <DestinationsPage />;
+  if (path === "/vehicle-features") return <VehicleFeaturesPage />;
+  if (path === "/vehicles") return <VehiclesPage />;
+  if (path === "/drivers") return <DriversPage />;
   return path === "/users" ? <UsersPage /> : <SignInPage />;
 }

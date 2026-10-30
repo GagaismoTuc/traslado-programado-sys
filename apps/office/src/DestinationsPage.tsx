@@ -1,5 +1,6 @@
 import { useEffect, useRef, useState, type FormEvent } from "react";
-import { send } from "./api";
+import { send, suggestAddressPin } from "./api";
+import { OfficeNav } from "./OfficeNav";
 import { PinPicker, type LatLng } from "./PinPicker";
 
 type Destination = { id: number; name: string; kind: string; address: string; accessNotes: string | null; lat: number; lng: number };
@@ -12,11 +13,6 @@ const KINDS = [
   ["other", "Other"],
 ] as const;
 const kindLabel = new Map<string, string>(KINDS);
-
-const geocodeErrors: Record<number, string> = {
-  404: "No match for this address. Place the pin on the map by hand.",
-  429: "Too many address searches. Wait a second and try again, or place the pin on the map by hand.",
-};
 
 export function DestinationsPage() {
   const [destinations, setDestinations] = useState<Destination[]>([]);
@@ -50,28 +46,16 @@ export function DestinationsPage() {
   }
 
   async function suggestPin() {
-    const query = String(new FormData(form.current!).get("address") ?? "").trim();
-    if (!query) {
-      setGeocodeMessage("Write the address first.");
-      return;
-    }
+    const query = String(new FormData(form.current!).get("address") ?? "");
     setSuggesting(true);
     setGeocodeMessage("");
-    try {
-      const response = await send("/geocode", "POST", { query });
-      if (response.ok) {
-        const result = await response.json() as LatLng & { displayName: string };
-        setPin(null);
-        setSuggestion({ lat: result.lat, lng: result.lng });
-        setGeocodeMessage(`Suggested: ${result.displayName}. Confirm the pin or move it.`);
-      } else {
-        setGeocodeMessage(geocodeErrors[response.status] ?? "Address search is unavailable. Place the pin on the map by hand.");
-      }
-    } catch {
-      setGeocodeMessage("Address search is unavailable. Place the pin on the map by hand.");
-    } finally {
-      setSuggesting(false);
+    const result = await suggestAddressPin(query);
+    if (result.ok) {
+      setPin(null);
+      setSuggestion(result.point);
     }
+    setGeocodeMessage(result.message);
+    setSuggesting(false);
   }
 
   async function save(event: FormEvent<HTMLFormElement>) {
@@ -108,7 +92,7 @@ export function DestinationsPage() {
 
   return <main>
     <h1>Destinations</h1>
-    <a href="/users">Users</a>
+    <OfficeNav />
     {message && <p role="status">{message}</p>}
     <form ref={form} onSubmit={(event) => void save(event)}>
       <h2>New destination</h2>
