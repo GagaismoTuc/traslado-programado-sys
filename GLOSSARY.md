@@ -26,6 +26,10 @@ _Avoid_: chofer fijo, chofer asignado
 A van of the fleet, identified by its plate, with a fixed number of seats for Pasajeros and Acompañantes.
 _Avoid_: móvil, unidad, camioneta
 
+**Vehículo habitual** (Usual vehicle):
+The active Vehículo a Chofer usually drives, used as the default when a new Recorrido is created for that Chofer. Optional for replacement drivers who do not have a fixed van.
+_Avoid_: móvil fijo, camioneta asignada
+
 **Adulto autorizado** (Authorized adult):
 A person the family names as allowed to receive a Pasajero at home.
 _Avoid_: responsable, tutor (as a delivery role)
