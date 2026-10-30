@@ -1,5 +1,5 @@
 import { sql } from "drizzle-orm";
-import { check, doublePrecision, integer, jsonb, pgTable, text, timestamp, uniqueIndex } from "drizzle-orm/pg-core";
+import { check, doublePrecision, integer, jsonb, pgTable, primaryKey, text, timestamp, uniqueIndex } from "drizzle-orm/pg-core";
 
 export const foundationPermissionProbe = pgTable("foundation_permission_probe", {
   id: integer().generatedAlwaysAsIdentity().primaryKey(),
@@ -50,4 +50,48 @@ export const destinations = pgTable("destinations", {
   check("destinations_kind_check", sql`${table.kind} IN ('school', 'clinic', 'therapy', 'day_centre', 'other')`),
   check("destinations_latitude_check", sql`${table.latitude} BETWEEN -90 AND 90`),
   check("destinations_longitude_check", sql`${table.longitude} BETWEEN -180 AND 180`),
+]);
+
+export const vehicleFeatures = pgTable("vehicle_features", {
+  id: integer().generatedAlwaysAsIdentity().primaryKey(),
+  name: text().notNull(),
+  createdAt: timestamp("created_at", { withTimezone: true, mode: "string" }).defaultNow().notNull(),
+}, (table) => [
+  uniqueIndex("vehicle_features_name_lower_unique").on(sql`lower(${table.name})`),
+]);
+
+export const vehicles = pgTable("vehicles", {
+  id: integer().generatedAlwaysAsIdentity().primaryKey(),
+  plate: text().notNull(),
+  model: text().notNull(),
+  seats: integer().notNull(),
+  frontSeats: integer("front_seats").default(1).notNull(),
+  deactivatedAt: timestamp("deactivated_at", { withTimezone: true, mode: "string" }),
+  createdAt: timestamp("created_at", { withTimezone: true, mode: "string" }).defaultNow().notNull(),
+}, (table) => [
+  uniqueIndex("vehicles_active_plate_unique").on(sql`upper(${table.plate})`).where(sql`${table.deactivatedAt} IS NULL`),
+  check("vehicles_seats_positive", sql`${table.seats} > 0`),
+  check("vehicles_front_seats_check", sql`${table.frontSeats} = 1`),
+]);
+
+export const vehicleFeatureAssignments = pgTable("vehicle_feature_assignments", {
+  vehicleId: integer("vehicle_id").notNull().references(() => vehicles.id, { onDelete: "cascade" }),
+  featureId: integer("feature_id").notNull().references(() => vehicleFeatures.id, { onDelete: "restrict" }),
+}, (table) => [
+  primaryKey({ columns: [table.vehicleId, table.featureId] }),
+]);
+
+export const drivers = pgTable("drivers", {
+  id: integer().generatedAlwaysAsIdentity().primaryKey(),
+  userId: integer("user_id").notNull().references(() => users.id, { onDelete: "restrict" }),
+  name: text().notNull(),
+  homeAddress: text("home_address").notNull(),
+  homeLatitude: doublePrecision("home_latitude").notNull(),
+  homeLongitude: doublePrecision("home_longitude").notNull(),
+  usualVehicleId: integer("usual_vehicle_id").references(() => vehicles.id, { onDelete: "restrict" }),
+  createdAt: timestamp("created_at", { withTimezone: true, mode: "string" }).defaultNow().notNull(),
+}, (table) => [
+  uniqueIndex("drivers_user_id_unique").on(table.userId),
+  check("drivers_home_latitude_check", sql`${table.homeLatitude} BETWEEN -90 AND 90`),
+  check("drivers_home_longitude_check", sql`${table.homeLongitude} BETWEEN -180 AND 180`),
 ]);

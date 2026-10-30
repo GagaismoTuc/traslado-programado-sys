@@ -1,22 +1,17 @@
 import { useEffect, useState, type FormEvent } from "react";
 import { hc } from "hono/client";
 import type { AppType } from "@traslado/api";
+import { apiUrl, send } from "./api";
 import { DestinationsPage } from "./DestinationsPage";
+import { DriversPage } from "./DriversPage";
+import { OfficeNav } from "./OfficeNav";
+import { VehicleFeaturesPage } from "./VehicleFeaturesPage";
+import { VehiclesPage } from "./VehiclesPage";
 
-const apiUrl = import.meta.env.VITE_API_URL ?? "http://localhost:3000";
 const api = hc<AppType>(apiUrl);
 void api.health.$get;
 
 type User = { id: number; username: string; role: "office" | "driver"; disabled_at: string | null };
-
-async function send(path: string, method: string, body?: unknown) {
-  return fetch(`${apiUrl}${path}`, {
-    method,
-    credentials: "include",
-    headers: body ? { "Content-Type": "application/json" } : undefined,
-    body: body ? JSON.stringify(body) : undefined,
-  });
-}
 
 function SignInPage() {
   const [error, setError] = useState("");
@@ -116,7 +111,7 @@ function UsersPage() {
   return <main>
     <h1>Users</h1>
     <button type="button" onClick={() => void logout()}>Sign out</button>
-    <a href="/destinations">Destinations</a>
+    <OfficeNav />
     {message && <p role="status">{message}</p>}
     <form onSubmit={createUser}>
       <h2>Create user</h2>
@@ -142,5 +137,8 @@ function UsersPage() {
 export function App() {
   const path = typeof window !== "undefined" ? window.location.pathname : "/";
   if (path === "/destinations") return <DestinationsPage />;
+  if (path === "/vehicle-features") return <VehicleFeaturesPage />;
+  if (path === "/vehicles") return <VehiclesPage />;
+  if (path === "/drivers") return <DriversPage />;
   return path === "/users" ? <UsersPage /> : <SignInPage />;
 }

@@ -43,4 +43,37 @@ describe("office screens", () => {
     expect(markup).toContain("Pin: -26.824100, -65.203600");
     expect(MAP_STYLE_URL).toBe("https://tiles.openfreemap.org/styles/liberty");
   });
+
+  it("renders the Adaptaciones page at /vehicle-features with create form and navigation", () => {
+    vi.stubGlobal("window", { location: { pathname: "/vehicle-features" } });
+    const markup = renderToStaticMarkup(<App />);
+    expect(markup).toContain("<h1>Vehicle features</h1>");
+    expect(markup).toContain('name="name"');
+    expect(markup).toContain("Save feature");
+    expect(markup).toContain('href="/vehicles"');
+    expect(markup).toContain('href="/drivers"');
+  });
+
+  it("renders the Vehículos page at /vehicles with plate, model, seats and front: 1", () => {
+    vi.stubGlobal("window", { location: { pathname: "/vehicles" } });
+    const markup = renderToStaticMarkup(<App />);
+    expect(markup).toContain("<h1>Vehicles</h1>");
+    for (const field of ['name="plate"', 'name="model"', 'name="seats"', 'name="front"']) {
+      expect(markup).toContain(field);
+    }
+    expect(markup).toContain('value="1"');
+    expect(markup).toContain("Save vehicle");
+  });
+
+  it("renders the Choferes page at /drivers with user link, usual vehicle, required home address and disabled save until pin confirmed", () => {
+    vi.stubGlobal("window", { location: { pathname: "/drivers" } });
+    const markup = renderToStaticMarkup(<App />);
+    expect(markup).toContain("<h1>Drivers</h1>");
+    for (const field of ['name="userId"', 'name="name"', 'name="homeAddress"', 'name="usualVehicleId"']) {
+      expect(markup).toContain(field);
+    }
+    expect(markup).toContain("Suggest pin");
+    expect(markup).toContain('data-testid="pin-picker-map"');
+    expect(markup).toMatch(/<button type="submit" disabled="">Save driver<\/button>/);
+  });
 });
