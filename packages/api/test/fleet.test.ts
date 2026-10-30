@@ -221,6 +221,13 @@ describe("Vehículos", () => {
     expect((await request(`/vehicles/${small.id}/deactivate`, "PATCH", {}, office)).status).toBe(204);
     expect((await request(`/vehicles/${small.id}/deactivate`, "PATCH", {}, office)).status).toBe(204);
     expect((await request("/vehicles/99999/deactivate", "PATCH", {}, office)).status).toBe(404);
+    // Cannot edit a deactivated Vehículo
+    expect((await request(`/vehicles/${small.id}`, "PATCH", {
+      plate: "BB202CC",
+      model: "Intento Editar Inactivo",
+      seats: 5,
+      featureIds: [],
+    }, office)).status).toBe(409);
 
     const reusedPlate = await request("/vehicles", "POST", {
       plate: "AA101BB",
@@ -422,6 +429,30 @@ describe("Choferes", () => {
     );
     expect(log.rows.map((r) => r.action)).toEqual(["created", "created", "updated"]);
 
+    // Assign activeVan back as second driver's usualVehicleId, then deactivate activeVan:
+    // driver's usualVehicleId is cleared and logged in the same transaction
+    expect((await request(`/drivers/${second.id}`, "PATCH", {
+      name: "Chofer Sintético Reemplazo",
+      homeAddress: "Pasaje de Prueba 202",
+      homeLat: -26.83,
+      homeLng: -65.21,
+      usualVehicleId: activeVan.id,
+    }, officeCookie)).status).toBe(200);
+    expect((await request(`/vehicles/${activeVan.id}/deactivate`, "PATCH", {}, officeCookie)).status).toBe(204);
+    const afterDeactivate = (await (await request("/drivers", "GET", undefined, officeCookie)).json()).drivers as Array<{
+      id: number;
+      usualVehicleId: number | null;
+      usualVehiclePlate: string | null;
+    }>;
+    expect(afterDeactivate.find((d) => d.id === second.id)).toMatchObject({
+      usualVehicleId: null,
+      usualVehiclePlate: null,
+    });
+    const logAfterDeactivate = await migrationPool.query(
+      "SELECT action FROM change_log WHERE entity = 'driver' ORDER BY id",
+    );
+    expect(logAfterDeactivate.rows.map((r) => r.action)).toEqual(["created", "created", "updated", "updated", "updated"]);
+
     const driverUser3 = await seedUser("chofer-tres", "driver");
     await migrationPool.query("REVOKE INSERT ON change_log FROM traslado_app");
     let withoutLog: Response;
@@ -430,6 +461,7 @@ describe("Choferes", () => {
         ...validDriver,
         userId: driverUser3.id,
         name: "Chofer Sin Log",
+        usualVehicleId: null,
       }, officeCookie);
     } finally {
       await migrationPool.query("GRANT INSERT ON change_log TO traslado_app");

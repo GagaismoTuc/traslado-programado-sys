@@ -46,11 +46,7 @@ export function DestinationsPage() {
   }
 
   async function suggestPin() {
-    const query = String(new FormData(form.current!).get("address") ?? "").trim();
-    if (!query) {
-      setGeocodeMessage("Write the address first.");
-      return;
-    }
+    const query = String(new FormData(form.current!).get("address") ?? "");
     setSuggesting(true);
     setGeocodeMessage("");
     const result = await suggestAddressPin(query);

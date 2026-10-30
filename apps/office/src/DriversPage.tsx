@@ -78,7 +78,11 @@ export function DriversPage() {
     setUserId(String(driver.userId));
     setName(driver.name);
     setHomeAddress(driver.homeAddress);
-    setUsualVehicleId(driver.usualVehicleId === null ? "" : String(driver.usualVehicleId));
+    setUsualVehicleId(
+      driver.usualVehicleId !== null && activeVehicles.some((vehicle) => vehicle.id === driver.usualVehicleId)
+        ? String(driver.usualVehicleId)
+        : "",
+    );
     setPin({ lat: driver.homeLat, lng: driver.homeLng });
     setSuggestion(null);
     setGeocodeMessage("");
@@ -90,10 +94,6 @@ export function DriversPage() {
   }
 
   async function suggestPin() {
-    if (!homeAddress.trim()) {
-      setGeocodeMessage("Write the address first.");
-      return;
-    }
     setSuggesting(true);
     setGeocodeMessage("");
     const result = await suggestAddressPin(homeAddress);

@@ -172,22 +172,32 @@ function parseDestination(body: unknown) {
 
 class InvalidReferenceError extends Error {}
 
+async function requireOffice(db: HealthDatabase, context: Context): Promise<AuthenticatedUser | Response> {
+  const user = await currentUser(db, context);
+  if (!user) return context.json({ error: "Authentication required" }, 401);
+  if (!isOffice(user)) return context.json({ error: "Office role required" }, 403);
+  return user;
+}
+
+function positiveInt(value: unknown) {
+  return typeof value === "number" && Number.isSafeInteger(value) && value > 0 ? value : null;
+}
+
 function parseVehicle(body: unknown) {
   if (!isObject(body)) return null;
   const plateRaw = boundedText(body.plate, 32);
   const plate = plateRaw ? plateRaw.toUpperCase() : null;
   const model = boundedText(body.model, 200);
-  const seats = typeof body.seats === "number" && Number.isSafeInteger(body.seats) && body.seats > 0 && body.seats <= 100
-    ? body.seats
-    : null;
+  const seats = positiveInt(body.seats);
   const front = body.front === undefined || body.front === 1 ? 1 : null;
   let featureIds: number[] | null = [];
   if (body.featureIds !== undefined) {
     if (!Array.isArray(body.featureIds)) return null;
     const ids: number[] = [];
     for (const item of body.featureIds) {
-      if (typeof item !== "number" || !Number.isSafeInteger(item) || item <= 0) return null;
-      ids.push(item);
+      const id = positiveInt(item);
+      if (id === null) return null;
+      ids.push(id);
     }
     featureIds = [...new Set(ids)].sort((a, b) => a - b);
   }
@@ -270,7 +280,7 @@ const DRIVER_SELECT_SQL = `
     d.created_at AS "createdAt"
   FROM drivers d
   JOIN users u ON u.id = d.user_id
-  LEFT JOIN vehicles v ON v.id = d.usual_vehicle_id
+  LEFT JOIN vehicles v ON v.id = d.usual_vehicle_id AND v.deactivated_at IS NULL
 `;
 
 function parseDriverFields(body: unknown) {
@@ -279,15 +289,12 @@ function parseDriverFields(body: unknown) {
   const homeAddress = boundedText(body.homeAddress, 500);
   const homeLat = coordinate(body.homeLat, 90);
   const homeLng = coordinate(body.homeLng, 180);
-  let usualVehicleId: number | null | undefined = null;
-  if (body.usualVehicleId !== undefined && body.usualVehicleId !== null) {
-    if (typeof body.usualVehicleId === "number" && Number.isSafeInteger(body.usualVehicleId) && body.usualVehicleId > 0) {
-      usualVehicleId = body.usualVehicleId;
-    } else {
-      usualVehicleId = undefined;
-    }
+  if (!name || !homeAddress || homeLat === null || homeLng === null) return null;
+  if (body.usualVehicleId === undefined || body.usualVehicleId === null) {
+    return { name, homeAddress, homeLat, homeLng, usualVehicleId: null };
   }
-  if (!name || !homeAddress || homeLat === null || homeLng === null || usualVehicleId === undefined) return null;
+  const usualVehicleId = positiveInt(body.usualVehicleId);
+  if (usualVehicleId === null) return null;
   return { name, homeAddress, homeLat, homeLng, usualVehicleId };
 }
 
@@ -560,18 +567,16 @@ export function createApp({ db, routing, geocoder, config }: {
       return context.json({ destination: created }, 201);
     })
     .get("/vehicle-features", async (context) => {
-      const user = await currentUser(db, context);
-      if (!user) return context.json({ error: "Authentication required" }, 401);
-      if (!isOffice(user)) return context.json({ error: "Office role required" }, 403);
+      const actor = await requireOffice(db, context);
+      if (actor instanceof Response) return actor;
       const result = await db.query(
         `SELECT ${VEHICLE_FEATURE_COLUMNS} FROM vehicle_features ORDER BY lower(name), id`,
       ) as QueryResult;
       return context.json({ features: result.rows });
     })
     .post("/vehicle-features", async (context) => {
-      const actor = await currentUser(db, context);
-      if (!actor) return context.json({ error: "Authentication required" }, 401);
-      if (!isOffice(actor)) return context.json({ error: "Office role required" }, 403);
+      const actor = await requireOffice(db, context);
+      if (actor instanceof Response) return actor;
       const body = await context.req.json().catch(() => null);
       const name = isObject(body) ? boundedText(body.name, 200) : null;
       if (!name) return context.json({ error: "Invalid request" }, 400);
@@ -592,28 +597,23 @@ export function createApp({ db, routing, geocoder, config }: {
       }
     })
     .patch("/vehicle-features/:id", async (context) => {
-      const actor = await currentUser(db, context);
-      if (!actor) return context.json({ error: "Authentication required" }, 401);
-      if (!isOffice(actor)) return context.json({ error: "Office role required" }, 403);
-      const id = Number(context.req.param("id"));
+      const actor = await requireOffice(db, context);
+      if (actor instanceof Response) return actor;
+      const id = positiveInt(Number(context.req.param("id")));
       const body = await context.req.json().catch(() => null);
       const name = isObject(body) ? boundedText(body.name, 200) : null;
-      if (!Number.isSafeInteger(id) || id <= 0 || !name) return context.json({ error: "Invalid request" }, 400);
+      if (!id || !name) return context.json({ error: "Invalid request" }, 400);
       try {
         const updated = await inTransaction(db, async (client) => {
-          const existing = await client.query(
-            "SELECT id, name FROM vehicle_features WHERE id = $1 FOR UPDATE",
-            [id],
-          ) as QueryResult;
+          const existing = await client.query("SELECT id, name FROM vehicle_features WHERE id = $1 FOR UPDATE", [id]) as QueryResult;
           const before = existing.rows[0] as { id: number; name: string } | undefined;
           if (!before) return null;
           const result = await client.query(
             `UPDATE vehicle_features SET name = $1 WHERE id = $2 RETURNING ${VEHICLE_FEATURE_COLUMNS}`,
             [name, id],
           ) as QueryResult;
-          const row = result.rows[0];
           await appendChange(client, actor.id, "vehicle_feature", String(id), "updated", { name: before.name }, { name });
-          return row;
+          return result.rows[0];
         });
         return updated ? context.json({ feature: updated }) : context.json({ error: "Vehicle feature not found" }, 404);
       } catch (error) {
@@ -622,18 +622,16 @@ export function createApp({ db, routing, geocoder, config }: {
       }
     })
     .get("/vehicles", async (context) => {
-      const user = await currentUser(db, context);
-      if (!user) return context.json({ error: "Authentication required" }, 401);
-      if (!isOffice(user)) return context.json({ error: "Office role required" }, 403);
+      const actor = await requireOffice(db, context);
+      if (actor instanceof Response) return actor;
       const result = await db.query(
         `${VEHICLE_SELECT_SQL} GROUP BY v.id ORDER BY v.deactivated_at IS NOT NULL, v.plate, v.id`,
       ) as QueryResult;
       return context.json({ vehicles: result.rows.map(formatVehicleRow) });
     })
     .post("/vehicles", async (context) => {
-      const actor = await currentUser(db, context);
-      if (!actor) return context.json({ error: "Authentication required" }, 401);
-      if (!isOffice(actor)) return context.json({ error: "Office role required" }, 403);
+      const actor = await requireOffice(db, context);
+      if (actor instanceof Response) return actor;
       const vehicle = parseVehicle(await context.req.json().catch(() => null));
       if (!vehicle) return context.json({ error: "Invalid request" }, 400);
       try {
@@ -662,16 +660,20 @@ export function createApp({ db, routing, geocoder, config }: {
       }
     })
     .patch("/vehicles/:id", async (context) => {
-      const actor = await currentUser(db, context);
-      if (!actor) return context.json({ error: "Authentication required" }, 401);
-      if (!isOffice(actor)) return context.json({ error: "Office role required" }, 403);
-      const id = Number(context.req.param("id"));
+      const actor = await requireOffice(db, context);
+      if (actor instanceof Response) return actor;
+      const id = positiveInt(Number(context.req.param("id")));
       const vehicle = parseVehicle(await context.req.json().catch(() => null));
-      if (!Number.isSafeInteger(id) || id <= 0 || !vehicle) return context.json({ error: "Invalid request" }, 400);
+      if (!id || !vehicle) return context.json({ error: "Invalid request" }, 400);
       try {
         const updated = await inTransaction(db, async (client) => {
-          const lock = await client.query("SELECT id FROM vehicles WHERE id = $1 FOR UPDATE", [id]) as QueryResult;
-          if (!lock.rows.length) return null;
+          const lock = await client.query(
+            "SELECT id, deactivated_at FROM vehicles WHERE id = $1 FOR UPDATE",
+            [id],
+          ) as QueryResult;
+          const row = lock.rows[0] as { id: number; deactivated_at: string | null } | undefined;
+          if (!row) return null;
+          if (row.deactivated_at !== null) return "deactivated" as const;
           const before = (await getVehicleById(client, id))!;
           await client.query(
             "UPDATE vehicles SET plate = $1, model = $2, seats = $3, front_seats = $4 WHERE id = $5",
@@ -694,7 +696,9 @@ export function createApp({ db, routing, geocoder, config }: {
           });
           return after;
         });
-        return updated ? context.json({ vehicle: updated }) : context.json({ error: "Vehicle not found" }, 404);
+        if (!updated) return context.json({ error: "Vehicle not found" }, 404);
+        if (updated === "deactivated") return context.json({ error: "Cannot edit a deactivated vehicle" }, 409);
+        return context.json({ vehicle: updated });
       } catch (error) {
         if (error instanceof InvalidReferenceError) return context.json({ error: "Invalid request" }, 400);
         if (isPostgresUniqueViolation(error)) return context.json({ error: "Active vehicle plate already exists" }, 409);
@@ -702,11 +706,10 @@ export function createApp({ db, routing, geocoder, config }: {
       }
     })
     .patch("/vehicles/:id/deactivate", async (context) => {
-      const actor = await currentUser(db, context);
-      if (!actor) return context.json({ error: "Authentication required" }, 401);
-      if (!isOffice(actor)) return context.json({ error: "Office role required" }, 403);
-      const id = Number(context.req.param("id"));
-      if (!Number.isSafeInteger(id) || id <= 0) return context.json({ error: "Invalid request" }, 400);
+      const actor = await requireOffice(db, context);
+      if (actor instanceof Response) return actor;
+      const id = positiveInt(Number(context.req.param("id")));
+      if (!id) return context.json({ error: "Invalid request" }, 400);
       const deactivated = await inTransaction(db, async (client) => {
         const result = await client.query(
           "UPDATE vehicles SET deactivated_at = now() WHERE id = $1 AND deactivated_at IS NULL RETURNING id, plate",
@@ -718,6 +721,24 @@ export function createApp({ db, routing, geocoder, config }: {
           active: false,
           plate: previous.plate,
         });
+        const affectedDrivers = await client.query(
+          "SELECT id, name, home_address, home_latitude, home_longitude FROM drivers WHERE usual_vehicle_id = $1 FOR UPDATE",
+          [id],
+        ) as QueryResult;
+        if (affectedDrivers.rows.length > 0) {
+          await client.query("UPDATE drivers SET usual_vehicle_id = NULL WHERE usual_vehicle_id = $1", [id]);
+          for (const d of affectedDrivers.rows) {
+            const snap = {
+              name: String(d.name),
+              homeAddress: String(d.home_address),
+              homeLat: Number(d.home_latitude),
+              homeLng: Number(d.home_longitude),
+            };
+            await appendChange(client, actor.id, "driver", String(d.id), "updated",
+              { ...snap, usualVehicleId: id },
+              { ...snap, usualVehicleId: null });
+          }
+        }
         return previous;
       });
       if (!deactivated) {
@@ -727,21 +748,17 @@ export function createApp({ db, routing, geocoder, config }: {
       return context.body(null, 204);
     })
     .get("/drivers", async (context) => {
-      const user = await currentUser(db, context);
-      if (!user) return context.json({ error: "Authentication required" }, 401);
-      if (!isOffice(user)) return context.json({ error: "Office role required" }, 403);
+      const actor = await requireOffice(db, context);
+      if (actor instanceof Response) return actor;
       const result = await db.query(`${DRIVER_SELECT_SQL} ORDER BY lower(d.name), d.id`) as QueryResult;
       return context.json({ drivers: result.rows.map(formatDriverRow) });
     })
     .post("/drivers", async (context) => {
-      const actor = await currentUser(db, context);
-      if (!actor) return context.json({ error: "Authentication required" }, 401);
-      if (!isOffice(actor)) return context.json({ error: "Office role required" }, 403);
+      const actor = await requireOffice(db, context);
+      if (actor instanceof Response) return actor;
       const body = await context.req.json().catch(() => null);
       const fields = parseDriverFields(body);
-      const userId = isObject(body) && typeof body.userId === "number" && Number.isSafeInteger(body.userId) && body.userId > 0
-        ? body.userId
-        : null;
+      const userId = isObject(body) ? positiveInt(body.userId) : null;
       if (!fields || userId === null) return context.json({ error: "Invalid request" }, 400);
       try {
         const created = await inTransaction(db, async (client) => {
@@ -761,14 +778,7 @@ export function createApp({ db, routing, geocoder, config }: {
           ) as QueryResult;
           const id = Number(inserted.rows[0].id);
           const loaded = (await getDriverById(client, id))!;
-          await appendChange(client, actor.id, "driver", String(id), "created", null, {
-            userId,
-            name: fields.name,
-            homeAddress: fields.homeAddress,
-            homeLat: fields.homeLat,
-            homeLng: fields.homeLng,
-            usualVehicleId: fields.usualVehicleId,
-          });
+          await appendChange(client, actor.id, "driver", String(id), "created", null, { userId, ...fields });
           return loaded;
         });
         return context.json({ driver: created }, 201);
@@ -779,22 +789,18 @@ export function createApp({ db, routing, geocoder, config }: {
       }
     })
     .patch("/drivers/:id", async (context) => {
-      const actor = await currentUser(db, context);
-      if (!actor) return context.json({ error: "Authentication required" }, 401);
-      if (!isOffice(actor)) return context.json({ error: "Office role required" }, 403);
-      const id = Number(context.req.param("id"));
+      const actor = await requireOffice(db, context);
+      if (actor instanceof Response) return actor;
+      const id = positiveInt(Number(context.req.param("id")));
       const body = await context.req.json().catch(() => null);
       const fields = parseDriverFields(body);
-      if (!Number.isSafeInteger(id) || id <= 0 || !fields) return context.json({ error: "Invalid request" }, 400);
-      if (isObject(body) && body.userId !== undefined && (typeof body.userId !== "number" || !Number.isSafeInteger(body.userId) || body.userId <= 0)) {
+      if (!id || !fields) return context.json({ error: "Invalid request" }, 400);
+      if (isObject(body) && body.userId !== undefined && positiveInt(body.userId) === null) {
         return context.json({ error: "Invalid request" }, 400);
       }
       try {
         const updated = await inTransaction(db, async (client) => {
-          const existing = await client.query(
-            "SELECT id, user_id FROM drivers WHERE id = $1 FOR UPDATE",
-            [id],
-          ) as QueryResult;
+          const existing = await client.query("SELECT id, user_id FROM drivers WHERE id = $1 FOR UPDATE", [id]) as QueryResult;
           const row = existing.rows[0] as { id: number; user_id: number } | undefined;
           if (!row) return null;
           if (isObject(body) && body.userId !== undefined && body.userId !== Number(row.user_id)) {
@@ -815,13 +821,7 @@ export function createApp({ db, routing, geocoder, config }: {
             homeLat: before.homeLat,
             homeLng: before.homeLng,
             usualVehicleId: before.usualVehicleId,
-          }, {
-            name: after.name,
-            homeAddress: after.homeAddress,
-            homeLat: after.homeLat,
-            homeLng: after.homeLng,
-            usualVehicleId: after.usualVehicleId,
-          });
+          }, fields);
           return after;
         });
         return updated ? context.json({ driver: updated }) : context.json({ error: "Driver not found" }, 404);

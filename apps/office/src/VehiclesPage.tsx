@@ -121,9 +121,9 @@ export function VehiclesPage() {
       <h2>{editingId === null ? "New vehicle" : "Edit vehicle"}</h2>
       <label>Plate<input name="plate" maxLength={32} required value={plate} onChange={(e) => setPlate(e.target.value)} /></label>
       <label>Model<input name="model" maxLength={200} required value={model} onChange={(e) => setModel(e.target.value)} /></label>
-      <label>Seats<input name="seats" type="number" min={1} max={100} step={1} required value={seats} onChange={(e) => setSeats(e.target.value)} /></label>
+      <label>Seats<input name="seats" type="number" min={1} step={1} required value={seats} onChange={(e) => setSeats(e.target.value)} /></label>
       <input type="hidden" name="front" value="1" />
-      <p>Front seat (Asiento delantero): 1 (included in total seats)</p>
+      <p>Front seat: 1 (included in total seats)</p>
       <fieldset>
         <legend>Vehicle features</legend>
         {features.map((feature) => <label key={feature.id}>
