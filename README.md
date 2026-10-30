@@ -23,7 +23,15 @@ OSRM data is never preprocessed where it is served. The `OSRM artifact` workflow
 
 VROOM time windows constrain the start of a job's setup (the arrival), not the start of its service.
 
-After migrations are applied, create the initial Office account once with `pnpm --filter @traslado/api db:bootstrap-office <username>`, using `BOOTSTRAP_DATABASE_URL` and `BOOTSTRAP_OFFICE_PASSWORD` in the environment. The command refuses if an Office account already exists and records the actor as `bootstrap`; do not pass the password on the command line.
+After migrations are applied, create the initial Office account once with `pnpm --filter @traslado/api db:bootstrap-office <username>`, using `BOOTSTRAP_DATABASE_URL` and `BOOTSTRAP_OFFICE_PASSWORD` in the environment. The command refuses if an active Office account already exists (disabled ones are ignored, but their usernames cannot be reused) and records the actor as `bootstrap`; do not pass the password on the command line.
+
+## Sessions and two-factor authentication
+
+Office accounts sign in with a password and then a TOTP code from an authenticator app. Until the code is entered the session is pending: it lasts 10 minutes and every route except `/auth/totp/enrol`, `/auth/totp/verify`, `GET /auth/me` and logout answers 401 with `code: "second_factor_required"`. An account without TOTP enrols first (QR code and key in the Office app). "Remember this device" skips the code on that device for 30 days; revoking the device session forgets it, logging out does not.
+
+Sessions of Office users with the persistent-session setting never expire; other Office sessions expire after 12 hours without use and Driver sessions after 30 days without use. A failed session answers 401 with `code: "session_expired"` (sign in again) or `code: "session_revoked"` (the device was revoked, the account disabled or reset by break-glass). Disable a Driver only after their queue for the day is confirmed: a revoked phone wipes its data, including pending Marcas.
+
+If nobody can sign in to the Office, reset an active Office account's password and TOTP from the server with `pnpm --filter @traslado/api db:break-glass-office <username>`, using `BOOTSTRAP_DATABASE_URL` and `BREAK_GLASS_OFFICE_PASSWORD` in the environment. It ends that account's sessions and remembered devices, records the actor as `break-glass`, and refuses unknown, Driver and disabled accounts. The last active Office account cannot be disabled.
 
 Browser mutations must include an allowed `Origin`. The API trusts the local Office/Driver Vite origins by default; set `AUTH_ALLOWED_ORIGINS` to a comma-separated list of exact origins in other deployments. Same-origin requests are always accepted.
 

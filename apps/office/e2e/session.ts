@@ -7,7 +7,8 @@ export function database() {
   return new pg.Pool({ connectionString: process.env.E2E_DATABASE_URL });
 }
 
-// Seeds a signed-in Oficina session without the login UI, so changes to the login flow do not break C3 tests.
+// Seeds a signed-in Oficina session that already passed the second factor, without the login UI,
+// so changes to the login flow do not break C3 tests.
 export async function signInOffice(context: BrowserContext) {
   const token = randomBytes(32).toString("base64url");
   const pool = database();
@@ -16,7 +17,7 @@ export async function signInOffice(context: BrowserContext) {
       "INSERT INTO users (username, password_hash, role) VALUES ($1, 'e2e-session-only', 'office') RETURNING id",
       [`office-${randomBytes(4).toString("hex")}`],
     );
-    await pool.query("INSERT INTO sessions (user_id, token_hash, device_label) VALUES ($1, $2, 'Playwright')", [
+    await pool.query("INSERT INTO sessions (user_id, token_hash, device_label, second_factor_at) VALUES ($1, $2, 'Playwright', now())", [
       user.rows[0].id,
       hashSessionToken(token),
     ]);
