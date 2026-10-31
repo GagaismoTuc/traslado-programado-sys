@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState, type FormEvent } from "react";
-import { send } from "./api";
+import { redirectUnauthorized, send } from "./api";
 import { OfficeNav } from "./OfficeNav";
 
 export type VehicleFeature = { id: number; name: string };
@@ -12,10 +12,7 @@ export function VehicleFeaturesPage() {
 
   async function loadFeatures() {
     const response = await send("/vehicle-features", "GET");
-    if (response.status === 401) {
-      window.location.assign("/");
-      return;
-    }
+    if (await redirectUnauthorized(response)) return;
     if (!response.ok) {
       setMessage("Unable to load vehicle features");
       return;

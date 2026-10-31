@@ -139,6 +139,30 @@ describe("device sessions and accounts", () => {
     expect(ended.rows).toEqual([{ ended_reason: "password_reset" }]);
   });
 
+  it("answers 400 without writing when a /users route id is outside int4", async () => {
+    await h.seed("office", "office");
+    const admin = await office();
+    const snapshot = async () => (await h.migrationPool.query(
+      `SELECT (SELECT json_agg(u ORDER BY id) FROM users u) AS users,
+              (SELECT json_agg(s ORDER BY id) FROM sessions s) AS sessions,
+              (SELECT count(*)::int FROM change_log) AS changes`,
+    )).rows[0];
+    const before = await snapshot();
+    for (const [method, path, body] of [
+      ["PATCH", "/users/3000000000/password", { password: "new-password" }],
+      ["PATCH", "/users/3000000000/disable", {}],
+      ["PATCH", "/users/3000000000/persistent-session", { persistent: true }],
+      ["GET", "/users/3000000000/sessions", undefined],
+      ["DELETE", "/users/3000000000/sessions/1", undefined],
+      ["DELETE", "/users/1/sessions/3000000000", undefined],
+    ] as const) {
+      const response = await h.request(path, method, body, admin.cookie);
+      expect(response.status, `${method} ${path}`).toBe(400);
+      expect(await response.json(), `${method} ${path}`).toEqual({ error: "Invalid request" });
+    }
+    expect(await snapshot()).toEqual(before);
+  });
+
   it("refuses to disable the last active Oficina account with a clear message", async () => {
     await h.seed("office", "office");
     const admin = await office();

@@ -642,8 +642,8 @@ export function createApp({ db, routing, geocoder, config }: {
       const actor = await requireOffice(context);
       if (actor instanceof Response) return actor;
       const body = await context.req.json().catch(() => null);
-      const id = Number(context.req.param("id"));
-      if (!Number.isSafeInteger(id) || id <= 0 || !isObject(body) || typeof body.password !== "string" || !body.password) {
+      const id = parseId(context.req.param("id"));
+      if (!id || !isObject(body) || typeof body.password !== "string" || !body.password) {
         return context.json({ error: "Invalid request" }, 400);
       }
       const passwordHash = await hashPassword(body.password);
@@ -668,8 +668,8 @@ export function createApp({ db, routing, geocoder, config }: {
     .patch("/users/:id/disable", async (context) => {
       const actor = await requireOffice(context);
       if (actor instanceof Response) return actor;
-      const id = Number(context.req.param("id"));
-      if (!Number.isSafeInteger(id) || id <= 0) return context.json({ error: "Invalid request" }, 400);
+      const id = parseId(context.req.param("id"));
+      if (!id) return context.json({ error: "Invalid request" }, 400);
       const outcome = await inTransaction(db, async (client) => {
         // Locking every active Oficina row serializes concurrent disables: the later one sees a single active account.
         const activeOffice = await client.query(

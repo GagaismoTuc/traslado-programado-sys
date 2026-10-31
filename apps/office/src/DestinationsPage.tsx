@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState, type FormEvent } from "react";
-import { send, suggestAddressPin } from "./api";
+import { redirectUnauthorized, send, suggestAddressPin } from "./api";
 import { OfficeNav } from "./OfficeNav";
 import { PinPicker, type LatLng } from "./PinPicker";
 
@@ -27,10 +27,7 @@ export function DestinationsPage() {
 
   async function loadDestinations() {
     const response = await send("/destinations", "GET");
-    if (response.status === 401) {
-      window.location.assign("/");
-      return;
-    }
+    if (await redirectUnauthorized(response)) return;
     if (!response.ok) {
       setMessage("Unable to load destinations");
       return;
