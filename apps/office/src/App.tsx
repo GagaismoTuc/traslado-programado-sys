@@ -1,7 +1,7 @@
 import { useEffect, useState, type FormEvent } from "react";
 import { hc } from "hono/client";
 import type { AppType } from "@traslado/api";
-import { apiUrl, isSecondFactorRequired, readError, send } from "./api";
+import { apiUrl, readError, redirectUnauthorized, send } from "./api";
 import { DestinationsPage } from "./DestinationsPage";
 import { DriversPage } from "./DriversPage";
 import { OfficeNav } from "./OfficeNav";
@@ -63,14 +63,7 @@ function UsersPage() {
 
   async function loadUsers() {
     const response = await send("/users", "GET");
-    if (await isSecondFactorRequired(response)) {
-      window.location.assign("/second-factor");
-      return;
-    }
-    if (response.status === 401) {
-      window.location.assign("/");
-      return;
-    }
+    if (await redirectUnauthorized(response)) return;
     if (!response.ok) {
       setMessage("Unable to load users");
       return;
