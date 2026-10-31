@@ -1,6 +1,7 @@
 import type { ReactElement } from "react";
 import { renderToStaticMarkup } from "react-dom/server";
 import { afterEach, describe, expect, it, vi } from "vitest";
+import { App } from "./App";
 import { DestinationsPage } from "./DestinationsPage";
 import { DriversPage } from "./DriversPage";
 import { VehicleFeaturesPage } from "./VehicleFeaturesPage";
@@ -22,9 +23,9 @@ const pages: [string, () => ReactElement][] = [
   ["/destinations", () => <DestinationsPage />],
 ];
 
-async function navigationAfterLoad(page: () => ReactElement, body: unknown) {
+async function navigationAfterLoad(page: () => ReactElement, body: unknown, pathname = "/") {
   const assign = vi.fn();
-  vi.stubGlobal("window", { location: { pathname: "/", assign } });
+  vi.stubGlobal("window", { location: { pathname, assign } });
   vi.stubGlobal("fetch", vi.fn(async () => new Response(JSON.stringify(body), { status: 401 })));
   renderToStaticMarkup(page());
   await vi.waitFor(() => expect(assign).toHaveBeenCalled());
@@ -39,5 +40,11 @@ describe("office fleet and Destinos pages on 401", () => {
       expect(await navigationAfterLoad(page, { error: "Unauthorized" }), path).toEqual([["/"]]);
       expect(await navigationAfterLoad(page, { error: "Session expired", code: "session_expired" }), path).toEqual([["/"]]);
     }
+  });
+
+  it("sends /users to /second-factor on second_factor_required and to / on any other 401", async () => {
+    expect(await navigationAfterLoad(() => <App />, { error: "Second factor required", code: "second_factor_required" }, "/users")).toEqual([["/second-factor"]]);
+    expect(await navigationAfterLoad(() => <App />, { error: "Unauthorized" }, "/users")).toEqual([["/"]]);
+    expect(await navigationAfterLoad(() => <App />, { error: "Session expired", code: "session_expired" }, "/users")).toEqual([["/"]]);
   });
 });
