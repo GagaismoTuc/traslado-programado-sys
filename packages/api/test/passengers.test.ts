@@ -325,7 +325,8 @@ describe("Pasajeros", () => {
     }
     const { companions: _omitted, ...missing } = validPassenger;
     void _omitted;
-    for (const body of [missing, ...[3, -1, 1.5, "1", true, null].map((companions) => ({ ...validPassenger, companions }))]) {
+    const invalid: Record<string, unknown>[] = [missing, ...[3, -1, 1.5, "1", true, null].map((companions) => ({ ...validPassenger, companions }))];
+    for (const body of invalid) {
       expect((await request("/passengers", "POST", body, office)).status, JSON.stringify(body.companions)).toBe(400);
     }
     expect((await storedPassengers()).map((row) => row.companions)).toEqual([0, 1, 2]);
