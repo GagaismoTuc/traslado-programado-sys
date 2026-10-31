@@ -18,6 +18,7 @@ type Route = {
   id: number;
   driverName: string;
   vehicleId: number;
+  vehiclePlate: string;
   startTime: string;
   endTime: string;
   status: string;
@@ -242,6 +243,8 @@ export function PlanPage() {
             value={route.vehicleId}
             onChange={(e) => void write(`/routes/${route.id}`, "PATCH", { vehicleId: Number(e.target.value) }, "Vehicle changed")}
           >
+            {/* A Vehículo deactivated after it was chosen still shows until the Oficina changes it. */}
+            {!vehicles.some((item) => item.id === route.vehicleId) && <option value={route.vehicleId}>{route.vehiclePlate}</option>}
             {vehicles.map((item) => <option key={item.id} value={item.id}>{item.plate}</option>)}
           </select>
         </label>
