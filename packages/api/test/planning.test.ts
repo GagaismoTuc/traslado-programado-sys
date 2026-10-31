@@ -362,7 +362,7 @@ describe("Plan diario by hand", () => {
   it("cuts a Chofer's day into Recorridos at gaps longer than 60 minutes between consecutive target times", async () => {
     const { office, vehicleId, driverId, entrada } = await setup("regla10");
     const times = ["11:00", "07:30", "08:00", "09:00", "11:30", "14:00"];
-    const items = [];
+    const items: { id: number }[] = [];
     for (const time of times) items.push(await entrada(time));
     const id = (time: string) => items[times.indexOf(time)].id;
 

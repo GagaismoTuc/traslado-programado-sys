@@ -710,7 +710,7 @@ async function appendStops(client: Queryable, routeId: number, transferId: numbe
   );
 }
 
-/** Removes the Traslado's Paradas from its Recorrido and returns that Recorrido's id, or null when it had none. */
+/** Removes the Traslado's Paradas from its Recorrido (locked by the caller) and returns that Recorrido's id, or null. */
 async function removeStops(client: Queryable, transferId: number) {
   const removed = await client.query("DELETE FROM stops WHERE transfer_id = $1 RETURNING route_id", [transferId]) as QueryResult;
   const routeId = removed.rows[0] ? Number(removed.rows[0].route_id) : null;
@@ -1641,8 +1641,9 @@ export function createApp({ db, routing, geocoder, config }: {
           const currentRouteId = nullableNumber(row.route_id);
           if (targetRouteId !== undefined && targetRouteId !== currentRouteId) {
             if (row.status !== "planificado") throw new PlanningError(409, "Only a Planificado Traslado can change Recorrido");
-            if (targetRouteId !== null) {
-              const route = await lockRoute(client, targetRouteId);
+            // Both Recorridos are locked in id order, so two opposite moves cannot deadlock.
+            for (const routeId of [currentRouteId, targetRouteId].filter((value) => value !== null).sort((a, b) => a - b)) {
+              const route = await lockRoute(client, routeId);
               if (route.dailyPlanId !== Number(row.daily_plan_id)) {
                 throw new PlanningError(409, "The Recorrido belongs to another Plan diario");
               }
@@ -1679,6 +1680,8 @@ export function createApp({ db, routing, geocoder, config }: {
           if (!status) throw new PlanningError(404, "Traslado not found");
           if (status === "cancelado_ausencia") return { created: false, transfer: await getTransferById(client, id) };
           if (status !== "planificado") throw new PlanningError(409, "Only a Planificado Traslado can get an Ausencia");
+          const assigned = await client.query("SELECT route_id FROM stops WHERE transfer_id = $1 LIMIT 1", [id]) as QueryResult;
+          if (assigned.rows[0]) await lockRoute(client, Number(assigned.rows[0].route_id));
           await client.query("INSERT INTO absences (transfer_id, created_by) VALUES ($1, $2)", [id, actor.id]);
           const routeId = await removeStops(client, id);
           await client.query("UPDATE transfers SET status = 'cancelado_ausencia' WHERE id = $1", [id]);
