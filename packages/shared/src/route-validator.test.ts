@@ -298,6 +298,24 @@ describe("Route validator and capacity vector", () => {
     expect(capacity("t2")).toEqual([{ seats: 2, front: 2 }]);
   });
 
+  it("enforces the Asiento delantero when the Pasajero has a custom capacity", () => {
+    const route: Stop[] = [
+      { id: "pick", transferId: "trip", type: "pickup", plannedTime: "08:00" },
+      { id: "drop", transferId: "trip", type: "dropoff", plannedTime: "08:10" },
+    ];
+    const transfers: Transfer[] = [{ id: "trip", passengerId: "p" }];
+    const load = (passenger: Passenger, vehicle: Vehicle) =>
+      validateRoute({ route, passengers: [passenger], transfers, vehicle })
+        .filter((v) => v.rule === "capacity_exceeded")
+        .map((v) => v.details?.currentLoad);
+
+    expect(load({ id: "p", frontSeat: true, customCapacity: { seats: 1 } }, { id: "v", capacity: { seats: 1, front: 0 } })).toEqual([
+      { seats: 1, front: 1 },
+    ]);
+    expect(load({ id: "p", frontSeat: true, customCapacity: { seats: 1, wheelchair: 1 } }, { id: "v", capacity: { seats: 1, front: 1, wheelchair: 1 } })).toEqual([]);
+    expect(load({ id: "p", frontSeat: false, customCapacity: { seats: 1 } }, { id: "v", capacity: { seats: 1, front: 0 } })).toEqual([]);
+  });
+
   // Regla 3: An empty violation list is the only "valid" result.
   it("returns an empty violation list as the only valid result when all rules pass", () => {
     const passenger: Passenger = { id: "p1", maxRideTimeMinutes: 45, companions: 0, requiredFeatures: ["rampa_silla_de_ruedas"] };

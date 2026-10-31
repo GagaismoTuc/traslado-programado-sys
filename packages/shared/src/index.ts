@@ -282,10 +282,11 @@ export function validateRoute(
     const passengerId = stop.passengerId ?? transfer?.passengerId;
     const passenger = passengerId ? passengerMap.get(passengerId) : undefined;
     const companions = transfer?.companions ?? passenger?.companions ?? 0;
-    const delta: CapacityVector = passenger?.customCapacity ?? {
-      seats: 1 + companions,
-      ...(passenger?.frontSeat ? { front: 1 } : {}),
-    };
+    const demand: CapacityVector = passenger?.customCapacity ?? { seats: 1 + companions };
+    // The Asiento delantero always takes front: 1, even with a custom capacity.
+    const delta: CapacityVector = passenger?.frontSeat
+      ? { ...demand, front: Math.max(demand.front ?? 0, 1) }
+      : demand;
 
     if (isPickup(stop.type)) {
       currentLoad = addCapacity(currentLoad, delta);
