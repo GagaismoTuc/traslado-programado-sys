@@ -37,6 +37,15 @@ const authorizationEvidence = new Map([
   ["PATCH /passengers/:id/deactivate", "lets only the Oficina create, list, edit, deactivate and reactivate Pasajeros and logs each write in the same transaction"],
   ["PATCH /passengers/:id/reactivate", "lets only the Oficina create, list, edit, deactivate and reactivate Pasajeros and logs each write in the same transaction"],
   ["POST /geocode", "answers Suggest pin through an Oficina-only POST with a validated query and returns only lat, lng and displayName"],
+  ["POST /daily-plans", "lets only the Oficina read and write the Plan diario"],
+  ["GET /daily-plans/:date", "lets only the Oficina read and write the Plan diario"],
+  ["POST /daily-plans/:date/transfers", "lets only the Oficina read and write the Plan diario"],
+  ["PATCH /transfers/:id", "lets only the Oficina read and write the Plan diario"],
+  ["POST /transfers/:id/absence", "lets only the Oficina read and write the Plan diario"],
+  ["POST /daily-plans/:date/routes", "lets only the Oficina read and write the Plan diario"],
+  ["PATCH /routes/:id", "lets only the Oficina read and write the Plan diario"],
+  ["PATCH /routes/:id/stops", "lets only the Oficina read and write the Plan diario"],
+  ["POST /daily-plans/:date/driver-days", "lets only the Oficina read and write the Plan diario"],
 ]);
 
 describe("API route authorization coverage", () => {
@@ -80,6 +89,15 @@ describe("API route authorization coverage", () => {
       ["PATCH", "/passengers/1/deactivate", {}],
       ["PATCH", "/passengers/1/reactivate", {}],
       ["POST", "/geocode", { query: "Calle Inventada 101" }],
+      ["POST", "/daily-plans", { date: "2026-11-02" }],
+      ["GET", "/daily-plans/2026-11-02"],
+      ["POST", "/daily-plans/2026-11-02/transfers", { passengerId: 1, direction: "entrada", destinationId: 1, targetTime: "08:00" }],
+      ["PATCH", "/transfers/1", { companions: 1 }],
+      ["POST", "/transfers/1/absence", {}],
+      ["POST", "/daily-plans/2026-11-02/routes", { driverId: 1, startTime: "07:00", endTime: "09:00" }],
+      ["PATCH", "/routes/1", { vehicleId: 1 }],
+      ["PATCH", "/routes/1/stops", { stopIds: [1, 2] }],
+      ["POST", "/daily-plans/2026-11-02/driver-days", { driverId: 1, transferIds: [1] }],
     ];
     for (const [method, path, body] of probes) {
       const response = await app.request(path, {

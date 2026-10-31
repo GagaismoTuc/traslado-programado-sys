@@ -35,6 +35,8 @@ export type AppConfig = {
   trustedOrigins?: string[];
   getClientIp?: (context: Context) => string;
   now?: () => Date;
+  // A Chofer's day is cut into Recorridos where two consecutive target times are further apart than this.
+  routeGapMinutes?: number;
 };
 
 type UserRow = {
@@ -493,6 +495,260 @@ async function getPassengerById(client: Queryable, passengerId: number) {
   return result.rows[0] ? formatPassengerRow(result.rows[0]) : null;
 }
 
+/** A planning write refused with its HTTP status; thrown inside a transaction so nothing is kept. */
+class PlanningError extends Error {
+  constructor(readonly status: 400 | 404 | 409, message: string) {
+    super(message);
+  }
+}
+
+function planningFailure(context: Context, error: unknown) {
+  if (error instanceof PlanningError) return context.json({ error: error.message }, error.status);
+  if (error instanceof InvalidReferenceError) return context.json({ error: "Invalid request" }, 400);
+  throw error;
+}
+
+function parsePlanDate(value: unknown) {
+  if (typeof value !== "string" || !/^\d{4}-\d{2}-\d{2}$/.test(value)) return null;
+  const parsed = new Date(`${value}T00:00:00Z`);
+  return !Number.isNaN(parsed.getTime()) && parsed.toISOString().slice(0, 10) === value ? value : null;
+}
+
+// Local wall-clock time of the Plan diario's zone, "HH:MM".
+function parseLocalTime(value: unknown) {
+  return typeof value === "string" && /^([01]\d|2[0-3]):[0-5]\d$/.test(value) ? value : null;
+}
+
+function minutesOf(time: string) {
+  const [hours, minutes] = time.split(":").map(Number);
+  return hours * 60 + minutes;
+}
+
+function parseCompanions(value: unknown) {
+  return typeof value === "number" && Number.isInteger(value) && value >= 0 && value <= 2 ? value : null;
+}
+
+// The Acompañantes default from the Pasajero when the request leaves them out.
+function parseTransfer(body: unknown) {
+  if (!isObject(body)) return null;
+  const passengerId = positiveInt(body.passengerId);
+  const destinationId = positiveInt(body.destinationId);
+  const direction = body.direction === "entrada" || body.direction === "salida" ? body.direction : null;
+  const targetTime = parseLocalTime(body.targetTime);
+  const origin = body.originDestinationId ?? null;
+  const originDestinationId = origin === null ? null : positiveInt(origin);
+  const companions = body.companions === undefined ? undefined : parseCompanions(body.companions);
+  if (!passengerId || !destinationId || !direction || !targetTime || companions === null) return null;
+  if (origin !== null && (originDestinationId === null || direction !== "entrada" || originDestinationId === destinationId)) return null;
+  return { passengerId, direction, destinationId, originDestinationId, targetTime, companions };
+}
+
+const TRANSFER_SELECT_SQL = `
+  SELECT
+    t.id,
+    t.passenger_id AS "passengerId",
+    p.name AS "passengerName",
+    t.direction,
+    t.destination_id AS "destinationId",
+    d.name AS "destinationName",
+    t.origin_destination_id AS "originDestinationId",
+    o.name AS "originDestinationName",
+    to_char(t.target_time, 'HH24:MI') AS "targetTime",
+    t.companions,
+    t.status,
+    s.route_id AS "routeId"
+  FROM transfers t
+  JOIN passengers p ON p.id = t.passenger_id
+  JOIN destinations d ON d.id = t.destination_id
+  LEFT JOIN destinations o ON o.id = t.origin_destination_id
+  LEFT JOIN stops s ON s.transfer_id = t.id AND s.kind = 'pickup'
+`;
+
+function nullableNumber(value: unknown) {
+  return value === null || value === undefined ? null : Number(value);
+}
+
+function formatTransferRow(row: Record<string, unknown>) {
+  return {
+    ...row,
+    id: Number(row.id),
+    passengerId: Number(row.passengerId),
+    destinationId: Number(row.destinationId),
+    originDestinationId: nullableNumber(row.originDestinationId),
+    originDestinationName: (row.originDestinationName as string | null) ?? null,
+    companions: Number(row.companions),
+    routeId: nullableNumber(row.routeId),
+  };
+}
+
+async function getTransferById(client: Queryable, transferId: number) {
+  const result = await client.query(`${TRANSFER_SELECT_SQL} WHERE t.id = $1`, [transferId]) as QueryResult;
+  return formatTransferRow(result.rows[0]);
+}
+
+const ROUTE_SELECT_SQL = `
+  SELECT
+    r.id,
+    r.driver_id AS "driverId",
+    dr.name AS "driverName",
+    r.vehicle_id AS "vehicleId",
+    v.plate AS "vehiclePlate",
+    to_char(r.start_time, 'HH24:MI') AS "startTime",
+    to_char(r.end_time, 'HH24:MI') AS "endTime",
+    r.status
+  FROM routes r
+  JOIN drivers dr ON dr.id = r.driver_id
+  JOIN vehicles v ON v.id = r.vehicle_id
+`;
+
+function formatRouteRow(row: Record<string, unknown>) {
+  return { ...row, id: Number(row.id), driverId: Number(row.driverId), vehicleId: Number(row.vehicleId) };
+}
+
+async function getRouteById(client: Queryable, routeId: number) {
+  const result = await client.query(`${ROUTE_SELECT_SQL} WHERE r.id = $1`, [routeId]) as QueryResult;
+  return formatRouteRow(result.rows[0]);
+}
+
+// placeName is the Destino of the Parada, or null for the Pasajero's home.
+const STOP_SELECT_SQL = `
+  SELECT
+    s.id,
+    s.route_id AS "routeId",
+    s.transfer_id AS "transferId",
+    s.kind,
+    s.position,
+    s.leg_distance_meters AS "legDistanceMeters",
+    p.name AS "passengerName",
+    CASE
+      WHEN s.kind = 'pickup' AND t.direction = 'entrada' THEN o.name
+      WHEN s.kind = 'pickup' OR t.direction = 'entrada' THEN d.name
+    END AS "placeName"
+  FROM stops s
+  JOIN transfers t ON t.id = s.transfer_id
+  JOIN passengers p ON p.id = t.passenger_id
+  JOIN destinations d ON d.id = t.destination_id
+  LEFT JOIN destinations o ON o.id = t.origin_destination_id
+`;
+
+async function findPlanId(client: Queryable, date: string) {
+  const result = await client.query("SELECT id FROM daily_plans WHERE plan_date = $1", [date]) as QueryResult;
+  if (!result.rows[0]) throw new PlanningError(404, "Plan diario not found");
+  return Number(result.rows[0].id);
+}
+
+/** Day view: every Traslado of the day (assigned or not) and each Recorrido with its Paradas and km. */
+async function loadDailyPlan(client: Queryable, date: string) {
+  const planResult = await client.query(
+    "SELECT id, to_char(plan_date, 'YYYY-MM-DD') AS date, time_zone AS \"timeZone\" FROM daily_plans WHERE plan_date = $1",
+    [date],
+  ) as QueryResult;
+  const plan = planResult.rows[0];
+  if (!plan) return null;
+  const planId = Number(plan.id);
+  const transfers = await client.query(
+    `${TRANSFER_SELECT_SQL} WHERE t.daily_plan_id = $1 ORDER BY t.target_time, t.id`,
+    [planId],
+  ) as QueryResult;
+  const routes = await client.query(
+    `${ROUTE_SELECT_SQL} WHERE r.daily_plan_id = $1 ORDER BY r.start_time, r.id`,
+    [planId],
+  ) as QueryResult;
+  const stops = await client.query(
+    `${STOP_SELECT_SQL} WHERE t.daily_plan_id = $1 ORDER BY s.route_id, s.position`,
+    [planId],
+  ) as QueryResult;
+  const stopRows = stops.rows.map((row) => ({
+    ...row,
+    id: Number(row.id),
+    routeId: Number(row.routeId),
+    transferId: Number(row.transferId),
+    position: Number(row.position),
+    legDistanceMeters: nullableNumber(row.legDistanceMeters),
+    placeName: (row.placeName as string | null) ?? null,
+  }));
+  // km only from stored leg distances; null while any leg of the Recorrido has none, never a partial sum.
+  const routeRows = routes.rows.map((row) => {
+    const routeStops = stopRows.filter((stop) => stop.routeId === Number(row.id)).map(({ routeId: _, ...stop }) => stop);
+    const complete = routeStops.every((stop) => stop.legDistanceMeters !== null);
+    const meters = routeStops.reduce((sum, stop) => sum + (stop.legDistanceMeters ?? 0), 0);
+    return { route: { ...formatRouteRow(row), km: complete ? meters / 1000 : null, stops: routeStops }, meters };
+  });
+  const dayKm = routeRows.some(({ route }) => route.km === null)
+    ? null
+    : routeRows.reduce((sum, { meters }) => sum + meters, 0) / 1000;
+  return {
+    plan: { id: planId, date: String(plan.date), timeZone: String(plan.timeZone) },
+    transfers: transfers.rows.map(formatTransferRow),
+    routes: routeRows.map(({ route }) => route),
+    km: dayKm,
+  };
+}
+
+async function lockRoute(client: Queryable, routeId: number) {
+  const result = await client.query("SELECT id, daily_plan_id FROM routes WHERE id = $1 FOR UPDATE", [routeId]) as QueryResult;
+  if (!result.rows[0]) throw new PlanningError(404, "Recorrido not found");
+  return { id: routeId, dailyPlanId: Number(result.rows[0].daily_plan_id) };
+}
+
+// Renumbers the Paradas 1..n in their current order and drops the stored leg distances, which belonged to the old order.
+async function settleStops(client: Queryable, routeId: number) {
+  await client.query(
+    `UPDATE stops s SET position = n.rn, leg_distance_meters = NULL
+       FROM (SELECT id, row_number() OVER (ORDER BY position, id) AS rn FROM stops WHERE route_id = $1) n
+      WHERE s.id = n.id`,
+    [routeId],
+  );
+}
+
+async function appendStops(client: Queryable, routeId: number, transferId: number) {
+  await client.query(
+    `INSERT INTO stops (route_id, transfer_id, kind, position)
+     SELECT $1, $2, k.kind, COALESCE((SELECT max(position) FROM stops WHERE route_id = $1), 0) + k.n
+       FROM (VALUES ('pickup', 1), ('dropoff', 2)) AS k(kind, n)`,
+    [routeId, transferId],
+  );
+}
+
+/** Removes the Traslado's Paradas from its Recorrido and returns that Recorrido's id, or null when it had none. */
+async function removeStops(client: Queryable, transferId: number) {
+  const removed = await client.query("DELETE FROM stops WHERE transfer_id = $1 RETURNING route_id", [transferId]) as QueryResult;
+  const routeId = removed.rows[0] ? Number(removed.rows[0].route_id) : null;
+  if (routeId !== null) await settleStops(client, routeId);
+  return routeId;
+}
+
+// The Recorrido's Vehículo defaults to the Chofer's usual Vehículo and must be active.
+async function chooseVehicle(client: Queryable, driverId: number, requested: unknown) {
+  const driver = await client.query("SELECT usual_vehicle_id FROM drivers WHERE id = $1 FOR UPDATE", [driverId]) as QueryResult;
+  if (!driver.rows[0]) throw new PlanningError(400, "Invalid request");
+  const vehicleId = requested === undefined || requested === null
+    ? nullableNumber(driver.rows[0].usual_vehicle_id)
+    : positiveInt(requested);
+  if (vehicleId === null) {
+    throw new PlanningError(400, requested === undefined || requested === null
+      ? "This Chofer has no usual Vehículo: choose one"
+      : "Invalid request");
+  }
+  await assertActiveUsualVehicle(client, vehicleId);
+  return vehicleId;
+}
+
+async function insertRoute(client: Queryable, actorId: number, planId: number, fields: {
+  driverId: number;
+  vehicleId: number;
+  startTime: string;
+  endTime: string;
+}) {
+  const inserted = await client.query(
+    "INSERT INTO routes (daily_plan_id, driver_id, vehicle_id, start_time, end_time) VALUES ($1, $2, $3, $4, $5) RETURNING id",
+    [planId, fields.driverId, fields.vehicleId, fields.startTime, fields.endTime],
+  ) as QueryResult;
+  const id = Number(inserted.rows[0].id);
+  await appendChange(client, actorId, "route", String(id), "created", null, { dailyPlanId: planId, ...fields });
+  return id;
+}
+
 export function createApp({ db, routing, geocoder, config }: {
   db: HealthDatabase;
   routing: RoutingHealth;
@@ -501,6 +757,7 @@ export function createApp({ db, routing, geocoder, config }: {
 }) {
   if (!config.serverEpoch.trim()) throw new Error("SERVER_EPOCH is required");
   const healthTimeoutMs = config.healthTimeoutMs ?? 1000;
+  const routeGapMinutes = config.routeGapMinutes ?? 60;
   const now = config.now ?? (() => new Date());
   // One geocoder request per second for the whole process; cached answers do not use the slot.
   const geocodeCache = new Map<string, GeocodeResult | null>();
@@ -1298,6 +1555,294 @@ export function createApp({ db, routing, geocoder, config }: {
       const id = parseId(context.req.param("id"));
       if (!id) return context.json({ error: "Invalid request" }, 400);
       return await setPassengerActive(context, actor.id, id, true);
+    })
+    // Creating the Plan diario of a date that already has one returns it unchanged.
+    .post("/daily-plans", async (context) => {
+      const actor = await requireOffice(context);
+      if (actor instanceof Response) return actor;
+      const body = await context.req.json().catch(() => null);
+      const date = isObject(body) ? parsePlanDate(body.date) : null;
+      if (!date) return context.json({ error: "Invalid request" }, 400);
+      const created = await inTransaction(db, async (client) => {
+        const inserted = await client.query(
+          "INSERT INTO daily_plans (plan_date) VALUES ($1) ON CONFLICT (plan_date) DO NOTHING RETURNING id",
+          [date],
+        ) as QueryResult;
+        if (inserted.rows[0]) await appendChange(client, actor.id, "daily_plan", String(inserted.rows[0].id), "created", null, { date });
+        return Boolean(inserted.rows[0]);
+      });
+      return context.json(await loadDailyPlan(db, date), created ? 201 : 200);
+    })
+    .get("/daily-plans/:date", async (context) => {
+      const actor = await requireOffice(context);
+      if (actor instanceof Response) return actor;
+      const date = parsePlanDate(context.req.param("date"));
+      if (!date) return context.json({ error: "Invalid request" }, 400);
+      const day = await loadDailyPlan(db, date);
+      return day ? context.json(day) : context.json({ error: "Plan diario not found" }, 404);
+    })
+    .post("/daily-plans/:date/transfers", async (context) => {
+      const actor = await requireOffice(context);
+      if (actor instanceof Response) return actor;
+      const date = parsePlanDate(context.req.param("date"));
+      const fields = parseTransfer(await context.req.json().catch(() => null));
+      if (!date || !fields) return context.json({ error: "Invalid request" }, 400);
+      try {
+        const transfer = await inTransaction(db, async (client) => {
+          const planId = await findPlanId(client, date);
+          // FOR SHARE keeps a concurrent deactivation from committing between this check and the insert.
+          const passenger = await client.query(
+            "SELECT companions, deactivated_at FROM passengers WHERE id = $1 FOR SHARE",
+            [fields.passengerId],
+          ) as QueryResult;
+          const row = passenger.rows[0] as { companions: number; deactivated_at: string | null } | undefined;
+          if (!row) throw new PlanningError(400, "Invalid request");
+          if (row.deactivated_at !== null) throw new PlanningError(409, "A deactivated Pasajero cannot get new Traslados");
+          const destinationIds = [fields.destinationId, ...(fields.originDestinationId ? [fields.originDestinationId] : [])];
+          const destinations = await client.query("SELECT id FROM destinations WHERE id = ANY($1::int[])", [destinationIds]) as QueryResult;
+          if (destinations.rows.length !== destinationIds.length) throw new PlanningError(400, "Invalid request");
+          const values = { ...fields, companions: fields.companions ?? Number(row.companions) };
+          const inserted = await client.query(
+            `INSERT INTO transfers (daily_plan_id, passenger_id, direction, destination_id, origin_destination_id, target_time, companions)
+             VALUES ($1, $2, $3, $4, $5, $6, $7) RETURNING id`,
+            [planId, values.passengerId, values.direction, values.destinationId, values.originDestinationId, values.targetTime, values.companions],
+          ) as QueryResult;
+          const id = Number(inserted.rows[0].id);
+          await appendChange(client, actor.id, "transfer", String(id), "created", null, { dailyPlanId: planId, ...values });
+          return await getTransferById(client, id);
+        });
+        return context.json({ transfer }, 201);
+      } catch (error) {
+        return planningFailure(context, error);
+      }
+    })
+    // Changes the Acompañantes and assigns, moves (routeId) or unassigns (routeId: null) the Traslado.
+    .patch("/transfers/:id", async (context) => {
+      const actor = await requireOffice(context);
+      if (actor instanceof Response) return actor;
+      const id = parseId(context.req.param("id"));
+      const body = await context.req.json().catch(() => null);
+      if (!id || !isObject(body) || (body.companions === undefined && body.routeId === undefined)) {
+        return context.json({ error: "Invalid request" }, 400);
+      }
+      const companions = body.companions === undefined ? undefined : parseCompanions(body.companions);
+      const targetRouteId = body.routeId === undefined ? undefined : body.routeId === null ? null : positiveInt(body.routeId);
+      if (companions === null || (body.routeId !== null && targetRouteId === null)) return context.json({ error: "Invalid request" }, 400);
+      try {
+        const transfer = await inTransaction(db, async (client) => {
+          const locked = await client.query(
+            `SELECT t.daily_plan_id, t.status, t.companions, s.route_id
+               FROM transfers t LEFT JOIN stops s ON s.transfer_id = t.id AND s.kind = 'pickup'
+              WHERE t.id = $1 FOR UPDATE OF t`,
+            [id],
+          ) as QueryResult;
+          const row = locked.rows[0];
+          if (!row) throw new PlanningError(404, "Traslado not found");
+          const currentRouteId = nullableNumber(row.route_id);
+          if (targetRouteId !== undefined && targetRouteId !== currentRouteId) {
+            if (row.status !== "planificado") throw new PlanningError(409, "Only a Planificado Traslado can change Recorrido");
+            if (targetRouteId !== null) {
+              const route = await lockRoute(client, targetRouteId);
+              if (route.dailyPlanId !== Number(row.daily_plan_id)) {
+                throw new PlanningError(409, "The Recorrido belongs to another Plan diario");
+              }
+            }
+            await removeStops(client, id);
+            if (targetRouteId !== null) {
+              await appendStops(client, targetRouteId, id);
+              await settleStops(client, targetRouteId);
+            }
+            const action = currentRouteId === null ? "assigned" : targetRouteId === null ? "unassigned" : "moved";
+            await appendChange(client, actor.id, "transfer", String(id), action, { routeId: currentRouteId }, { routeId: targetRouteId });
+          }
+          if (companions !== undefined && companions !== Number(row.companions)) {
+            await client.query("UPDATE transfers SET companions = $1 WHERE id = $2", [companions, id]);
+            await appendChange(client, actor.id, "transfer", String(id), "updated", { companions: Number(row.companions) }, { companions });
+          }
+          return await getTransferById(client, id);
+        });
+        return context.json({ transfer });
+      } catch (error) {
+        return planningFailure(context, error);
+      }
+    })
+    // A repeated Ausencia keeps the Traslado Cancelado por Ausencia without another log entry.
+    .post("/transfers/:id/absence", async (context) => {
+      const actor = await requireOffice(context);
+      if (actor instanceof Response) return actor;
+      const id = parseId(context.req.param("id"));
+      if (!id) return context.json({ error: "Invalid request" }, 400);
+      try {
+        const result = await inTransaction(db, async (client) => {
+          const locked = await client.query("SELECT status FROM transfers WHERE id = $1 FOR UPDATE", [id]) as QueryResult;
+          const status = locked.rows[0]?.status;
+          if (!status) throw new PlanningError(404, "Traslado not found");
+          if (status === "cancelado_ausencia") return { created: false, transfer: await getTransferById(client, id) };
+          if (status !== "planificado") throw new PlanningError(409, "Only a Planificado Traslado can get an Ausencia");
+          await client.query("INSERT INTO absences (transfer_id, created_by) VALUES ($1, $2)", [id, actor.id]);
+          const routeId = await removeStops(client, id);
+          await client.query("UPDATE transfers SET status = 'cancelado_ausencia' WHERE id = $1", [id]);
+          await appendChange(client, actor.id, "transfer", String(id), "absence_registered", { status, routeId }, {
+            status: "cancelado_ausencia",
+            routeId: null,
+          });
+          return { created: true, transfer: await getTransferById(client, id) };
+        });
+        return context.json({ transfer: result.transfer }, result.created ? 201 : 200);
+      } catch (error) {
+        return planningFailure(context, error);
+      }
+    })
+    .post("/daily-plans/:date/routes", async (context) => {
+      const actor = await requireOffice(context);
+      if (actor instanceof Response) return actor;
+      const date = parsePlanDate(context.req.param("date"));
+      const body = await context.req.json().catch(() => null);
+      const driverId = isObject(body) ? positiveInt(body.driverId) : null;
+      const startTime = isObject(body) ? parseLocalTime(body.startTime) : null;
+      const endTime = isObject(body) ? parseLocalTime(body.endTime) : null;
+      if (!date || !isObject(body) || !driverId || !startTime || !endTime || endTime < startTime) {
+        return context.json({ error: "Invalid request" }, 400);
+      }
+      try {
+        const route = await inTransaction(db, async (client) => {
+          const planId = await findPlanId(client, date);
+          const vehicleId = await chooseVehicle(client, driverId, body.vehicleId);
+          const id = await insertRoute(client, actor.id, planId, { driverId, vehicleId, startTime, endTime });
+          return await getRouteById(client, id);
+        });
+        return context.json({ route }, 201);
+      } catch (error) {
+        return planningFailure(context, error);
+      }
+    })
+    .patch("/routes/:id", async (context) => {
+      const actor = await requireOffice(context);
+      if (actor instanceof Response) return actor;
+      const id = parseId(context.req.param("id"));
+      const body = await context.req.json().catch(() => null);
+      const vehicleId = isObject(body) ? positiveInt(body.vehicleId) : null;
+      if (!id || !vehicleId) return context.json({ error: "Invalid request" }, 400);
+      try {
+        const route = await inTransaction(db, async (client) => {
+          await lockRoute(client, id);
+          await assertActiveUsualVehicle(client, vehicleId);
+          const before = await getRouteById(client, id);
+          if (before.vehicleId !== vehicleId) {
+            await client.query("UPDATE routes SET vehicle_id = $1 WHERE id = $2", [vehicleId, id]);
+            await appendChange(client, actor.id, "route", String(id), "updated", { vehicleId: before.vehicleId }, { vehicleId });
+          }
+          return await getRouteById(client, id);
+        });
+        return context.json({ route });
+      } catch (error) {
+        return planningFailure(context, error);
+      }
+    })
+    // Manual order: the full list of the Recorrido's Paradas; a pickup after its own drop-off is refused.
+    .patch("/routes/:id/stops", async (context) => {
+      const actor = await requireOffice(context);
+      if (actor instanceof Response) return actor;
+      const id = parseId(context.req.param("id"));
+      const body = await context.req.json().catch(() => null);
+      // parseFeatureIds checks the ids and drops repeats; the same length means none was repeated.
+      const stopIds = isObject(body) ? parseFeatureIds(body.stopIds) : null;
+      if (!id || !stopIds || !isObject(body) || !Array.isArray(body.stopIds) || stopIds.length !== body.stopIds.length) {
+        return context.json({ error: "Invalid request" }, 400);
+      }
+      const order = body.stopIds as number[];
+      try {
+        await inTransaction(db, async (client) => {
+          await lockRoute(client, id);
+          const current = await client.query(
+            "SELECT id, transfer_id, kind FROM stops WHERE route_id = $1 ORDER BY position",
+            [id],
+          ) as QueryResult;
+          const byId = new Map(current.rows.map((row) => [Number(row.id), row]));
+          if (order.length !== byId.size || order.some((stopId) => !byId.has(stopId))) {
+            throw new PlanningError(400, "Send every Parada of the Recorrido exactly once");
+          }
+          const pickedUp = new Set<number>();
+          for (const stopId of order) {
+            const stop = byId.get(stopId)!;
+            if (stop.kind === "pickup") pickedUp.add(Number(stop.transfer_id));
+            else if (!pickedUp.has(Number(stop.transfer_id))) {
+              throw new PlanningError(409, "A Pasajero's pickup must come before their drop-off");
+            }
+          }
+          await client.query(
+            "UPDATE stops SET position = o.ord FROM unnest($1::int[]) WITH ORDINALITY AS o(id, ord) WHERE stops.id = o.id",
+            [order],
+          );
+          await settleStops(client, id);
+          await appendChange(client, actor.id, "route", String(id), "stops_reordered", {
+            stopIds: current.rows.map((row) => Number(row.id)),
+          }, { stopIds: order });
+        });
+        return context.json({ stopIds: order });
+      } catch (error) {
+        return planningFailure(context, error);
+      }
+    })
+    // The Chofer's whole day, as the planner writes it: Recorridos are cut where target times are more than
+    // routeGapMinutes apart. Refused when the Chofer already has Recorridos that day, so a rerun never duplicates.
+    .post("/daily-plans/:date/driver-days", async (context) => {
+      const actor = await requireOffice(context);
+      if (actor instanceof Response) return actor;
+      const date = parsePlanDate(context.req.param("date"));
+      const body = await context.req.json().catch(() => null);
+      const driverId = isObject(body) ? positiveInt(body.driverId) : null;
+      const transferIds = isObject(body) ? parseFeatureIds(body.transferIds) : null;
+      if (!date || !isObject(body) || !driverId || !transferIds?.length || !Array.isArray(body.transferIds)
+        || transferIds.length !== body.transferIds.length) {
+        return context.json({ error: "Invalid request" }, 400);
+      }
+      try {
+        const created = await inTransaction(db, async (client) => {
+          const planId = await findPlanId(client, date);
+          const vehicleId = await chooseVehicle(client, driverId, body.vehicleId);
+          const existing = await client.query(
+            "SELECT 1 FROM routes WHERE daily_plan_id = $1 AND driver_id = $2 LIMIT 1",
+            [planId, driverId],
+          ) as QueryResult;
+          if (existing.rows.length) throw new PlanningError(409, "This Chofer already has Recorridos on this day");
+          const locked = await client.query(
+            `SELECT t.id, t.daily_plan_id, t.status, to_char(t.target_time, 'HH24:MI') AS target,
+                    EXISTS (SELECT 1 FROM stops s WHERE s.transfer_id = t.id) AS assigned
+               FROM transfers t WHERE t.id = ANY($1::int[]) ORDER BY t.target_time, t.id FOR UPDATE`,
+            [transferIds],
+          ) as QueryResult;
+          if (locked.rows.length !== transferIds.length) throw new PlanningError(400, "Invalid request");
+          for (const row of locked.rows) {
+            if (Number(row.daily_plan_id) !== planId) throw new PlanningError(409, "Every Traslado must belong to this Plan diario");
+            if (row.status !== "planificado" || row.assigned) {
+              throw new PlanningError(409, "Only Planificado Traslados without a Recorrido can be given to a Chofer");
+            }
+          }
+          const segments: { id: number; target: string }[][] = [];
+          for (const row of locked.rows) {
+            const transfer = { id: Number(row.id), target: String(row.target) };
+            const last = segments.at(-1)?.at(-1);
+            if (!last || minutesOf(transfer.target) - minutesOf(last.target) > routeGapMinutes) segments.push([transfer]);
+            else segments.at(-1)!.push(transfer);
+          }
+          const routes = [];
+          for (const segment of segments) {
+            const startTime = segment[0].target;
+            const endTime = segment.at(-1)!.target;
+            const routeId = await insertRoute(client, actor.id, planId, { driverId, vehicleId, startTime, endTime });
+            for (const transfer of segment) {
+              await appendStops(client, routeId, transfer.id);
+              await appendChange(client, actor.id, "transfer", String(transfer.id), "assigned", { routeId: null }, { routeId });
+            }
+            routes.push({ id: routeId, startTime, endTime, transferIds: segment.map((transfer) => transfer.id) });
+          }
+          return routes;
+        });
+        return context.json({ routes: created }, 201);
+      } catch (error) {
+        return planningFailure(context, error);
+      }
     })
     .post("/geocode", async (context) => {
       const user = await requireOffice(context);
