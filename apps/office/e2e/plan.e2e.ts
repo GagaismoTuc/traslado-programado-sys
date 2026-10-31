@@ -90,3 +90,75 @@ test("plans a day by hand at phone width without scrolling sideways", async ({ p
   await expect(page.getByText("Pick up Pasajero Plan E2E at home")).toHaveCount(0);
   await expectNoSideScroll(page);
 });
+
+// Synthetic data only: one Traslado on each of two real Planes diarios.
+async function seedTwoPlans(firstDay: string, secondDay: string) {
+  const pool = database();
+  try {
+    const passenger = await pool.query("SELECT id FROM passengers WHERE name = 'Pasajero Plan E2E'");
+    const destination = await pool.query("SELECT id FROM destinations WHERE name = 'Escuela Plan E2E'");
+    const ids: number[] = [];
+    for (const [planDate, targetTime] of [[firstDay, "08:00"], [secondDay, "09:00"]]) {
+      const plan = await pool.query("INSERT INTO daily_plans (plan_date) VALUES ($1) RETURNING id", [planDate]);
+      const transfer = await pool.query(
+        `INSERT INTO transfers (daily_plan_id, passenger_id, direction, destination_id, target_time, companions)
+         VALUES ($1, $2, 'entrada', $3, $4, 1) RETURNING id`,
+        [plan.rows[0].id, passenger.rows[0].id, destination.rows[0].id, targetTime],
+      );
+      ids.push(transfer.rows[0].id);
+    }
+    return ids;
+  } finally {
+    await pool.end();
+  }
+}
+
+async function transferStatus(id: number) {
+  const pool = database();
+  try {
+    return (await pool.query("SELECT status FROM transfers WHERE id = $1", [id])).rows[0].status;
+  } finally {
+    await pool.end();
+  }
+}
+
+test("does not render or mutate a daily plan whose answer arrives after the Oficina picked another day", async ({ page }) => {
+  const selectedDay = DAY;
+  const delayedDay = "2026-11-03";
+  const [, delayedTransferId] = await seedTwoPlans(selectedDay, delayedDay);
+  let release!: () => void;
+  let started!: () => void;
+  const gate = new Promise<void>((resolve) => { release = resolve; });
+  const startedRequest = new Promise<void>((resolve) => { started = resolve; });
+  let hold = true;
+  await page.route(`**/api/daily-plans/${delayedDay}`, async (route) => {
+    if (route.request().method() === "GET" && hold) {
+      hold = false;
+      started();
+      await gate;
+    }
+    await route.continue();
+  });
+
+  await page.goto(`${process.env.E2E_BASE_URL}/plan`);
+  await page.getByLabel("Day").fill(delayedDay);
+  await startedRequest;
+  const selectedRead = page.waitForResponse((response) =>
+    response.request().method() === "GET" && response.url().endsWith(`/api/daily-plans/${selectedDay}`));
+  await page.getByLabel("Day").fill(selectedDay);
+  await selectedRead;
+  await expect(page.locator("strong", { hasText: "08:00 Pasajero Plan E2E" })).toBeVisible();
+
+  const delayedRead = page.waitForResponse((response) =>
+    response.request().method() === "GET" && response.url().endsWith(`/api/daily-plans/${delayedDay}`));
+  release();
+  await delayedRead;
+  await page.waitForTimeout(200);
+
+  await expect(page.getByLabel("Day")).toHaveValue(selectedDay);
+  await expect(page.locator("strong", { hasText: "09:00 Pasajero Plan E2E" })).toHaveCount(0);
+  await expect(page.locator("strong", { hasText: "08:00 Pasajero Plan E2E" })).toBeVisible();
+  await page.getByRole("button", { name: "Register absence" }).click();
+  await expect(page.getByText("Absence registered")).toBeVisible();
+  expect(await transferStatus(delayedTransferId)).toBe("planificado");
+});

@@ -1,4 +1,4 @@
-import { useEffect, useState, type FormEvent } from "react";
+import { useEffect, useRef, useState, type FormEvent } from "react";
 import { readError, redirectUnauthorized, send } from "./api";
 import { OfficeNav } from "./OfficeNav";
 
@@ -64,8 +64,8 @@ function stopLabel(stop: Stop) {
 
 export function PlanPage() {
   const [date, setDate] = useState(todayInPlanZone);
-  const [day, setDay] = useState<Day | null>(null);
-  const [missing, setMissing] = useState(false);
+  // The loaded view remembers its date, so a day is shown and mutable only while that date is selected.
+  const [view, setView] = useState<{ date: string; day: Day | null; missing: boolean } | null>(null);
   const [passengers, setPassengers] = useState<PassengerOption[]>([]);
   const [destinations, setDestinations] = useState<Option[]>([]);
   const [drivers, setDrivers] = useState<DriverOption[]>([]);
@@ -74,8 +74,14 @@ export function PlanPage() {
   const [companions, setCompanions] = useState("0");
   const [routeVehicle, setRouteVehicle] = useState("");
   const [message, setMessage] = useState("");
+  const selectedDate = useRef(date);
+  selectedDate.current = date;
+  const latestLoad = useRef(0);
 
   async function load(forDate: string) {
+    // Only the newest load may update the screen; an older one that answers late is dropped.
+    const loadId = ++latestLoad.current;
+    const stale = () => loadId !== latestLoad.current || forDate !== selectedDate.current;
     try {
       const responses = await Promise.all([
         send(`/daily-plans/${forDate}`, "GET"),
@@ -84,20 +90,26 @@ export function PlanPage() {
         send("/drivers", "GET"),
         send("/vehicles", "GET"),
       ]);
+      if (stale()) return;
       if (await redirectUnauthorized(...responses)) return;
       const [dayRes, ...lists] = responses;
       if (lists.some((response) => !response.ok) || (!dayRes.ok && dayRes.status !== 404)) {
-        setMessage("Unable to load the plan");
+        if (!stale()) setMessage("Unable to load the plan");
         return;
       }
-      setMissing(dayRes.status === 404);
-      setDay(dayRes.ok ? await dayRes.json() as Day : null);
-      setPassengers((await lists[0].json() as { passengers: PassengerOption[] }).passengers.filter((item) => !item.deactivatedAt));
-      setDestinations((await lists[1].json() as { destinations: Option[] }).destinations);
-      setDrivers((await lists[2].json() as { drivers: DriverOption[] }).drivers);
-      setVehicles((await lists[3].json() as { vehicles: VehicleOption[] }).vehicles.filter((item) => !item.deactivatedAt));
+      const loadedDay = dayRes.ok ? await dayRes.json() as Day : null;
+      const passengerList = (await lists[0].json() as { passengers: PassengerOption[] }).passengers;
+      const destinationList = (await lists[1].json() as { destinations: Option[] }).destinations;
+      const driverList = (await lists[2].json() as { drivers: DriverOption[] }).drivers;
+      const vehicleList = (await lists[3].json() as { vehicles: VehicleOption[] }).vehicles;
+      if (stale()) return;
+      setView({ date: forDate, day: loadedDay, missing: dayRes.status === 404 });
+      setPassengers(passengerList.filter((item) => !item.deactivatedAt));
+      setDestinations(destinationList);
+      setDrivers(driverList);
+      setVehicles(vehicleList.filter((item) => !item.deactivatedAt));
     } catch {
-      setMessage("Unable to reach the server");
+      if (!stale()) setMessage("Unable to reach the server");
     }
   }
 
@@ -108,7 +120,7 @@ export function PlanPage() {
       const response = await send(path, method, body);
       if (await redirectUnauthorized(response)) return false;
       setMessage(response.ok ? done : await readError(response, "Unable to save the plan"));
-      if (response.ok) await load(date);
+      if (response.ok) await load(selectedDate.current);
       return response.ok;
     } catch {
       setMessage("Unable to reach the server");
@@ -156,6 +168,8 @@ export function PlanPage() {
     void write(`/routes/${route.id}/stops`, "PATCH", { stopIds: ids }, "Order saved");
   }
 
+  const day = view?.date === date ? view.day : null;
+  const missing = view?.date === date && view.missing;
   const routes = day?.routes ?? [];
   const unassigned = (day?.transfers ?? []).filter((item) => item.status === "planificado" && item.routeId === null);
 
