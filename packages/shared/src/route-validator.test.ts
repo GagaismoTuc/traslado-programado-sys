@@ -110,8 +110,8 @@ describe("Route validator and capacity vector", () => {
   // AC: capacity over the Vehículo's (an Acompañante takes a seat)
   it("accounts for companion taking a seat when validating vehicle capacity", () => {
     const vehicle: Vehicle = { id: "v1", capacity: { seats: 2 } };
-    const p1: Passenger = { id: "p1", requiresCompanion: true }; // takes 2 seats
-    const p2: Passenger = { id: "p2", requiresCompanion: false }; // takes 1 seat
+    const p1: Passenger = { id: "p1", companions: 1 }; // takes 2 seats
+    const p2: Passenger = { id: "p2", companions: 0 }; // takes 1 seat
     const t1: Transfer = { id: "t1", passengerId: "p1" };
     const t2: Transfer = { id: "t2", passengerId: "p2" };
 
@@ -230,9 +230,77 @@ describe("Route validator and capacity vector", () => {
     expect(validateRoute({ route: normalRoute, passengers: [passenger], vehicle, transfers: [transfer] })).toHaveLength(0);
   });
 
+  // Pasajeros Regla 4 and AC: the count replaces the yes/no flag; each Acompañante takes a seat.
+  it("counts each Acompañante of a Pasajero as one more seat", () => {
+    // @ts-expect-error the yes/no flag no longer exists: the number of Acompañantes is the only source of truth.
+    const flagged: Passenger = { id: "p0", requiresCompanion: true };
+    void flagged;
+    const vehicle: Vehicle = { id: "v1", capacity: { seats: 3, front: 1 } };
+    const p1: Passenger = { id: "p1", companions: 2 };
+    const p2: Passenger = { id: "p2", companions: 0 };
+    const transfers: Transfer[] = [{ id: "t1", passengerId: "p1" }, { id: "t2", passengerId: "p2" }];
+    const stops = (order: string[]): Stop[] => order.map((key, index) => ({
+      id: `s${index}`,
+      transferId: key.slice(1),
+      type: key[0] === "+" ? "pickup" : "dropoff",
+      plannedTime: `08:${String(index * 5).padStart(2, "0")}`,
+    }));
+
+    const alone = validateRoute({ route: stops(["+t1", "-t1", "+t2", "-t2"]), passengers: [p1, p2], vehicle, transfers });
+    expect(alone.filter((v) => v.rule === "capacity_exceeded")).toEqual([]);
+    const together = validateRoute({ route: stops(["+t1", "+t2", "-t1", "-t2"]), passengers: [p1, p2], vehicle, transfers });
+    expect(together.filter((v) => v.rule === "capacity_exceeded").map((v) => [v.passengerId, v.details?.currentLoad]))
+      .toEqual([["p2", { seats: 4 }]]);
+  });
+
+  // Pasajeros AC: the per-Pasajero default can be overridden by each Traslado.
+  it("lets a Traslado override the Pasajero's number of Acompañantes, for example one only on the entrada", () => {
+    const vehicle: Vehicle = { id: "v1", capacity: { seats: 2, front: 1 } };
+    const p1: Passenger = { id: "p1", companions: 0 };
+    const p2: Passenger = { id: "p2", companions: 0 };
+    const entrada: Transfer = { id: "t1", passengerId: "p1", direction: "entrada", companions: 1 };
+    const salida: Transfer = { id: "t3", passengerId: "p1", direction: "salida" };
+    const other: Transfer = { id: "t2", passengerId: "p2" };
+    const sharedRide = (transferId: string): Stop[] => [
+      { id: "s1", transferId, type: "pickup", plannedTime: "08:00" },
+      { id: "s2", transferId: "t2", type: "pickup", plannedTime: "08:05" },
+      { id: "s3", transferId, type: "dropoff", plannedTime: "08:10" },
+      { id: "s4", transferId: "t2", type: "dropoff", plannedTime: "08:15" },
+    ];
+    const capacity = (transfer: Transfer) =>
+      validateRoute({ route: sharedRide(transfer.id), passengers: [p1, p2], vehicle, transfers: [transfer, other] })
+        .filter((v) => v.rule === "capacity_exceeded")
+        .map((v) => v.details?.currentLoad);
+
+    expect(capacity(entrada)).toEqual([{ seats: 3 }]);
+    expect(capacity(salida)).toEqual([]);
+    expect(capacity({ ...entrada, companions: 0 })).toEqual([]);
+  });
+
+  // Pasajeros Regla 5: the Asiento delantero requirement consumes seats: 1 and front: 1.
+  it("counts a Pasajero who needs the Asiento delantero as seats: 1 and front: 1", () => {
+    const vehicle: Vehicle = { id: "v1", capacity: { seats: 5, front: 1 } };
+    const passengers: Passenger[] = [{ id: "p1", frontSeat: true }, { id: "p2", frontSeat: true }, { id: "p3", frontSeat: false }];
+    const capacity = (second: string) => {
+      const route: Stop[] = [
+        { id: "s1", transferId: "t1", type: "pickup", plannedTime: "08:00" },
+        { id: "s2", transferId: second, type: "pickup", plannedTime: "08:05" },
+        { id: "s3", transferId: "t1", type: "dropoff", plannedTime: "08:10" },
+        { id: "s4", transferId: second, type: "dropoff", plannedTime: "08:15" },
+      ];
+      const transfers: Transfer[] = [{ id: "t1", passengerId: "p1" }, { id: second, passengerId: second === "t2" ? "p2" : "p3" }];
+      return validateRoute({ route, passengers, vehicle, transfers })
+        .filter((v) => v.rule === "capacity_exceeded")
+        .map((v) => v.details?.currentLoad);
+    };
+
+    expect(capacity("t3")).toEqual([]);
+    expect(capacity("t2")).toEqual([{ seats: 2, front: 2 }]);
+  });
+
   // Regla 3: An empty violation list is the only "valid" result.
   it("returns an empty violation list as the only valid result when all rules pass", () => {
-    const passenger: Passenger = { id: "p1", maxRideTimeMinutes: 45, requiresCompanion: false, requiredFeatures: ["rampa_silla_de_ruedas"] };
+    const passenger: Passenger = { id: "p1", maxRideTimeMinutes: 45, companions: 0, requiredFeatures: ["rampa_silla_de_ruedas"] };
     const vehicle: Vehicle = { id: "v1", capacity: { seats: 4 }, features: ["rampa_silla_de_ruedas"] };
     const transfer: Transfer = { id: "t1", passengerId: "p1", direction: "inbound", targetTime: "2026-10-23T08:30:00Z" };
     const validRoute: Route = {
