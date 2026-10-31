@@ -99,7 +99,7 @@ describe("office screens", () => {
     expect(markup).toContain('data-testid="pin-picker-map"');
     expect(markup).toMatch(/<button type="submit" disabled="">Save passenger<\/button>/);
     expect(markup).toContain('href="/passengers"');
-    expect(markup).not.toMatch(/diagnos|gender|sex\b/i);
+    expect(markup).not.toMatch(/name="[^"]*(diagnos|gender|sex)/i);
   });
 
   it("proposes 5 boarding and 5 alighting minutes that the Oficina can change for each Pasajero", () => {

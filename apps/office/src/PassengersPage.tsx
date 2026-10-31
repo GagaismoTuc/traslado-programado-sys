@@ -218,6 +218,7 @@ export function PassengersPage() {
       <label>Boarding minutes<input name="pickupDurationMinutes" type="number" min={1} step={1} required value={pickup} onChange={(e) => setPickup(e.target.value)} /></label>
       <label>Alighting minutes<input name="dropoffDurationMinutes" type="number" min={1} step={1} required value={dropoff} onChange={(e) => setDropoff(e.target.value)} /></label>
       <label>Medical alert<input name="medicalAlert" maxLength={140} value={medicalAlert} onChange={(e) => setMedicalAlert(e.target.value)} /></label>
+      <p>What the driver must know in an emergency, in up to 140 characters. Do not write a diagnosis.</p>
       <button type="submit" disabled={!pin || saving}>{saving ? "Saving..." : editingId === null ? "Save passenger" : "Update passenger"}</button>
       {editingId !== null && <button type="button" onClick={resetForm}>Cancel</button>}
     </form>

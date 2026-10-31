@@ -452,6 +452,7 @@ function formatPassengerRow(row: Record<string, unknown>) {
   };
 }
 
+// The logged fields of a Pasajero, from a parsed request or a stored row, with Adaptaciones in id order on both sides.
 function passengerSnapshot(passenger: PassengerFields): PassengerFields {
   return {
     name: passenger.name,
@@ -462,7 +463,7 @@ function passengerSnapshot(passenger: PassengerFields): PassengerFields {
     companions: passenger.companions,
     frontSeat: passenger.frontSeat,
     wheelchair: passenger.wheelchair,
-    featureIds: passenger.featureIds,
+    featureIds: [...passenger.featureIds].sort((a, b) => a - b),
     maxRideTimeMinutes: passenger.maxRideTimeMinutes,
     pickupDurationMinutes: passenger.pickupDurationMinutes,
     dropoffDurationMinutes: passenger.dropoffDurationMinutes,

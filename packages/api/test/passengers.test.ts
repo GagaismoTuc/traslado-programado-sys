@@ -237,6 +237,11 @@ describe("Pasajeros", () => {
     expect(rejected.status).toBe(400);
     const listed = (await (await request("/passengers", "GET", undefined, office)).json()).passengers;
     expect(listed[0].featureIds).toEqual([belt, ramp]);
+
+    const resubmitted = await request(`/passengers/${created.id}`, "PATCH", { ...validPassenger, featureIds: [belt, ramp] }, office);
+    expect(resubmitted.status).toBe(200);
+    const [, updated] = await passengerLog();
+    expect(updated.before_data.featureIds).toEqual(updated.after_data.featureIds);
   });
 
   it("stores no diagnosis, sex, gender or front-seat reason for a Pasajero", async () => {
