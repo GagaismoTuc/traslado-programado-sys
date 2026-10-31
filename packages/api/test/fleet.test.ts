@@ -125,6 +125,22 @@ describe("Vehículos", () => {
     expect(stored.rows).toEqual([{ plate: "INT4MAX" }]);
   });
 
+  it("PATCH /vehicles/:id accepts seats up to 2147483647 inclusive and rejects 2147483648 with 400 without writing", async () => {
+    const { cookie: office } = await signIn("office-seats-patch", "office");
+    const created = await request("/vehicles", "POST", { plate: "INT4PATCH", model: "Cota int4", seats: 5, featureIds: [] }, office);
+    const id = (await created.json()).vehicle.id as number;
+    const largest = await request(`/vehicles/${id}`, "PATCH", { plate: "INT4PATCH", model: "Cota int4", seats: 2_147_483_647, featureIds: [] }, office);
+    expect(largest.status).toBe(200);
+    expect((await largest.json()).vehicle).toMatchObject({ id, seats: 2_147_483_647 });
+    const changesBefore = await migrationPool.query("SELECT count(*)::int AS count FROM change_log WHERE entity = 'vehicle' AND entity_id = $1", [String(id)]);
+    const beyond = await request(`/vehicles/${id}`, "PATCH", { plate: "INT4OVER", model: "Otro modelo", seats: 2_147_483_648, featureIds: [] }, office);
+    expect(beyond.status).toBe(400);
+    const stored = await migrationPool.query("SELECT plate, model, seats FROM vehicles WHERE id = $1", [id]);
+    expect(stored.rows).toEqual([{ plate: "INT4PATCH", model: "Cota int4", seats: 2_147_483_647 }]);
+    const changesAfter = await migrationPool.query("SELECT count(*)::int AS count FROM change_log WHERE entity = 'vehicle' AND entity_id = $1", [String(id)]);
+    expect(changesAfter.rows).toEqual(changesBefore.rows);
+  });
+
   it("creates, edits and deactivates Vehículos with seats, front: 1, Adaptaciones and transactional change log", async () => {
     const { cookie: driver } = await signIn("driver-veh", "driver");
     const { cookie: office } = await signIn("office-veh", "office");
