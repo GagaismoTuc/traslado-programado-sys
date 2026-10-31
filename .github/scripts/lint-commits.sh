@@ -10,11 +10,13 @@ if [ -z "$base" ] || [ -z "$head" ]; then
   exit 0
 fi
 
+# A range git cannot resolve fails instead of linting nothing.
+commits=$(git rev-list --reverse "$base..$head") || exit 1
 hook=$(cd "$(dirname "$0")/../.." && pwd)/.githooks/commit-msg
 msg=$(mktemp)
 trap 'rm -f "$msg"' EXIT
 status=0
-for sha in $(git rev-list --reverse "$base..$head"); do
+for sha in $commits; do
   git log -1 --format=%B "$sha" > "$msg"
   if ! sh "$hook" "$msg"; then
     echo "lint-commits: commit $sha" >&2
