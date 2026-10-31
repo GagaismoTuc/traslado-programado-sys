@@ -110,3 +110,37 @@ export const drivers = pgTable("drivers", {
   check("drivers_home_latitude_check", sql`${table.homeLatitude} BETWEEN -90 AND 90`),
   check("drivers_home_longitude_check", sql`${table.homeLongitude} BETWEEN -180 AND 180`),
 ]);
+
+// Only what drivers and the planner need: no diagnosis, sex or gender, and no reason for the front-seat requirement.
+export const passengers = pgTable("passengers", {
+  id: integer().generatedAlwaysAsIdentity().primaryKey(),
+  name: text().notNull(),
+  homeAddress: text("home_address").notNull(),
+  homeLatitude: doublePrecision("home_latitude").notNull(),
+  homeLongitude: doublePrecision("home_longitude").notNull(),
+  accessNotes: text("access_notes"),
+  companions: integer().notNull(),
+  frontSeat: boolean("front_seat").notNull(),
+  wheelchair: boolean().notNull(),
+  maxRideTimeMinutes: integer("max_ride_time_minutes").notNull(),
+  pickupDurationMinutes: integer("pickup_duration_minutes").notNull(),
+  dropoffDurationMinutes: integer("dropoff_duration_minutes").notNull(),
+  medicalAlert: text("medical_alert"),
+  deactivatedAt: timestamp("deactivated_at", { withTimezone: true, mode: "string" }),
+  createdAt: timestamp("created_at", { withTimezone: true, mode: "string" }).defaultNow().notNull(),
+}, (table) => [
+  check("passengers_home_latitude_check", sql`${table.homeLatitude} BETWEEN -90 AND 90`),
+  check("passengers_home_longitude_check", sql`${table.homeLongitude} BETWEEN -180 AND 180`),
+  check("passengers_companions_check", sql`${table.companions} BETWEEN 0 AND 2`),
+  check("passengers_max_ride_time_positive", sql`${table.maxRideTimeMinutes} > 0`),
+  check("passengers_pickup_duration_positive", sql`${table.pickupDurationMinutes} > 0`),
+  check("passengers_dropoff_duration_positive", sql`${table.dropoffDurationMinutes} > 0`),
+  check("passengers_medical_alert_length", sql`char_length(${table.medicalAlert}) <= 140`),
+]);
+
+export const passengerRequiredFeatures = pgTable("passenger_required_features", {
+  passengerId: integer("passenger_id").notNull().references(() => passengers.id, { onDelete: "restrict" }),
+  featureId: integer("feature_id").notNull().references(() => vehicleFeatures.id, { onDelete: "restrict" }),
+}, (table) => [
+  primaryKey({ columns: [table.passengerId, table.featureId] }),
+]);

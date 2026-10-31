@@ -31,6 +31,11 @@ const authorizationEvidence = new Map([
   ["GET /drivers", "links each Chofer 1:1 to a driver user, requires home address and pin visible only to Oficina, validates usual Vehículo and logs writes"],
   ["POST /drivers", "links each Chofer 1:1 to a driver user, requires home address and pin visible only to Oficina, validates usual Vehículo and logs writes"],
   ["PATCH /drivers/:id", "links each Chofer 1:1 to a driver user, requires home address and pin visible only to Oficina, validates usual Vehículo and logs writes"],
+  ["GET /passengers", "lets only the Oficina create, list, edit, deactivate and reactivate Pasajeros and logs each write in the same transaction"],
+  ["POST /passengers", "lets only the Oficina create, list, edit, deactivate and reactivate Pasajeros and logs each write in the same transaction"],
+  ["PATCH /passengers/:id", "lets only the Oficina create, list, edit, deactivate and reactivate Pasajeros and logs each write in the same transaction"],
+  ["PATCH /passengers/:id/deactivate", "lets only the Oficina create, list, edit, deactivate and reactivate Pasajeros and logs each write in the same transaction"],
+  ["PATCH /passengers/:id/reactivate", "lets only the Oficina create, list, edit, deactivate and reactivate Pasajeros and logs each write in the same transaction"],
   ["POST /geocode", "answers Suggest pin through an Oficina-only POST with a validated query and returns only lat, lng and displayName"],
 ]);
 
@@ -69,6 +74,11 @@ describe("API route authorization coverage", () => {
       ["GET", "/drivers"],
       ["POST", "/drivers", { userId: 1, name: "Chofer Sintético", homeAddress: "Calle Inventada 101", homeLat: -26.8, homeLng: -65.2 }],
       ["PATCH", "/drivers/1", { name: "Chofer Sintético", homeAddress: "Calle Inventada 101", homeLat: -26.8, homeLng: -65.2 }],
+      ["GET", "/passengers"],
+      ["POST", "/passengers", { name: "Pasajero Sintético", homeAddress: "Calle Inventada 101", homeLat: -26.8, homeLng: -65.2 }],
+      ["PATCH", "/passengers/1", { name: "Pasajero Sintético", homeAddress: "Calle Inventada 101", homeLat: -26.8, homeLng: -65.2 }],
+      ["PATCH", "/passengers/1/deactivate", {}],
+      ["PATCH", "/passengers/1/reactivate", {}],
       ["POST", "/geocode", { query: "Calle Inventada 101" }],
     ];
     for (const [method, path, body] of probes) {

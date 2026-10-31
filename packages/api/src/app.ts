@@ -342,6 +342,156 @@ async function getDriverById(client: Queryable, driverId: number) {
 
 }
 
+const MEDICAL_ALERT_MAX_LENGTH = 140;
+
+function parseFeatureIds(value: unknown) {
+  if (value === undefined) return [];
+  if (!Array.isArray(value)) return null;
+  const ids: number[] = [];
+  for (const item of value) {
+    const id = positiveInt(item);
+    if (id === null) return null;
+    ids.push(id);
+  }
+  return [...new Set(ids)].sort((a, b) => a - b);
+}
+
+// Every field is required except access notes, the medical alert and Adaptaciones: the Oficina enters
+// the minutes for each Pasajero, so the API never falls back to a constant (the form proposes defaults).
+function parsePassenger(body: unknown) {
+  if (!isObject(body)) return null;
+  const name = boundedText(body.name, 200);
+  const homeAddress = boundedText(body.homeAddress, 500);
+  const homeLat = coordinate(body.homeLat, 90);
+  const homeLng = coordinate(body.homeLng, 180);
+  const notes = body.accessNotes ?? "";
+  const accessNotes = typeof notes === "string" ? notes.trim() || null : undefined;
+  const alert = body.medicalAlert ?? "";
+  const medicalAlert = typeof alert === "string" ? alert.trim() || null : undefined;
+  const companions = Number.isInteger(body.companions) && Number(body.companions) >= 0 && Number(body.companions) <= 2
+    ? Number(body.companions)
+    : null;
+  const featureIds = parseFeatureIds(body.featureIds);
+  const maxRideTimeMinutes = positiveInt(body.maxRideTimeMinutes);
+  const pickupDurationMinutes = positiveInt(body.pickupDurationMinutes);
+  const dropoffDurationMinutes = positiveInt(body.dropoffDurationMinutes);
+  if (!name || !homeAddress || homeLat === null || homeLng === null || companions === null || featureIds === null) return null;
+  if (typeof body.frontSeat !== "boolean" || typeof body.wheelchair !== "boolean") return null;
+  if (maxRideTimeMinutes === null || pickupDurationMinutes === null || dropoffDurationMinutes === null) return null;
+  if (accessNotes === undefined || (accessNotes && accessNotes.length > 1000)) return null;
+  // Counted in code points, as PostgreSQL's char_length does.
+  if (medicalAlert === undefined || (medicalAlert && [...medicalAlert].length > MEDICAL_ALERT_MAX_LENGTH)) return null;
+  return {
+    name,
+    homeAddress,
+    homeLat,
+    homeLng,
+    accessNotes,
+    companions,
+    frontSeat: body.frontSeat,
+    wheelchair: body.wheelchair,
+    featureIds,
+    maxRideTimeMinutes,
+    pickupDurationMinutes,
+    dropoffDurationMinutes,
+    medicalAlert,
+  };
+}
+
+type PassengerFields = NonNullable<ReturnType<typeof parsePassenger>>;
+
+const PASSENGER_SELECT_SQL = `
+  SELECT
+    p.id,
+    p.name,
+    p.home_address AS "homeAddress",
+    p.home_latitude AS "homeLat",
+    p.home_longitude AS "homeLng",
+    p.access_notes AS "accessNotes",
+    p.companions,
+    p.front_seat AS "frontSeat",
+    p.wheelchair,
+    p.max_ride_time_minutes AS "maxRideTimeMinutes",
+    p.pickup_duration_minutes AS "pickupDurationMinutes",
+    p.dropoff_duration_minutes AS "dropoffDurationMinutes",
+    p.medical_alert AS "medicalAlert",
+    p.deactivated_at AS "deactivatedAt",
+    p.created_at AS "createdAt",
+    COALESCE(
+      array_agg(vf.id ORDER BY lower(vf.name), vf.id) FILTER (WHERE vf.id IS NOT NULL),
+      '{}'::int[]
+    ) AS "featureIds",
+    COALESCE(
+      array_agg(vf.name ORDER BY lower(vf.name), vf.id) FILTER (WHERE vf.id IS NOT NULL),
+      '{}'::text[]
+    ) AS features
+  FROM passengers p
+  LEFT JOIN passenger_required_features prf ON prf.passenger_id = p.id
+  LEFT JOIN vehicle_features vf ON vf.id = prf.feature_id
+`;
+
+function formatPassengerRow(row: Record<string, unknown>) {
+  return {
+    id: Number(row.id),
+    name: String(row.name),
+    homeAddress: String(row.homeAddress),
+    homeLat: Number(row.homeLat),
+    homeLng: Number(row.homeLng),
+    accessNotes: (row.accessNotes as string | null) ?? null,
+    companions: Number(row.companions),
+    frontSeat: Boolean(row.frontSeat),
+    wheelchair: Boolean(row.wheelchair),
+    featureIds: (row.featureIds as number[]).map(Number),
+    features: (row.features as string[]).map(String),
+    maxRideTimeMinutes: Number(row.maxRideTimeMinutes),
+    pickupDurationMinutes: Number(row.pickupDurationMinutes),
+    dropoffDurationMinutes: Number(row.dropoffDurationMinutes),
+    medicalAlert: (row.medicalAlert as string | null) ?? null,
+    deactivatedAt: (row.deactivatedAt as string | null) ?? null,
+    createdAt: String(row.createdAt),
+  };
+}
+
+function passengerSnapshot(passenger: PassengerFields): PassengerFields {
+  return {
+    name: passenger.name,
+    homeAddress: passenger.homeAddress,
+    homeLat: passenger.homeLat,
+    homeLng: passenger.homeLng,
+    accessNotes: passenger.accessNotes,
+    companions: passenger.companions,
+    frontSeat: passenger.frontSeat,
+    wheelchair: passenger.wheelchair,
+    featureIds: passenger.featureIds,
+    maxRideTimeMinutes: passenger.maxRideTimeMinutes,
+    pickupDurationMinutes: passenger.pickupDurationMinutes,
+    dropoffDurationMinutes: passenger.dropoffDurationMinutes,
+    medicalAlert: passenger.medicalAlert,
+  };
+}
+
+async function syncPassengerFeatures(client: Queryable, passengerId: number, featureIds: number[]) {
+  await client.query("DELETE FROM passenger_required_features WHERE passenger_id = $1", [passengerId]);
+  if (featureIds.length === 0) return;
+  const existing = await client.query(
+    "SELECT id FROM vehicle_features WHERE id = ANY($1::int[])",
+    [featureIds],
+  ) as QueryResult;
+  if (existing.rows.length !== featureIds.length) throw new InvalidReferenceError("Unknown vehicle feature");
+  await client.query(
+    "INSERT INTO passenger_required_features (passenger_id, feature_id) SELECT $1, unnest($2::int[])",
+    [passengerId, featureIds],
+  );
+}
+
+async function getPassengerById(client: Queryable, passengerId: number) {
+  const result = await client.query(
+    `${PASSENGER_SELECT_SQL} WHERE p.id = $1 GROUP BY p.id`,
+    [passengerId],
+  ) as QueryResult;
+  return result.rows[0] ? formatPassengerRow(result.rows[0]) : null;
+}
+
 export function createApp({ db, routing, geocoder, config }: {
   db: HealthDatabase;
   routing: RoutingHealth;
@@ -394,6 +544,28 @@ export function createApp({ db, routing, geocoder, config }: {
     const user = await authenticate(context);
     if (user instanceof Response || isOffice(user)) return user;
     return context.json({ error: "Office role required" }, 403);
+  }
+
+  // Only deactivated_at changes, so every other field of the Pasajero is kept. A repeated call is a no-op without a log entry.
+  async function setPassengerActive(context: Context, actorId: number, id: number, active: boolean) {
+    const changed = await inTransaction(db, async (client) => {
+      const result = await client.query(
+        active
+          ? "UPDATE passengers SET deactivated_at = NULL WHERE id = $1 AND deactivated_at IS NOT NULL RETURNING name"
+          : "UPDATE passengers SET deactivated_at = now() WHERE id = $1 AND deactivated_at IS NULL RETURNING name",
+        [id],
+      ) as QueryResult;
+      const row = result.rows[0];
+      if (!row) return false;
+      await appendChange(client, actorId, "passenger", String(id), active ? "reactivated" : "deactivated", { active: !active }, {
+        active,
+        name: row.name,
+      });
+      return true;
+    });
+    if (changed) return context.body(null, 204);
+    const existing = await db.query("SELECT id FROM passengers WHERE id = $1", [id]) as QueryResult;
+    return existing.rows.length ? context.body(null, 204) : context.json({ error: "Passenger not found" }, 404);
   }
 
   async function listSessions(userId: number) {
@@ -1042,6 +1214,89 @@ export function createApp({ db, routing, geocoder, config }: {
         if (error instanceof InvalidReferenceError) return context.json({ error: "Invalid request" }, 400);
         throw error;
       }
+    })
+    .get("/passengers", async (context) => {
+      const actor = await requireOffice(context);
+      if (actor instanceof Response) return actor;
+      const result = await db.query(
+        `${PASSENGER_SELECT_SQL} GROUP BY p.id ORDER BY p.deactivated_at IS NOT NULL, lower(p.name), p.id`,
+      ) as QueryResult;
+      return context.json({ passengers: result.rows.map(formatPassengerRow) });
+    })
+    .post("/passengers", async (context) => {
+      const actor = await requireOffice(context);
+      if (actor instanceof Response) return actor;
+      const passenger = parsePassenger(await context.req.json().catch(() => null));
+      if (!passenger) return context.json({ error: "Invalid request" }, 400);
+      try {
+        const created = await inTransaction(db, async (client) => {
+          const inserted = await client.query(
+            `INSERT INTO passengers (name, home_address, home_latitude, home_longitude, access_notes, companions, front_seat,
+               wheelchair, max_ride_time_minutes, pickup_duration_minutes, dropoff_duration_minutes, medical_alert)
+             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12) RETURNING id`,
+            [passenger.name, passenger.homeAddress, passenger.homeLat, passenger.homeLng, passenger.accessNotes, passenger.companions,
+              passenger.frontSeat, passenger.wheelchair, passenger.maxRideTimeMinutes, passenger.pickupDurationMinutes,
+              passenger.dropoffDurationMinutes, passenger.medicalAlert],
+          ) as QueryResult;
+          const id = Number(inserted.rows[0].id);
+          await syncPassengerFeatures(client, id, passenger.featureIds);
+          await appendChange(client, actor.id, "passenger", String(id), "created", null, passengerSnapshot(passenger));
+          return (await getPassengerById(client, id))!;
+        });
+        return context.json({ passenger: created }, 201);
+      } catch (error) {
+        if (error instanceof InvalidReferenceError) return context.json({ error: "Invalid request" }, 400);
+        throw error;
+      }
+    })
+    .patch("/passengers/:id", async (context) => {
+      const actor = await requireOffice(context);
+      if (actor instanceof Response) return actor;
+      const id = parseId(context.req.param("id"));
+      const passenger = parsePassenger(await context.req.json().catch(() => null));
+      if (!id || !passenger) return context.json({ error: "Invalid request" }, 400);
+      try {
+        const updated = await inTransaction(db, async (client) => {
+          const lock = await client.query("SELECT deactivated_at FROM passengers WHERE id = $1 FOR UPDATE", [id]) as QueryResult;
+          const row = lock.rows[0] as { deactivated_at: string | null } | undefined;
+          if (!row) return null;
+          if (row.deactivated_at !== null) return "deactivated" as const;
+          const before = (await getPassengerById(client, id))!;
+          await client.query(
+            `UPDATE passengers
+                SET name = $1, home_address = $2, home_latitude = $3, home_longitude = $4, access_notes = $5, companions = $6,
+                    front_seat = $7, wheelchair = $8, max_ride_time_minutes = $9, pickup_duration_minutes = $10,
+                    dropoff_duration_minutes = $11, medical_alert = $12
+              WHERE id = $13`,
+            [passenger.name, passenger.homeAddress, passenger.homeLat, passenger.homeLng, passenger.accessNotes, passenger.companions,
+              passenger.frontSeat, passenger.wheelchair, passenger.maxRideTimeMinutes, passenger.pickupDurationMinutes,
+              passenger.dropoffDurationMinutes, passenger.medicalAlert, id],
+          );
+          await syncPassengerFeatures(client, id, passenger.featureIds);
+          await appendChange(client, actor.id, "passenger", String(id), "updated", passengerSnapshot(before), passengerSnapshot(passenger));
+          return (await getPassengerById(client, id))!;
+        });
+        if (!updated) return context.json({ error: "Passenger not found" }, 404);
+        if (updated === "deactivated") return context.json({ error: "Cannot edit a deactivated passenger" }, 409);
+        return context.json({ passenger: updated });
+      } catch (error) {
+        if (error instanceof InvalidReferenceError) return context.json({ error: "Invalid request" }, 400);
+        throw error;
+      }
+    })
+    .patch("/passengers/:id/deactivate", async (context) => {
+      const actor = await requireOffice(context);
+      if (actor instanceof Response) return actor;
+      const id = parseId(context.req.param("id"));
+      if (!id) return context.json({ error: "Invalid request" }, 400);
+      return await setPassengerActive(context, actor.id, id, false);
+    })
+    .patch("/passengers/:id/reactivate", async (context) => {
+      const actor = await requireOffice(context);
+      if (actor instanceof Response) return actor;
+      const id = parseId(context.req.param("id"));
+      if (!id) return context.json({ error: "Invalid request" }, 400);
+      return await setPassengerActive(context, actor.id, id, true);
     })
     .post("/geocode", async (context) => {
       const user = await requireOffice(context);
