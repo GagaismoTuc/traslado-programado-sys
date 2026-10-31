@@ -83,4 +83,36 @@ describe("office screens", () => {
     expect(markup).toContain('data-testid="pin-picker-map"');
     expect(markup).toMatch(/<button type="submit" disabled="">Save driver<\/button>/);
   });
+
+  it("renders the Pasajeros page at /passengers with every field, the shared pin picker and save disabled until the pin is confirmed", () => {
+    vi.stubGlobal("window", { location: { pathname: "/passengers" } });
+    const markup = renderToStaticMarkup(<App />);
+    expect(markup).toContain("<h1>Passengers</h1>");
+    for (const field of [
+      'name="name"', 'name="homeAddress"', 'name="accessNotes"', 'name="companions"', 'name="frontSeat"', 'name="wheelchair"',
+      'name="maxRideTimeMinutes"', 'name="pickupDurationMinutes"', 'name="dropoffDurationMinutes"', '<input maxLength="140" name="medicalAlert"',
+    ]) expect(markup).toContain(field);
+    for (const count of ["0", "1", "2"]) expect(markup).toContain(`<option value="${count}"`);
+    expect(markup).not.toMatch(/<option value="3"/);
+    expect(markup).toContain("Required vehicle features");
+    expect(markup).toContain("Suggest pin");
+    expect(markup).toContain('data-testid="pin-picker-map"');
+    expect(markup).toMatch(/<button type="submit" disabled="">Save passenger<\/button>/);
+    expect(markup).toContain('href="/passengers"');
+    expect(markup).not.toMatch(/name="[^"]*(diagnos|gender|sex)/i);
+  });
+
+  it("proposes 5 boarding and 5 alighting minutes that the Oficina can change for each Pasajero", () => {
+    vi.stubGlobal("window", { location: { pathname: "/passengers" } });
+    const markup = renderToStaticMarkup(<App />);
+    for (const field of ["pickupDurationMinutes", "dropoffDurationMinutes"]) {
+      expect(markup).toMatch(new RegExp(`<input type="number" min="1" step="1" required="" name="${field}" value="5"/>`));
+    }
+  });
+
+  it("proposes a required Tiempo máximo a bordo of 60 minutes", () => {
+    vi.stubGlobal("window", { location: { pathname: "/passengers" } });
+    const markup = renderToStaticMarkup(<App />);
+    expect(markup).toMatch(/<input type="number" min="1" step="1" required="" name="maxRideTimeMinutes" value="60"\/>/);
+  });
 });

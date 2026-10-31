@@ -5,6 +5,7 @@ import { apiUrl, isSecondFactorRequired, readError, send } from "./api";
 import { DestinationsPage } from "./DestinationsPage";
 import { DriversPage } from "./DriversPage";
 import { OfficeNav } from "./OfficeNav";
+import { PassengersPage } from "./PassengersPage";
 import { SecondFactorPage } from "./SecondFactor";
 import { DeviceSessions, PersistentSessionToggle } from "./UserAccess";
 import { VehicleFeaturesPage } from "./VehicleFeaturesPage";
@@ -150,5 +151,6 @@ export function App() {
   if (path === "/vehicle-features") return <VehicleFeaturesPage />;
   if (path === "/vehicles") return <VehiclesPage />;
   if (path === "/drivers") return <DriversPage />;
+  if (path === "/passengers") return <PassengersPage />;
   return path === "/users" ? <UsersPage /> : <SignInPage />;
 }

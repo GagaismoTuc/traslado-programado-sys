@@ -38,8 +38,10 @@ export interface Passenger {
   name?: string;
   maxRideTimeMinutes?: number;
   tiempoMaximoABordoMinutos?: number;
-  requiresCompanion?: boolean;
-  requiereAcompanante?: boolean;
+  // Default number of Acompañantes (0 to 2); each takes a seat. A Traslado can override it.
+  companions?: number;
+  // Must always travel in the Asiento delantero: takes seats: 1 and front: 1.
+  frontSeat?: boolean;
   requiredFeatures?: string[];
   adaptacionesRequeridas?: string[];
   pickupDurationMinutes?: number;
@@ -72,6 +74,8 @@ export interface Transfer {
   sentido?: TransferDirection;
   targetTime?: Date | string | number;
   horaObjetivo?: Date | string | number;
+  // Acompañantes on this Traslado only, overriding the Pasajero's default.
+  companions?: number;
   targetWindow?: TargetTimeWindow;
   earlyToleranceMinutes?: number;
   lateToleranceMinutes?: number;
@@ -277,9 +281,12 @@ export function validateRoute(
     const transfer = transferMap.get(stop.transferId);
     const passengerId = stop.passengerId ?? transfer?.passengerId;
     const passenger = passengerId ? passengerMap.get(passengerId) : undefined;
-    const hasCompanion = passenger?.requiresCompanion ?? passenger?.requiereAcompanante ?? false;
-    const seatDemand = passenger?.customCapacity?.seats ?? (hasCompanion ? 2 : 1);
-    const delta: CapacityVector = passenger?.customCapacity ?? { seats: seatDemand };
+    const companions = transfer?.companions ?? passenger?.companions ?? 0;
+    const demand: CapacityVector = passenger?.customCapacity ?? { seats: 1 + companions };
+    // The Asiento delantero always takes front: 1, even with a custom capacity.
+    const delta: CapacityVector = passenger?.frontSeat
+      ? { ...demand, front: Math.max(demand.front ?? 0, 1) }
+      : demand;
 
     if (isPickup(stop.type)) {
       currentLoad = addCapacity(currentLoad, delta);
