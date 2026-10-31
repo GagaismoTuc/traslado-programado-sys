@@ -150,7 +150,9 @@ describe("device sessions and accounts", () => {
     const before = await snapshot();
     for (const [method, path, body] of [
       ["PATCH", "/users/3000000000/password", { password: "new-password" }],
+      ["PATCH", "/users/2147483648/password", { password: "new-password" }],
       ["PATCH", "/users/3000000000/disable", {}],
+      ["PATCH", "/users/2147483648/disable", {}],
       ["PATCH", "/users/3000000000/persistent-session", { persistent: true }],
       ["GET", "/users/3000000000/sessions", undefined],
       ["DELETE", "/users/3000000000/sessions/1", undefined],
