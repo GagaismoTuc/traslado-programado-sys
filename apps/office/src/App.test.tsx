@@ -110,6 +110,23 @@ describe("office screens", () => {
     }
   });
 
+  it("renders the Plan diario page at /plan phone width first, opening on today's date in Tucumán", () => {
+    vi.useFakeTimers({ now: new Date("2026-11-02T02:30:00Z"), toFake: ["Date"] });
+    vi.stubGlobal("window", { location: { pathname: "/plan" } });
+    try {
+      const markup = renderToStaticMarkup(<App />);
+      expect(markup).toContain('<main class="plan">');
+      expect(markup).toContain("<h1>Plan diario</h1>");
+      expect(markup).toContain('<input type="date" required="" name="date" value="2026-11-01"/>');
+      expect(markup).toContain('href="/plan"');
+      expect(markup).toContain(".plan { box-sizing: border-box; max-width: 40rem;");
+      expect(markup).toContain(".plan input:not([type=checkbox]), .plan select, .plan button { display: block; width: 100%;");
+      expect(markup).not.toContain("<table");
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   it("proposes a required Tiempo máximo a bordo of 60 minutes", () => {
     vi.stubGlobal("window", { location: { pathname: "/passengers" } });
     const markup = renderToStaticMarkup(<App />);
