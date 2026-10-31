@@ -1,5 +1,5 @@
 import { sql } from "drizzle-orm";
-import { boolean, check, doublePrecision, integer, jsonb, pgTable, primaryKey, text, timestamp, uniqueIndex } from "drizzle-orm/pg-core";
+import { boolean, check, date, doublePrecision, integer, jsonb, pgTable, primaryKey, text, time, timestamp, uniqueIndex } from "drizzle-orm/pg-core";
 
 export const foundationPermissionProbe = pgTable("foundation_permission_probe", {
   id: integer().generatedAlwaysAsIdentity().primaryKey(),
@@ -143,4 +143,75 @@ export const passengerRequiredFeatures = pgTable("passenger_required_features", 
   featureId: integer("feature_id").notNull().references(() => vehicleFeatures.id, { onDelete: "restrict" }),
 }, (table) => [
   primaryKey({ columns: [table.passengerId, table.featureId] }),
+]);
+
+// Times of a Plan diario are local wall-clock times (`time`, no offset) in the plan's zone, which v1 fixes to Tucumán.
+export const dailyPlans = pgTable("daily_plans", {
+  id: integer().generatedAlwaysAsIdentity().primaryKey(),
+  planDate: date("plan_date", { mode: "string" }).notNull(),
+  timeZone: text("time_zone").default("America/Argentina/Tucuman").notNull(),
+  createdAt: timestamp("created_at", { withTimezone: true, mode: "string" }).defaultNow().notNull(),
+}, (table) => [
+  uniqueIndex("daily_plans_plan_date_unique").on(table.planDate),
+  check("daily_plans_time_zone_check", sql`${table.timeZone} = 'America/Argentina/Tucuman'`),
+]);
+
+export const routes = pgTable("routes", {
+  id: integer().generatedAlwaysAsIdentity().primaryKey(),
+  dailyPlanId: integer("daily_plan_id").notNull().references(() => dailyPlans.id, { onDelete: "restrict" }),
+  driverId: integer("driver_id").notNull().references(() => drivers.id, { onDelete: "restrict" }),
+  vehicleId: integer("vehicle_id").notNull().references(() => vehicles.id, { onDelete: "restrict" }),
+  startTime: time("start_time").notNull(),
+  endTime: time("end_time").notNull(),
+  status: text().default("borrador").notNull(),
+  createdAt: timestamp("created_at", { withTimezone: true, mode: "string" }).defaultNow().notNull(),
+}, (table) => [
+  check("routes_status_check", sql`${table.status} IN ('borrador', 'publicado', 'en_curso', 'cerrado')`),
+  check("routes_time_band_check", sql`${table.endTime} >= ${table.startTime}`),
+]);
+
+// An entrada may start at another Destino (origin) instead of home; a salida always ends at home.
+export const transfers = pgTable("transfers", {
+  id: integer().generatedAlwaysAsIdentity().primaryKey(),
+  dailyPlanId: integer("daily_plan_id").notNull().references(() => dailyPlans.id, { onDelete: "restrict" }),
+  passengerId: integer("passenger_id").notNull().references(() => passengers.id, { onDelete: "restrict" }),
+  direction: text().notNull(),
+  destinationId: integer("destination_id").notNull().references(() => destinations.id, { onDelete: "restrict" }),
+  originDestinationId: integer("origin_destination_id").references(() => destinations.id, { onDelete: "restrict" }),
+  targetTime: time("target_time").notNull(),
+  companions: integer().notNull(),
+  status: text().default("planificado").notNull(),
+  createdAt: timestamp("created_at", { withTimezone: true, mode: "string" }).defaultNow().notNull(),
+}, (table) => [
+  check("transfers_direction_check", sql`${table.direction} IN ('entrada', 'salida')`),
+  check("transfers_status_check", sql`${table.status} IN ('planificado', 'subio', 'entregado', 'ausente', 'cancelado_ausencia')`),
+  check("transfers_companions_check", sql`${table.companions} BETWEEN 0 AND 2`),
+  check(
+    "transfers_origin_check",
+    sql`${table.originDestinationId} IS NULL OR (${table.direction} = 'entrada' AND ${table.originDestinationId} <> ${table.destinationId})`,
+  ),
+]);
+
+// A Traslado is assigned to a Recorrido by its two Paradas; the unique index keeps it in one Recorrido at most.
+// leg_distance_meters is the leg that ends at this Parada, stored for the current order only.
+export const stops = pgTable("stops", {
+  id: integer().generatedAlwaysAsIdentity().primaryKey(),
+  routeId: integer("route_id").notNull().references(() => routes.id, { onDelete: "restrict" }),
+  transferId: integer("transfer_id").notNull().references(() => transfers.id, { onDelete: "restrict" }),
+  kind: text().notNull(),
+  position: integer().notNull(),
+  legDistanceMeters: integer("leg_distance_meters"),
+}, (table) => [
+  uniqueIndex("stops_transfer_kind_unique").on(table.transferId, table.kind),
+  check("stops_kind_check", sql`${table.kind} IN ('pickup', 'dropoff')`),
+  check("stops_leg_distance_check", sql`${table.legDistanceMeters} >= 0`),
+]);
+
+export const absences = pgTable("absences", {
+  id: integer().generatedAlwaysAsIdentity().primaryKey(),
+  transferId: integer("transfer_id").notNull().references(() => transfers.id, { onDelete: "restrict" }),
+  createdBy: integer("created_by").notNull().references(() => users.id, { onDelete: "restrict" }),
+  createdAt: timestamp("created_at", { withTimezone: true, mode: "string" }).defaultNow().notNull(),
+}, (table) => [
+  uniqueIndex("absences_transfer_unique").on(table.transferId),
 ]);

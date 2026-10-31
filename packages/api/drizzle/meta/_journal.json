@@ -43,6 +43,13 @@
       "when": 1793478789302,
       "tag": "0005_lethal_senator_kelly",
       "breakpoints": true
+    },
+    {
+      "idx": 6,
+      "version": "7",
+      "when": 1793482927046,
+      "tag": "0006_chilly_nebula",
+      "breakpoints": true
     }
   ]
 }
