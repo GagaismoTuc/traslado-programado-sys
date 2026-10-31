@@ -114,6 +114,17 @@ describe("Adaptaciones (vehicle features)", () => {
 });
 
 describe("Vehículos", () => {
+  it("accepts seats up to 2147483647 inclusive and rejects 2147483648 with 400", async () => {
+    const { cookie: office } = await signIn("office-seats", "office");
+    const largest = await request("/vehicles", "POST", { plate: "INT4MAX", model: "Cota int4", seats: 2_147_483_647, featureIds: [] }, office);
+    expect(largest.status).toBe(201);
+    expect((await largest.json()).vehicle).toMatchObject({ plate: "INT4MAX", seats: 2_147_483_647 });
+    const beyond = await request("/vehicles", "POST", { plate: "INT4OVER", model: "Cota int4", seats: 2_147_483_648, featureIds: [] }, office);
+    expect(beyond.status).toBe(400);
+    const stored = await migrationPool.query("SELECT plate FROM vehicles WHERE plate IN ('INT4MAX', 'INT4OVER')");
+    expect(stored.rows).toEqual([{ plate: "INT4MAX" }]);
+  });
+
   it("creates, edits and deactivates Vehículos with seats, front: 1, Adaptaciones and transactional change log", async () => {
     const { cookie: driver } = await signIn("driver-veh", "driver");
     const { cookie: office } = await signIn("office-veh", "office");

@@ -23,6 +23,21 @@ export async function isSecondFactorRequired(response: Response) {
   return result?.code === "second_factor_required";
 }
 
+/** On a 401 sends the browser to `/second-factor` or to sign-in; true when it navigated. */
+export async function redirectUnauthorized(...responses: Response[]) {
+  for (const response of responses) {
+    if (await isSecondFactorRequired(response)) {
+      window.location.assign("/second-factor");
+      return true;
+    }
+  }
+  if (responses.some((response) => response.status === 401)) {
+    window.location.assign("/");
+    return true;
+  }
+  return false;
+}
+
 const geocodeErrors: Record<number, string> = {
   404: "No match for this address. Place the pin on the map by hand.",
   429: "Too many address searches. Wait a second and try again, or place the pin on the map by hand.",
