@@ -5,7 +5,7 @@ import { promisify } from "node:util";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { createApp } from "../src/app.js";
 import { createPool } from "../src/db.js";
-import { createRoutingHealth } from "../src/routing.js";
+import { createOsrmRouter, createRoutingHealth } from "../src/routing.js";
 import { composeConfig, osrmRecipe, readRecipe, startRoutingStack, type RoutingStack } from "./routing-harness.js";
 
 const appPool = createPool(process.env.TEST_DATABASE_URL!);
@@ -82,6 +82,19 @@ describe("routing infrastructure", () => {
 
     const closesBeforeArrival = await solve(tinyInstance([[0, arrival - 1]]));
     expect(closesBeforeArrival.unassigned.map((job) => job.id)).toEqual([1]);
+  });
+
+  it("computes the road legs between consecutive points with the real OSRM, one leg fewer than points", async () => {
+    const corners = [{ lat: -26.84, lng: -65.22 }, { lat: -26.84, lng: -65.2 }, { lat: -26.82, lng: -65.2 }];
+    const legs = await createOsrmRouter(stack.osrmUrl)(corners);
+    expect(legs).toHaveLength(2);
+    // Each leg runs along one edge of the grid: about 2 km east, then about 2.2 km north.
+    expect(legs[0].distanceMeters).toBeGreaterThan(1900);
+    expect(legs[0].distanceMeters).toBeLessThan(2100);
+    expect(legs[1].distanceMeters).toBeGreaterThan(2100);
+    expect(legs[1].distanceMeters).toBeLessThan(2350);
+    for (const leg of legs) expect(leg.durationSeconds).toBeGreaterThan(0);
+    await expect(createOsrmRouter(deadUrl)(corners)).rejects.toThrow();
   });
 
   it("reports healthy when the database, OSRM and VROOM all answer", async () => {
