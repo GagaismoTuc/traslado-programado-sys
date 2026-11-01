@@ -1,5 +1,6 @@
 import { useEffect, useRef, useState, type FormEvent } from "react";
 import { readError, send, suggestAddressPin } from "./api";
+import { AuthorizedAdultsPanel } from "./AuthorizedAdultsPanel";
 import { OfficeNav } from "./OfficeNav";
 import { PinPicker, type LatLng } from "./PinPicker";
 import type { VehicleFeature } from "./VehicleFeaturesPage";
@@ -31,6 +32,7 @@ export function PassengersPage() {
   const [passengers, setPassengers] = useState<PassengerItem[]>([]);
   const [features, setFeatures] = useState<VehicleFeature[]>([]);
   const [editingId, setEditingId] = useState<number | null>(null);
+  const [adultsFor, setAdultsFor] = useState<PassengerItem | null>(null);
   const [name, setName] = useState("");
   const [homeAddress, setHomeAddress] = useState("");
   const [accessNotes, setAccessNotes] = useState("");
@@ -232,6 +234,8 @@ export function PassengersPage() {
       {passenger.medicalAlert ? ` - Alert: ${passenger.medicalAlert}` : ""}
       {passenger.deactivatedAt ? " (deactivated)" : ""}
       {" "}
+      <button type="button" onClick={() => setAdultsFor(passenger)}>Adults and consent</button>
+      {" "}
       {passenger.deactivatedAt
         ? <button type="button" onClick={() => void setActive(passenger.id, true)}>Reactivate passenger</button>
         : <>
@@ -240,5 +244,6 @@ export function PassengersPage() {
           <button type="button" onClick={() => void setActive(passenger.id, false)}>Deactivate passenger</button>
         </>}
     </li>)}</ul>
+    {adultsFor && <AuthorizedAdultsPanel key={adultsFor.id} passenger={adultsFor} onClose={() => setAdultsFor(null)} />}
   </main>;
 }
