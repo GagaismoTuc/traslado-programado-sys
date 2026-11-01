@@ -1,5 +1,5 @@
 {
-  "id": "1271cb99-4e85-4a47-8195-5898beb87a3b",
+  "id": "51b71f81-45c6-449a-b6ac-c4daa864c304",
   "prevId": "e29b4c22-99d3-49b8-8631-87f6010f0796",
   "version": "7",
   "dialect": "postgresql",
@@ -511,148 +511,6 @@
         "destinations_longitude_check": {
           "name": "destinations_longitude_check",
           "value": "\"destinations\".\"longitude\" BETWEEN -180 AND 180"
-        }
-      },
-      "isRLSEnabled": false
-    },
-    "public.documents": {
-      "name": "documents",
-      "schema": "",
-      "columns": {
-        "id": {
-          "name": "id",
-          "type": "integer",
-          "primaryKey": true,
-          "notNull": true,
-          "identity": {
-            "type": "always",
-            "name": "documents_id_seq",
-            "schema": "public",
-            "increment": "1",
-            "startWith": "1",
-            "minValue": "1",
-            "maxValue": "2147483647",
-            "cache": "1",
-            "cycle": false
-          }
-        },
-        "vehicle_id": {
-          "name": "vehicle_id",
-          "type": "integer",
-          "primaryKey": false,
-          "notNull": false
-        },
-        "driver_id": {
-          "name": "driver_id",
-          "type": "integer",
-          "primaryKey": false,
-          "notNull": false
-        },
-        "name": {
-          "name": "name",
-          "type": "text",
-          "primaryKey": false,
-          "notNull": true
-        },
-        "expires_on": {
-          "name": "expires_on",
-          "type": "date",
-          "primaryKey": false,
-          "notNull": false
-        },
-        "created_at": {
-          "name": "created_at",
-          "type": "timestamp with time zone",
-          "primaryKey": false,
-          "notNull": true,
-          "default": "now()"
-        }
-      },
-      "indexes": {
-        "documents_vehicle_name_unique": {
-          "name": "documents_vehicle_name_unique",
-          "columns": [
-            {
-              "expression": "vehicle_id",
-              "isExpression": false,
-              "asc": true,
-              "nulls": "last"
-            },
-            {
-              "expression": "lower(\"name\")",
-              "asc": true,
-              "isExpression": true,
-              "nulls": "last"
-            }
-          ],
-          "isUnique": true,
-          "where": "\"documents\".\"vehicle_id\" IS NOT NULL",
-          "concurrently": false,
-          "method": "btree",
-          "with": {}
-        },
-        "documents_driver_name_unique": {
-          "name": "documents_driver_name_unique",
-          "columns": [
-            {
-              "expression": "driver_id",
-              "isExpression": false,
-              "asc": true,
-              "nulls": "last"
-            },
-            {
-              "expression": "lower(\"name\")",
-              "asc": true,
-              "isExpression": true,
-              "nulls": "last"
-            }
-          ],
-          "isUnique": true,
-          "where": "\"documents\".\"driver_id\" IS NOT NULL",
-          "concurrently": false,
-          "method": "btree",
-          "with": {}
-        }
-      },
-      "foreignKeys": {
-        "documents_vehicle_id_vehicles_id_fk": {
-          "name": "documents_vehicle_id_vehicles_id_fk",
-          "tableFrom": "documents",
-          "tableTo": "vehicles",
-          "columnsFrom": [
-            "vehicle_id"
-          ],
-          "columnsTo": [
-            "id"
-          ],
-          "onDelete": "restrict",
-          "onUpdate": "no action"
-        },
-        "documents_driver_id_drivers_id_fk": {
-          "name": "documents_driver_id_drivers_id_fk",
-          "tableFrom": "documents",
-          "tableTo": "drivers",
-          "columnsFrom": [
-            "driver_id"
-          ],
-          "columnsTo": [
-            "id"
-          ],
-          "onDelete": "restrict",
-          "onUpdate": "no action"
-        }
-      },
-      "compositePrimaryKeys": {},
-      "uniqueConstraints": {},
-      "policies": {},
-      "checkConstraints": {
-        "documents_one_owner_check": {
-          "name": "documents_one_owner_check",
-          "value": "(\"documents\".\"vehicle_id\" IS NULL) <> (\"documents\".\"driver_id\" IS NULL)"
-        },
-        "documents_name_check": {
-          "name": "documents_name_check",
-          "value": "btrim(\"documents\".\"name\") <> ''"
         }
       },
       "isRLSEnabled": false
@@ -2292,6 +2150,123 @@
           "value": "\"vehicles\".\"front_seats\" = 1"
         }
       },
+      "isRLSEnabled": false
+    },
+    "public.version_acknowledgements": {
+      "name": "version_acknowledgements",
+      "schema": "",
+      "columns": {
+        "id": {
+          "name": "id",
+          "type": "integer",
+          "primaryKey": true,
+          "notNull": true,
+          "identity": {
+            "type": "always",
+            "name": "version_acknowledgements_id_seq",
+            "schema": "public",
+            "increment": "1",
+            "startWith": "1",
+            "minValue": "1",
+            "maxValue": "2147483647",
+            "cache": "1",
+            "cycle": false
+          }
+        },
+        "plan_version_id": {
+          "name": "plan_version_id",
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "driver_id": {
+          "name": "driver_id",
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "session_id": {
+          "name": "session_id",
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "acknowledged_at": {
+          "name": "acknowledged_at",
+          "type": "timestamp with time zone",
+          "primaryKey": false,
+          "notNull": true,
+          "default": "now()"
+        }
+      },
+      "indexes": {
+        "version_acknowledgements_version_driver_unique": {
+          "name": "version_acknowledgements_version_driver_unique",
+          "columns": [
+            {
+              "expression": "plan_version_id",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            },
+            {
+              "expression": "driver_id",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            }
+          ],
+          "isUnique": true,
+          "concurrently": false,
+          "method": "btree",
+          "with": {}
+        }
+      },
+      "foreignKeys": {
+        "version_acknowledgements_plan_version_id_plan_versions_id_fk": {
+          "name": "version_acknowledgements_plan_version_id_plan_versions_id_fk",
+          "tableFrom": "version_acknowledgements",
+          "tableTo": "plan_versions",
+          "columnsFrom": [
+            "plan_version_id"
+          ],
+          "columnsTo": [
+            "id"
+          ],
+          "onDelete": "restrict",
+          "onUpdate": "no action"
+        },
+        "version_acknowledgements_driver_id_drivers_id_fk": {
+          "name": "version_acknowledgements_driver_id_drivers_id_fk",
+          "tableFrom": "version_acknowledgements",
+          "tableTo": "drivers",
+          "columnsFrom": [
+            "driver_id"
+          ],
+          "columnsTo": [
+            "id"
+          ],
+          "onDelete": "restrict",
+          "onUpdate": "no action"
+        },
+        "version_acknowledgements_session_id_sessions_id_fk": {
+          "name": "version_acknowledgements_session_id_sessions_id_fk",
+          "tableFrom": "version_acknowledgements",
+          "tableTo": "sessions",
+          "columnsFrom": [
+            "session_id"
+          ],
+          "columnsTo": [
+            "id"
+          ],
+          "onDelete": "restrict",
+          "onUpdate": "no action"
+        }
+      },
+      "compositePrimaryKeys": {},
+      "uniqueConstraints": {},
+      "policies": {},
+      "checkConstraints": {},
       "isRLSEnabled": false
     }
   },

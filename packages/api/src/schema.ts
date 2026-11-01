@@ -302,6 +302,18 @@ export const planVersionTransfers = pgTable("plan_version_transfers", {
   check("plan_version_transfers_direct_distance_check", sql`${table.directDistanceMeters} >= 0`),
 ]);
 
+// A Confirmación de versión: the Chofer saw this Versión del plan. Append-only (the app role has no UPDATE or DELETE);
+// the unique index makes a repeated acknowledgement of the same version a no-op.
+export const versionAcknowledgements = pgTable("version_acknowledgements", {
+  id: integer().generatedAlwaysAsIdentity().primaryKey(),
+  planVersionId: integer("plan_version_id").notNull().references(() => planVersions.id, { onDelete: "restrict" }),
+  driverId: integer("driver_id").notNull().references(() => drivers.id, { onDelete: "restrict" }),
+  sessionId: integer("session_id").notNull().references(() => sessions.id, { onDelete: "restrict" }),
+  acknowledgedAt: timestamp("acknowledged_at", { withTimezone: true, mode: "string" }).defaultNow().notNull(),
+}, (table) => [
+  uniqueIndex("version_acknowledgements_version_driver_unique").on(table.planVersionId, table.driverId),
+]);
+
 export const absences = pgTable("absences", {
   id: integer().generatedAlwaysAsIdentity().primaryKey(),
   transferId: integer("transfer_id").notNull().references(() => transfers.id, { onDelete: "restrict" }),
