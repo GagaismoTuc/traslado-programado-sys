@@ -705,7 +705,7 @@ describe("the engine orders a Recorrido", () => {
       .toEqual([noSeat, tooShort, ramp].sort());
   });
 
-  it("orders only a Borrador Recorrido and leaves the order untouched when the engine does not answer", async () => {
+  it("orders only a Borrador or En curso Recorrido and leaves the order untouched when the engine does not answer", async () => {
     const down = fakeEngine({ fail: true });
     const app = appWith(down.solver);
     const w = await world("borrador", app);
@@ -720,7 +720,7 @@ describe("the engine orders a Recorrido", () => {
     expect(await json(request(appWith(), `/routes/${routeId}/order`, "POST", undefined, w.office), 503))
       .toEqual({ error: "The routing engine is not configured" });
     await migrationPool.query("UPDATE routes SET status = 'publicado' WHERE id = $1", [routeId]);
-    expect(await w.order(routeId, 409)).toEqual({ error: "Only a Borrador Recorrido can be ordered" });
+    expect(await w.order(routeId, 409)).toEqual({ error: "Only a Borrador or En curso Recorrido can be ordered" });
     expect(await w.order(9999, 404)).toEqual({ error: "Recorrido not found" });
     expect(down.problems).toHaveLength(1);
   });
