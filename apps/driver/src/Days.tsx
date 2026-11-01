@@ -100,6 +100,8 @@ export function DayView({ title, day, sending, onAcknowledge }: { title: string;
 export function DriverHome({ apiUrl, onSignedOut }: { apiUrl: string; onSignedOut: () => void }) {
   const [days, setDays] = useState<DriverDay[] | null>(null);
   const [message, setMessage] = useState("");
+  // A failed load is shown until a later load succeeds, apart from the acknowledgement message.
+  const [loadError, setLoadError] = useState("");
   const [sending, setSending] = useState(false);
   const latestLoad = useRef(0);
   const signedOut = useRef(onSignedOut);
@@ -116,14 +118,15 @@ export function DriverHome({ apiUrl, onSignedOut }: { apiUrl: string; onSignedOu
         return;
       }
       if (responses.some((response) => !response.ok)) {
-        setMessage("Unable to load your Recorridos");
+        setLoadError("Unable to load your Recorridos");
         return;
       }
       const loaded = await Promise.all(responses.map(async (response) => await response.json() as DriverDay));
       if (loadId !== latestLoad.current) return;
       setDays(loaded);
+      setLoadError("");
     } catch {
-      if (loadId === latestLoad.current) setMessage("Unable to reach the server");
+      if (loadId === latestLoad.current) setLoadError("Unable to reach the server");
     }
   }, [apiUrl]);
 
@@ -147,6 +150,7 @@ export function DriverHome({ apiUrl, onSignedOut }: { apiUrl: string; onSignedOu
   }
 
   return <>
+    {loadError && <p role="alert">{loadError}</p>}
     {message && <p role="status">{message}</p>}
     {days
       ? days.map((day, index) => <DayView
