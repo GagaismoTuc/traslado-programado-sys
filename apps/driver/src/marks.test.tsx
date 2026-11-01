@@ -3,7 +3,7 @@ import { renderToStaticMarkup } from "react-dom/server";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { RouteView, type DriverRoute, type DriverStop, type Marking } from "./Days";
 import {
-  CALL_THE_OFFICE, currentLocation, fetchHandover, HandoverView, newMark, otherAdultReceiver, sendMark, startRoute,
+  CALL_THE_OFFICE, closeRoute, currentLocation, fetchHandover, HandoverView, newMark, otherAdultReceiver, sendMark, startRoute,
   type Handover, type HandoverActions,
 } from "./Marks";
 
@@ -27,7 +27,7 @@ const route = (status: string, stops: DriverStop[]): DriverRoute => ({
   routeId: 9, version: 2, startTime: "07:00", endTime: "18:00", vehiclePlate: "AAA001", status, acknowledgedVersion: 2, stops,
 });
 const marking = (fields: Partial<Marking> = {}): Marking => ({
-  sending: false, unsent: {}, handover: null, onStart: vi.fn(), onMark: vi.fn(), onResend: vi.fn(), onOpenHandover: vi.fn(),
+  sending: false, unsent: {}, handover: null, refusedClose: null, onStart: vi.fn(), onClose: vi.fn(), onMark: vi.fn(), onResend: vi.fn(), onOpenHandover: vi.fn(),
   onOtherAdult: vi.fn(), onSearch: vi.fn(), ...fields,
 });
 const actions = (): HandoverActions => ({ onReceiver: vi.fn(), onOtherAdult: vi.fn(), onSearch: vi.fn() });
@@ -127,6 +127,36 @@ describe("Marcas in the driver app", () => {
     vi.stubGlobal("fetch", fetchMock);
     await startRoute("https://api.example", 9);
     expect(fetchMock).toHaveBeenCalledWith("https://api.example/driver/routes/9/start", {
+      method: "POST", credentials: "include", headers: { "Content-Type": "application/json" }, body: "{}",
+    });
+  });
+
+  it("still offers only Start on a published Recorrido", () => {
+    expect(buttons(<RouteView route={route("publicado", [])} sending={false} onAcknowledge={() => undefined} marking={marking()} />).map((item) => item.text))
+      .toEqual(["Start Recorrido"]);
+  });
+
+  it("offers to close a Recorrido en curso and tells the Chofer what to resolve when the server refuses", async () => {
+    const actionsFor = marking();
+    const started = route("en_curso", []);
+    press(<RouteView route={started} sending={false} onAcknowledge={() => undefined} marking={actionsFor} />, "Close Recorrido");
+    expect(actionsFor.onClose).toHaveBeenCalledWith(started);
+    const refused = marking({ refusedClose: { routeId: 9, transfers: [
+      { transferId: 3, passengerName: "Pasajero Sintético", direction: "salida", status: "subio" },
+      { transferId: 4, passengerName: "Pasajera Sintética", direction: "entrada", status: "planificado" },
+    ] } });
+    expect(renderToStaticMarkup(<RouteView route={started} sending={false} onAcknowledge={() => undefined} marking={refused} />)).toContain(
+      "<div role=\"alert\"><p>Resolve these Traslados before closing the Recorrido:</p><ul>"
+      + "<li>Pasajero Sintético: on board, mark Entregado</li>"
+      + "<li>Pasajera Sintética: not marked, mark Subió or Ausente, or call the Oficina to reassign or cancel it</li></ul></div>",
+    );
+    const closed = renderToStaticMarkup(<RouteView route={route("cerrado", [])} sending={false} onAcknowledge={() => undefined} marking={marking()} />);
+    expect(closed).toContain("<p>Recorrido closed.</p>");
+    expect(closed).not.toContain("Close Recorrido");
+    const fetchMock = vi.fn(async () => new Response("{}", { status: 200 }));
+    vi.stubGlobal("fetch", fetchMock);
+    await closeRoute("https://api.example", 9);
+    expect(fetchMock).toHaveBeenCalledWith("https://api.example/driver/routes/9/close", {
       method: "POST", credentials: "include", headers: { "Content-Type": "application/json" }, body: "{}",
     });
   });
