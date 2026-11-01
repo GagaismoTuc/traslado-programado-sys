@@ -138,7 +138,7 @@ export function createExecutionHarness(epoch: string, extra: Partial<AppConfig> 
   }
 
   /** A Marca as the phone sends it, with a fresh UUID and the current clock as phone time. */
-  function markBody(transferId: number, kind: "subio" | "ausente" | "entregado", fields: Record<string, unknown> = {}) {
+  function markBody(transferId: number, kind: "subio" | "ausente" | "entregado" | "undo", fields: Record<string, unknown> = {}) {
     return { id: randomUUID(), transferId, kind, phoneTime: clock.now.toISOString(), location: HOME, version: 1, ...fields };
   }
 

@@ -1,4 +1,4 @@
-import { createHash, randomBytes } from "node:crypto";
+import { createHash, randomBytes, randomUUID } from "node:crypto";
 import { getCookie, deleteCookie, setCookie } from "hono/cookie";
 import { getConnInfo } from "@hono/node-server/conninfo";
 import { Hono, type Context } from "hono";
@@ -1597,7 +1597,8 @@ async function loadDriverDay(client: Queryable, driverId: number, date: string) 
   };
 }
 
-type MarkKind = "subio" | "ausente" | "entregado";
+// "undo" is only a Corrección: it takes back the Marca it corrects.
+type MarkKind = "subio" | "ausente" | "entregado" | "undo";
 type MarkReceiver =
   | { kind: "authorized_adult"; adultId: number }
   | { kind: "destination"; destinationId: number }
@@ -1612,9 +1613,18 @@ type MarkFields = {
   location: MarkLocation;
   version: number;
   receiver: MarkReceiver | null;
+  // The UUID of the Marca a Corrección replaces.
+  corrects?: string;
 };
 
-const MARK_KINDS: MarkKind[] = ["subio", "ausente", "entregado"];
+const MARK_KINDS: MarkKind[] = ["subio", "ausente", "entregado", "undo"];
+// The Chofer corrects their own Marca within this window between the phone times of both Marcas, so it works offline.
+// A product default, not client-confirmed.
+const CHOFER_CORRECTION_WINDOW_MS = 2 * 60 * 1000;
+const CALL_THE_OFFICE_TO_CORRECT = "More than 2 minutes have passed since this Marca: call the Oficina to correct it";
+const REASON_REQUIRED = "A Corrección by the Oficina requires a reason";
+// A Marca in force: not an undo and not replaced by a Corrección. The Traslado's state is its latest one in force.
+const MARK_IN_FORCE_SQL = `e.kind <> 'undo' AND NOT EXISTS (SELECT 1 FROM marks c WHERE c.corrects_mark_id = e.id)`;
 const UUID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 const RECEIVER_REQUIRED = "Entregado requires a Receptor";
 // A Traslado in one of these states is closed: an Autorización puntual on it has expired.
@@ -1653,23 +1663,28 @@ function parseMark(body: unknown): MarkFields | { error: string } | null {
   const version = positiveInt(body.version);
   const kind = MARK_KINDS.find((candidate) => candidate === body.kind);
   const phoneTime = typeof body.phoneTime === "string" && /T.*(Z|[+-]\d{2}:\d{2})$/.test(body.phoneTime) ? new Date(body.phoneTime) : null;
+  const corrects = body.corrects === undefined || body.corrects === null ? null
+    : typeof body.corrects === "string" && UUID_PATTERN.test(body.corrects) ? body.corrects.toLowerCase() : undefined;
   const location = body.location === null ? null : isObject(body.location)
     && typeof body.location.lat === "number" && Math.abs(body.location.lat) <= 90
     && typeof body.location.lng === "number" && Math.abs(body.location.lng) <= 180
     ? { lat: body.location.lat, lng: body.location.lng }
     : undefined;
   if (!id || !transferId || !version || !kind || !phoneTime || Number.isNaN(phoneTime.getTime()) || location === undefined) return null;
+  if (corrects === undefined || (kind === "undo" && !corrects)) return null;
   if (kind === "entregado" && (body.receiver === undefined || body.receiver === null)) return { error: RECEIVER_REQUIRED };
   if (kind !== "entregado" && body.receiver !== undefined && body.receiver !== null) return null;
   const receiver = kind === "entregado" ? parseMarkReceiver(body.receiver) : null;
   if (kind === "entregado" && !receiver) return null;
-  return { id, transferId, kind, phoneTime: phoneTime.toISOString(), location, version, receiver };
+  return { id, transferId, kind, phoneTime: phoneTime.toISOString(), location, version, receiver, ...(corrects ? { corrects } : {}) };
 }
 
 const MARK_SELECT_SQL = `
   SELECT m.id, m.client_id, m.driver_id, m.transfer_id, pv.route_id, pv.version, m.kind, m.phone_time, m.server_time, m.latitude, m.longitude,
-         m.receiver_kind, m.receiver_adult_id, m.receiver_destination_id, m.receiver_name, m.receiver_dni, m.authorization_id, m.flags
-    FROM marks m JOIN plan_versions pv ON pv.id = m.plan_version_id
+         m.receiver_kind, m.receiver_adult_id, m.receiver_destination_id, m.receiver_name, m.receiver_dni, m.authorization_id, m.flags,
+         c.client_id AS corrects_client_id, m.reason, u.id AS author_user_id, u.username AS author_username, u.role AS author_role
+    FROM marks m JOIN plan_versions pv ON pv.id = m.plan_version_id LEFT JOIN marks c ON c.id = m.corrects_mark_id
+    JOIN sessions s ON s.id = m.session_id JOIN users u ON u.id = s.user_id
 `;
 
 function formatMarkReceiver(row: Record<string, unknown>): MarkReceiver | null {
@@ -1696,12 +1711,17 @@ function formatMark(row: Record<string, unknown>) {
     location: row.latitude === null ? null : { lat: Number(row.latitude), lng: Number(row.longitude) },
     receiver: formatMarkReceiver(row),
     flags: row.flags as string[],
+    // Only a Corrección names the Marca it replaces, and only the Oficina's has a reason.
+    ...(row.corrects_client_id ? { corrects: String(row.corrects_client_id) } : {}),
+    ...(row.reason ? { reason: String(row.reason) } : {}),
   };
 }
 
 /** What a Marca says, in one key order: two sends of one UUID are the same Marca only when this is equal. */
 function markContent(mark: Omit<MarkFields, "id"> & { routeId: number }) {
-  return JSON.stringify([mark.transferId, mark.routeId, mark.version, mark.kind, mark.phoneTime, mark.location, mark.receiver]);
+  return JSON.stringify([
+    mark.transferId, mark.routeId, mark.version, mark.kind, mark.phoneTime, mark.location, mark.receiver, ...(mark.corrects ? [mark.corrects] : []),
+  ]);
 }
 
 async function insertAlert(client: Queryable, alert: {
@@ -1881,8 +1901,13 @@ export function createApp({ db, routing, router, geocoder, solver, travelTime, c
    * Stores a Marca the Chofer made from Recorrido `routeId`. It is never refused for being late or for a moved Traslado:
    * it is flagged and the Oficina gets an alert. A resent UUID returns the stored Marca; with other content it keeps the
    * first one and raises one conflict alert per different content.
+   *
+   * A Corrección (`corrects`) replaces the Traslado's latest Marca in force and never changes it. The Chofer corrects only
+   * their own, within 2 minutes between the phone times; the Oficina (`driverId` null) any time, with `reason`.
    */
-  async function recordMark(client: Queryable, chofer: { user: AuthenticatedUser; driverId: number }, routeId: number, fields: MarkFields) {
+  async function recordMark(
+    client: Queryable, chofer: { user: AuthenticatedUser; driverId: number | null }, routeId: number, fields: MarkFields, reason: string | null = null,
+  ) {
     const seen = await client.query(
       `SELECT pv.id, EXISTS (SELECT 1 FROM plan_version_transfers pvt WHERE pvt.plan_version_id = pv.id AND pvt.transfer_id = $3) AS served
          FROM plan_versions pv WHERE pv.route_id = $1 AND pv.version = $2`,
@@ -1911,6 +1936,23 @@ export function createApp({ db, routing, router, geocoder, solver, travelTime, c
     };
     const existing = await stored();
     if (existing) return await resend(existing);
+    let correctsMarkId: number | null = null;
+    if (fields.corrects) {
+      const target = (await client.query(
+        `SELECT m.id, m.driver_id, m.phone_time,
+                m.id = (SELECT e.id FROM marks e WHERE e.transfer_id = $2 AND ${MARK_IN_FORCE_SQL} ORDER BY e.phone_time DESC, e.id DESC LIMIT 1) AS latest
+           FROM marks m WHERE m.client_id = $1 AND m.transfer_id = $2`,
+        [fields.corrects, fields.transferId],
+      ) as QueryResult).rows[0];
+      if (!target) throw new PlanningError(404, "Marca not found on this Traslado");
+      if (chofer.driverId !== null) {
+        if (Number(target.driver_id) !== chofer.driverId) throw new PlanningError(403, "This Marca belongs to another Chofer");
+        const elapsed = Math.abs(Date.parse(fields.phoneTime) - new Date(target.phone_time as string | Date).getTime());
+        if (elapsed > CHOFER_CORRECTION_WINDOW_MS) throw new PlanningError(409, CALL_THE_OFFICE_TO_CORRECT);
+      }
+      if (target.latest !== true) throw new PlanningError(409, "Only the Traslado's latest Marca can be corrected");
+      correctsMarkId = Number(target.id);
+    }
 
     const flags: string[] = [];
     const placement = (await client.query(
@@ -1947,8 +1989,9 @@ export function createApp({ db, routing, router, geocoder, solver, travelTime, c
     const serverTime = now();
     const inserted = await client.query(
       `INSERT INTO marks (client_id, transfer_id, plan_version_id, driver_id, session_id, kind, phone_time, server_time, latitude, longitude,
-                          receiver_kind, receiver_adult_id, receiver_destination_id, receiver_name, receiver_dni, authorization_id, flags)
-       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17)
+                          receiver_kind, receiver_adult_id, receiver_destination_id, receiver_name, receiver_dni, authorization_id, flags,
+                          corrects_mark_id, reason)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19)
        ON CONFLICT (client_id) DO NOTHING RETURNING id`,
       [
         fields.id, fields.transferId, Number(seen.rows[0].id), chofer.driverId, chofer.user.session_id, fields.kind, fields.phoneTime, serverTime,
@@ -1959,19 +2002,26 @@ export function createApp({ db, routing, router, geocoder, solver, travelTime, c
         receiver?.kind === "other_adult" ? receiver.dni : null,
         receiver?.kind === "other_adult" ? receiver.authorizationId : null,
         JSON.stringify(flags),
+        correctsMarkId,
+        reason,
       ],
     ) as QueryResult;
     // Another request stored this UUID first.
     if (!inserted.rows[0]) return await resend((await stored())!);
     const markId = Number(inserted.rows[0].id);
-    // The Traslado follows its Marca with the latest phone time, so one that arrives late does not undo a newer one.
+    // The Traslado follows its Marca in force with the latest phone time, so one that arrives late does not undo a newer
+    // one. With none left (every Marca undone) it is back where it was before the first: Planificado, or cancelled.
     await client.query(
-      `UPDATE transfers t SET status = latest.kind
-         FROM (SELECT kind FROM marks WHERE transfer_id = $1 ORDER BY phone_time DESC, id DESC LIMIT 1) latest
+      `UPDATE transfers t SET status = COALESCE(
+         (SELECT e.kind FROM marks e WHERE e.transfer_id = $1 AND ${MARK_IN_FORCE_SQL} ORDER BY e.phone_time DESC, e.id DESC LIMIT 1),
+         CASE WHEN EXISTS (SELECT 1 FROM absences a WHERE a.transfer_id = $1) THEN 'cancelado_ausencia' ELSE 'planificado' END)
         WHERE t.id = $1`,
       [fields.transferId],
     );
-    const started = await client.query("UPDATE routes SET status = 'en_curso' WHERE id = $1 AND status = 'publicado' RETURNING id", [routeId]) as QueryResult;
+    // Only a Chofer's Marca starts the Recorrido.
+    const started = chofer.driverId === null ? { rows: [] } : await client.query(
+      "UPDATE routes SET status = 'en_curso' WHERE id = $1 AND status = 'publicado' RETURNING id", [routeId],
+    ) as QueryResult;
     if (started.rows[0]) {
       await appendChange(client, chofer.user.id, "route", String(routeId), "started", { status: "publicado" }, { status: "en_curso" });
     }
@@ -3931,6 +3981,85 @@ export function createApp({ db, routing, router, geocoder, solver, travelTime, c
       } catch (error) {
         return planningFailure(context, error);
       }
+    })
+    // The Oficina corrects a Traslado's latest Marca at any time, always with a reason; see recordMark. The Corrección
+    // gets a new UUID, the server time and the original's Versión del plan.
+    .post("/marks/:id/corrections", async (context) => {
+      const actor = await requireOffice(context);
+      if (actor instanceof Response) return actor;
+      const target = context.req.param("id");
+      const body = await context.req.json().catch(() => null);
+      if (!UUID_PATTERN.test(target) || !isObject(body)) return context.json({ error: "Invalid request" }, 400);
+      const reason = boundedText(body.reason, 1000);
+      if (!reason) return context.json({ error: REASON_REQUIRED }, 400);
+      const original = (await db.query(`${MARK_SELECT_SQL} WHERE m.client_id = $1`, [target.toLowerCase()]) as QueryResult).rows[0];
+      if (!original) return context.json({ error: "Marca not found" }, 404);
+      const fields = parseMark({
+        kind: body.kind, receiver: body.receiver, id: randomUUID(), transferId: original.transfer_id, version: original.version,
+        phoneTime: now().toISOString(), location: null, corrects: target,
+      });
+      if (!fields) return context.json({ error: "Invalid request" }, 400);
+      if ("error" in fields) return context.json({ error: fields.error }, 400);
+      try {
+        const { status, ...result } = await inTransaction(db, async (client) => await recordMark(
+          client, { user: actor, driverId: null }, Number(original.route_id), fields, reason,
+        ));
+        return context.json(result, status);
+      } catch (error) {
+        return planningFailure(context, error);
+      }
+    })
+    // Everything that happened to a Traslado: its planned times in each Versión del plan, every Marca and Corrección with
+    // who made it, and the Oficina's changes, each with its actor.
+    .get("/transfers/:id/history", async (context) => {
+      const actor = await requireOffice(context);
+      if (actor instanceof Response) return actor;
+      const id = parseId(context.req.param("id"));
+      if (!id) return context.json({ error: "Invalid request" }, 400);
+      const transfer = (await db.query("SELECT status FROM transfers WHERE id = $1", [id]) as QueryResult).rows[0];
+      if (!transfer) return context.json({ error: "Traslado not found" }, 404);
+      const versions = await db.query(
+        `SELECT pv.route_id, pv.version, pv.published_at, u.username, dr.name AS driver_name,
+                (SELECT to_char(l.planned_time, 'HH24:MI') FROM plan_version_legs l
+                  WHERE l.plan_version_id = pv.id AND l.transfer_id = $1 AND l.kind = 'pickup') AS pickup,
+                (SELECT to_char(l.planned_time, 'HH24:MI') FROM plan_version_legs l
+                  WHERE l.plan_version_id = pv.id AND l.transfer_id = $1 AND l.kind = 'dropoff') AS dropoff
+           FROM plan_version_transfers pvt JOIN plan_versions pv ON pv.id = pvt.plan_version_id
+           JOIN users u ON u.id = pv.published_by JOIN drivers dr ON dr.id = pv.driver_id
+          WHERE pvt.transfer_id = $1 ORDER BY pv.published_at, pv.id`,
+        [id],
+      ) as QueryResult;
+      const marks = await db.query(`${MARK_SELECT_SQL} WHERE m.transfer_id = $1 ORDER BY m.server_time, m.id`, [id]) as QueryResult;
+      const changes = await db.query(
+        `SELECT cl.action, cl.before_data, cl.after_data, cl.occurred_at, cl.actor_user_id, cl.actor_label, u.username
+           FROM change_log cl LEFT JOIN users u ON u.id = cl.actor_user_id
+          WHERE cl.entity = 'transfer' AND cl.entity_id = $1 ORDER BY cl.occurred_at, cl.id`,
+        [String(id)],
+      ) as QueryResult;
+      return context.json({
+        transferId: id,
+        status: String(transfer.status),
+        versions: versions.rows.map((row) => ({
+          routeId: Number(row.route_id),
+          version: Number(row.version),
+          publishedAt: new Date(row.published_at as string | Date).toISOString(),
+          publishedBy: String(row.username),
+          driverName: String(row.driver_name),
+          pickupTime: (row.pickup as string | null) ?? null,
+          dropoffTime: (row.dropoff as string | null) ?? null,
+        })),
+        marks: marks.rows.map((row) => ({
+          ...formatMark(row),
+          author: { userId: Number(row.author_user_id), username: String(row.author_username), role: String(row.author_role) },
+        })),
+        changes: changes.rows.map((row) => ({
+          action: String(row.action),
+          before: row.before_data,
+          after: row.after_data,
+          occurredAt: new Date(row.occurred_at as string | Date).toISOString(),
+          actor: { userId: nullableNumber(row.actor_user_id), name: (row.username ?? row.actor_label ?? null) as string | null },
+        })),
+      });
     })
     // The Oficina's alert inbox, newest first; the office app polls it.
     .get("/alerts", async (context) => {
