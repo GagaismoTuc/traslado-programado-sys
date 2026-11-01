@@ -54,6 +54,9 @@ const authorizationEvidence = new Map([
   ["PATCH /routes/:id/stops", "lets only the Oficina read and write the Plan diario"],
   ["POST /routes/:id/order", "lets only the Oficina order a Recorrido or edit a Destino's Tolerancia de llegada"],
   ["POST /daily-plans/:date/driver-days", "lets only the Oficina read and write the Plan diario"],
+  ["POST /routes/:id/publish", "lets only the Oficina publish and read Versiones del plan"],
+  ["GET /routes/:id/versions", "lets only the Oficina publish and read Versiones del plan"],
+  ["POST /daily-plans/:date/publish", "lets only the Oficina publish and read Versiones del plan"],
 ]);
 
 describe("API route authorization coverage", () => {

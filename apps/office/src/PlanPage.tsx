@@ -23,6 +23,7 @@ type Route = {
   startTime: string;
   endTime: string;
   status: string;
+  version: number | null;
   km: number | null;
   stops: Stop[];
   startKind: "home" | "previous" | "point" | null;
@@ -35,7 +36,27 @@ type OrderResult = {
   unassigned: { transferId: number; passengerName: string; reason: "capacity" | "time_window" | "adaptation" }[];
   violations: { message: string }[];
 };
-type Day = { plan: { date: string; timeZone: string }; transfers: Transfer[]; routes: Route[]; km: number | null };
+type Day = {
+  plan: { date: string; timeZone: string };
+  transfers: Transfer[];
+  unpublishedTransferIds: number[];
+  routes: Route[];
+  km: number | null;
+};
+export type PassengerViolations = {
+  passengerId: number;
+  passengerName: string;
+  violations: { rule: string; transferId: number | null; message: string }[];
+};
+export type CascadeWarning = { routeId: number; version: number; fromRouteId: number; ok: boolean; problem: string | null };
+export type DaySummary = {
+  published: { routeId: number; version: number }[];
+  unchanged: number[];
+  failed: { routeId: number; error: string; violations?: PassengerViolations[] }[];
+  cascade: CascadeWarning[];
+};
+// A refused publication with the violations to show under its Recorrido; forcing is offered only when allowed.
+type Refusal = { routeId: number; error: string; violations: PassengerViolations[] };
 type Option = { id: number; name: string };
 type PassengerOption = Option & { companions: number; deactivatedAt: string | null };
 type DriverOption = Option & { usualVehicleId: number | null };
@@ -84,6 +105,64 @@ function routeLabel(route: Route) {
   return `${route.driverName} ${route.startTime}-${route.endTime}${route.frontSeat ? " (front seat taken)" : ""}`;
 }
 
+function routeName(routes: Pick<Route, "id" | "driverName" | "startTime" | "endTime">[], routeId: number) {
+  const route = routes.find((item) => item.id === routeId);
+  return route ? `${route.driverName} ${route.startTime}-${route.endTime}` : `Recorrido ${routeId}`;
+}
+
+/** A Recorrido may be forced with a reason unless it leaves a Traslado unserved. */
+export function canForce(violations: PassengerViolations[]) {
+  return violations.every((group) => group.violations.every((violation) => violation.rule !== "unserved_transfer"));
+}
+
+/** The validator's violations, grouped by Pasajero. */
+export function ViolationList({ violations }: { violations: PassengerViolations[] }) {
+  return <ul>{violations.map((group) => <li key={group.passengerId}>
+    <strong>{group.passengerName}</strong>
+    <ul>{group.violations.map((violation, index) => <li key={index}>{violation.message}</li>)}</ul>
+  </li>)}</ul>;
+}
+
+type RouteNames = Pick<Route, "id" | "driverName" | "startTime" | "endTime">[];
+
+/** The cascade warnings about a Chofer's chained next Recorrido. */
+export function CascadeWarnings({ cascade, routes }: { cascade: CascadeWarning[]; routes: RouteNames }) {
+  if (!cascade.length) return null;
+  return <ul role="alert">{cascade.map((warning) => <li key={`${warning.fromRouteId}-${warning.routeId}`}>
+    {warning.ok
+      ? `Revalidated ${routeName(routes, warning.routeId)} (version ${warning.version}): the Chofer still reaches it in time.`
+      : `Check ${routeName(routes, warning.routeId)} (version ${warning.version}): ${warning.problem}. It was not republished.`}
+  </li>)}</ul>;
+}
+
+/** What publishing the whole Plan diario did with each Recorrido. */
+export function DaySummaryView({ summary, routes }: { summary: DaySummary; routes: RouteNames }) {
+  return <section>
+    <h3>Publication summary</h3>
+    <p>{`Published: ${summary.published.length}. Unchanged: ${summary.unchanged.length}. Not published: ${summary.failed.length}.`}</p>
+    <ul>{summary.published.map((item) => <li key={item.routeId}>{`${routeName(routes, item.routeId)}: version ${item.version}`}</li>)}</ul>
+    {summary.failed.length > 0 && <>
+      <h4>Not published</h4>
+      <ul>{summary.failed.map((item) => <li key={item.routeId}>
+        <strong>{routeName(routes, item.routeId)}</strong>: {item.error}
+        {item.violations && <ViolationList violations={item.violations} />}
+      </li>)}</ul>
+    </>}
+    <CascadeWarnings cascade={summary.cascade} routes={routes} />
+  </section>;
+}
+
+/** Every Traslado of the day, not Cancelado por Ausencia, that no published Recorrido serves yet. */
+export function UnpublishedTransfers({ day }: { day: Pick<Day, "transfers" | "unpublishedTransferIds"> }) {
+  const unpublished = day.transfers.filter((transfer) => day.unpublishedTransferIds.includes(transfer.id));
+  return <section>
+    <h2>Without a published Recorrido</h2>
+    {unpublished.length
+      ? <ul>{unpublished.map((transfer) => <li key={transfer.id}>{transferLabel(transfer)}</li>)}</ul>
+      : <p>Every Traslado has a published Recorrido.</p>}
+  </section>;
+}
+
 export function PlanPage() {
   const [date, setDate] = useState(todayInPlanZone);
   // The loaded view remembers its date, so a day is shown and mutable only while that date is selected.
@@ -99,6 +178,10 @@ export function PlanPage() {
   const [message, setMessage] = useState("");
   // The last "Order" answer per Recorrido, so what the engine could not place stays on screen.
   const [orders, setOrders] = useState<Record<number, OrderResult>>({});
+  const [refusal, setRefusal] = useState<Refusal | null>(null);
+  const [cascade, setCascade] = useState<CascadeWarning[]>([]);
+  const [summary, setSummary] = useState<DaySummary | null>(null);
+  const [publishing, setPublishing] = useState(false);
   const selectedDate = useRef(date);
   selectedDate.current = date;
   const latestLoad = useRef(0);
@@ -138,7 +221,13 @@ export function PlanPage() {
     }
   }
 
-  useEffect(() => { void load(date); }, [date]);
+  useEffect(() => {
+    // Publication results belong to the day they were made for.
+    setRefusal(null);
+    setCascade([]);
+    setSummary(null);
+    void load(date);
+  }, [date]);
 
   async function write(path: string, method: string, body: unknown, done: string) {
     try {
@@ -150,6 +239,62 @@ export function PlanPage() {
     } catch {
       setMessage("Unable to reach the server");
       return false;
+    }
+  }
+
+  // A refusal with violations stays under its Recorrido so the planner can fix it or force it with a reason.
+  // Each publication is a new version, so the buttons stay disabled while one is pending; an answer for another day is dropped.
+  async function publishRoute(routeId: number, overrideReason?: string) {
+    const forDate = selectedDate.current;
+    setPublishing(true);
+    try {
+      const response = await send(`/routes/${routeId}/publish`, "POST", overrideReason === undefined ? {} : { overrideReason });
+      if (await redirectUnauthorized(response)) return false;
+      const result = await response.json().catch(() => null) as
+        { version?: { version: number }; cascade?: CascadeWarning[]; error?: string; violations?: PassengerViolations[] } | null;
+      if (forDate !== selectedDate.current) return false;
+      setSummary(null);
+      if (response.ok && result?.version) {
+        setRefusal(null);
+        setCascade(result.cascade ?? []);
+        setMessage(`Published as version ${result.version.version}`);
+        await load(forDate);
+        return true;
+      }
+      setCascade([]);
+      const error = result?.error ?? "Unable to publish the Recorrido";
+      setRefusal(result?.violations ? { routeId, error, violations: result.violations } : null);
+      setMessage(error);
+    } catch {
+      setMessage("Unable to reach the server");
+    } finally {
+      setPublishing(false);
+    }
+    return false;
+  }
+
+  async function publishDay() {
+    const forDate = selectedDate.current;
+    setPublishing(true);
+    try {
+      const response = await send(`/daily-plans/${forDate}/publish`, "POST");
+      if (await redirectUnauthorized(response)) return;
+      const result = response.ok ? await response.json() as DaySummary : null;
+      const error = result ? "" : await readError(response, "Unable to publish the plan");
+      if (forDate !== selectedDate.current) return;
+      if (!result) {
+        setMessage(error);
+        return;
+      }
+      setRefusal(null);
+      setCascade([]);
+      setSummary(result);
+      setMessage("Plan diario published");
+      await load(forDate);
+    } catch {
+      setMessage("Unable to reach the server");
+    } finally {
+      setPublishing(false);
     }
   }
 
@@ -213,6 +358,7 @@ export function PlanPage() {
       endKind: values.get("endKind") || null,
     }, "Start and end saved");
   });
+  const forceRoute = (routeId: number) => submit((values) => publishRoute(routeId, String(values.get("overrideReason") ?? "")));
 
   function chooseDriver(value: string) {
     const usual = drivers.find((item) => String(item.id) === value)?.usualVehicleId;
@@ -236,9 +382,11 @@ export function PlanPage() {
     <OfficeNav />
     <label>Day<input type="date" name="date" value={date} required onChange={(e) => { if (e.target.value) setDate(e.target.value); }} /></label>
     {message && <p role="status">{message}</p>}
+    <CascadeWarnings cascade={cascade} routes={view?.day?.routes ?? []} />
     {missing && <button type="button" onClick={() => void write("/daily-plans", "POST", { date }, "Plan diario created")}>Create plan</button>}
     {day && <>
       <p>Times are local to {day.plan.timeZone}. Day total: {kmLabel(day.km)}</p>
+      <UnpublishedTransfers day={day} />
       <h2>Traslados</h2>
       <ul>{day.transfers.map((transfer) => <li key={transfer.id}>
         <strong>{transferLabel(transfer)}</strong>
@@ -317,7 +465,7 @@ export function PlanPage() {
       <h2>Recorridos</h2>
       <ul>{routes.map((route) => <li key={route.id}>
         <strong>{`${route.driverName} ${route.startTime}-${route.endTime}`}</strong>
-        <div>{route.status === "borrador" ? "Draft" : route.status} - {kmLabel(route.km)}</div>
+        <div>{route.status === "borrador" ? "Draft" : route.status}{route.version === null ? "" : ` - version ${route.version}`} - {kmLabel(route.km)}</div>
         {route.frontSeat && <p>Carries a Pasajero who needs the front seat: check it when changing the Chofer or the Vehicle.</p>}
         <label>
           Vehicle
@@ -369,7 +517,18 @@ export function PlanPage() {
             <button type="button" disabled={index === route.stops.length - 1} onClick={() => moveStop(route, index, 1)}>Down</button>
           </div>
         </li>)}</ol>
+        <button type="button" disabled={publishing} onClick={() => void publishRoute(route.id)}>Publish</button>
+        {refusal?.routeId === route.id && <div>
+          <p>{refusal.error}</p>
+          <ViolationList violations={refusal.violations} />
+          {canForce(refusal.violations) && <form onSubmit={forceRoute(route.id)}>
+            <label>Reason to publish anyway<input name="overrideReason" required maxLength={1000} /></label>
+            <button type="submit" disabled={publishing}>Publish anyway</button>
+          </form>}
+        </div>}
       </li>)}</ul>
+      <button type="button" disabled={publishing} onClick={() => void publishDay()}>Publish the whole plan</button>
+      {summary && <DaySummaryView summary={summary} routes={routes} />}
 
       <form onSubmit={addRoute}>
         <h2>New Recorrido</h2>

@@ -262,6 +262,55 @@ export const stops = pgTable("stops", {
   check("stops_leg_distance_check", sql`${table.legDistanceMeters} >= 0`),
 ]);
 
+// A Versión del plan is a published state of one Recorrido; it and its rows are append-only (the app role has no UPDATE or DELETE).
+// start_time/end_time and vehicle/driver are the Recorrido as it was published; violations are the limits a forced version broke.
+export const planVersions = pgTable("plan_versions", {
+  id: integer().generatedAlwaysAsIdentity().primaryKey(),
+  routeId: integer("route_id").notNull().references(() => routes.id, { onDelete: "restrict" }),
+  version: integer().notNull(),
+  vehicleId: integer("vehicle_id").notNull().references(() => vehicles.id, { onDelete: "restrict" }),
+  driverId: integer("driver_id").notNull().references(() => drivers.id, { onDelete: "restrict" }),
+  startTime: time("start_time").notNull(),
+  endTime: time("end_time").notNull(),
+  publishedAt: timestamp("published_at", { withTimezone: true, mode: "string" }).defaultNow().notNull(),
+  publishedBy: integer("published_by").notNull().references(() => users.id, { onDelete: "restrict" }),
+  overrideReason: text("override_reason"),
+  violations: jsonb().default([]).notNull(),
+  // Hash of everything the publication read about the Recorrido: equal on the next one means nothing changed since.
+  inputSignature: text("input_signature").notNull(),
+}, (table) => [
+  uniqueIndex("plan_versions_route_version_unique").on(table.routeId, table.version),
+  check("plan_versions_version_positive", sql`${table.version} > 0`),
+  check("plan_versions_override_reason_check", sql`${table.overrideReason} IS NULL OR btrim(${table.overrideReason}) <> ''`),
+]);
+
+// One row per Parada of the version, in order; the leg ends at that Parada (the first leg is 0: the Recorrido starts there).
+export const planVersionLegs = pgTable("plan_version_legs", {
+  planVersionId: integer("plan_version_id").notNull().references(() => planVersions.id, { onDelete: "restrict" }),
+  position: integer().notNull(),
+  transferId: integer("transfer_id").notNull().references(() => transfers.id, { onDelete: "restrict" }),
+  kind: text().notNull(),
+  distanceMeters: integer("distance_meters").notNull(),
+  durationSeconds: integer("duration_seconds").notNull(),
+  plannedTime: time("planned_time").notNull(),
+}, (table) => [
+  primaryKey({ columns: [table.planVersionId, table.position] }),
+  check("plan_version_legs_kind_check", sql`${table.kind} IN ('pickup', 'dropoff')`),
+  check("plan_version_legs_distance_check", sql`${table.distanceMeters} >= 0`),
+  check("plan_version_legs_duration_check", sql`${table.durationSeconds} >= 0`),
+]);
+
+// The Traslados a version serves, with their Acompañantes and Distancia directa (the km per Traslado) at publication.
+export const planVersionTransfers = pgTable("plan_version_transfers", {
+  planVersionId: integer("plan_version_id").notNull().references(() => planVersions.id, { onDelete: "restrict" }),
+  transferId: integer("transfer_id").notNull().references(() => transfers.id, { onDelete: "restrict" }),
+  companions: integer().notNull(),
+  directDistanceMeters: integer("direct_distance_meters").notNull(),
+}, (table) => [
+  primaryKey({ columns: [table.planVersionId, table.transferId] }),
+  check("plan_version_transfers_direct_distance_check", sql`${table.directDistanceMeters} >= 0`),
+]);
+
 export const absences = pgTable("absences", {
   id: integer().generatedAlwaysAsIdentity().primaryKey(),
   transferId: integer("transfer_id").notNull().references(() => transfers.id, { onDelete: "restrict" }),
