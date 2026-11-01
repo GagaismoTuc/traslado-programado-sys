@@ -66,8 +66,14 @@ async function destination(office: string, name: string) {
   return (await created(request("/destinations", "POST", body, office))).destination.id as number;
 }
 
+// Each Pasajero gets a Consentimiento, which a Traslado needs before it can be assigned to a Recorrido.
 async function passenger(office: string, overrides: Record<string, unknown> = {}) {
-  return (await created(request("/passengers", "POST", { ...validPassenger, ...overrides }, office))).passenger.id as number;
+  const id = (await created(request("/passengers", "POST", { ...validPassenger, ...overrides }, office))).passenger.id as number;
+  const signer = (await created(request(`/passengers/${id}/authorized-adults`, "POST", {
+    name: "Madre Sintética", dni: "-1000001", relation: "madre", phone: "381-000-0001", legalGuardian: true,
+  }, office))).adult.id as number;
+  await created(request(`/passengers/${id}/consent`, "POST", { signedByAdultId: signer, signedAt: "2026-10-01", otherAdultAllowed: false }, office));
+  return id;
 }
 
 async function vehicle(office: string, plate: string) {

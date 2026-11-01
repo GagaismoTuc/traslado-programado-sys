@@ -1,5 +1,7 @@
 import { sql } from "drizzle-orm";
-import { boolean, check, date, doublePrecision, integer, jsonb, pgTable, primaryKey, text, time, timestamp, uniqueIndex } from "drizzle-orm/pg-core";
+import {
+  boolean, check, date, doublePrecision, foreignKey, integer, jsonb, pgTable, primaryKey, text, time, timestamp, unique, uniqueIndex,
+} from "drizzle-orm/pg-core";
 
 export const foundationPermissionProbe = pgTable("foundation_permission_probe", {
   id: integer().generatedAlwaysAsIdentity().primaryKey(),
@@ -143,6 +145,35 @@ export const passengerRequiredFeatures = pgTable("passenger_required_features", 
   featureId: integer("feature_id").notNull().references(() => vehicleFeatures.id, { onDelete: "restrict" }),
 }, (table) => [
   primaryKey({ columns: [table.passengerId, table.featureId] }),
+]);
+
+// A Responsable legal is the Adulto autorizado who signed the Consentimiento; only they can give an Autorización puntual.
+export const authorizedAdults = pgTable("authorized_adults", {
+  id: integer().generatedAlwaysAsIdentity().primaryKey(),
+  passengerId: integer("passenger_id").notNull().references(() => passengers.id, { onDelete: "restrict" }),
+  name: text().notNull(),
+  dni: text().notNull(),
+  relation: text().notNull(),
+  phone: text().notNull(),
+  legalGuardian: boolean("legal_guardian").notNull(),
+  createdAt: timestamp("created_at", { withTimezone: true, mode: "string" }).defaultNow().notNull(),
+}, (table) => [
+  unique("authorized_adults_id_passenger_unique").on(table.id, table.passengerId),
+]);
+
+// One Consentimiento per Pasajero, signed by one of that Pasajero's Adultos autorizados (the composite key keeps it the same Pasajero).
+export const consents = pgTable("consents", {
+  passengerId: integer("passenger_id").primaryKey().references(() => passengers.id, { onDelete: "restrict" }),
+  signedByAdultId: integer("signed_by_adult_id").notNull(),
+  signedAt: date("signed_at", { mode: "string" }).notNull(),
+  otherAdultAllowed: boolean("other_adult_allowed").notNull(),
+  recordedAt: timestamp("recorded_at", { withTimezone: true, mode: "string" }).defaultNow().notNull(),
+}, (table) => [
+  foreignKey({
+    name: "consents_signed_by_adult_fk",
+    columns: [table.signedByAdultId, table.passengerId],
+    foreignColumns: [authorizedAdults.id, authorizedAdults.passengerId],
+  }).onDelete("restrict"),
 ]);
 
 // Times of a Plan diario are local wall-clock times (`time`, no offset) in the plan's zone, which v1 fixes to Tucumán.
