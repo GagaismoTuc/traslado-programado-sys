@@ -348,6 +348,86 @@ async function getDriverById(client: Queryable, driverId: number) {
 
 }
 
+// Documents every new Vehículo or Chofer starts with, without a date; the Oficina may rename or remove them.
+const VEHICLE_DOCUMENT_NAMES = ["VTV", "Service"];
+const DRIVER_DOCUMENT_NAMES = ["Carnet de manejo", "Certificado de sanidad", "Certificado de buena conducta"];
+// The Vencimientos panel lists a document from this many days before its date.
+const EXPIRY_ALERT_DAYS = 30;
+const LOCAL_TIME_ZONE = "America/Argentina/Tucuman";
+
+type DocumentOwner = { kind: "vehicle" | "driver"; id: number };
+
+/** Today's date in Tucumán, "YYYY-MM-DD": a document is valid through its date and expired from the next local day. */
+function localDate(at: Date) {
+  return new Intl.DateTimeFormat("en-CA", { timeZone: LOCAL_TIME_ZONE }).format(at);
+}
+
+// Only the name and the date are kept: any other field (a file, a scan, a photo) is refused.
+function parseDocument(body: unknown): { name: string; expiresOn: string | null } | { error: string } {
+  if (!isObject(body)) return { error: "Invalid request" };
+  if (Object.keys(body).some((key) => key !== "name" && key !== "expiresOn")) {
+    return { error: "Only a document's name and expiry date are stored" };
+  }
+  const name = boundedText(body.name, 200);
+  if (!name) return { error: "Invalid name: write the document's name" };
+  const raw = body.expiresOn ?? null;
+  const expiresOn = raw === null ? null : parsePlanDate(raw);
+  if (raw !== null && !expiresOn) return { error: "Invalid expiry date (expiresOn): use YYYY-MM-DD" };
+  return { name, expiresOn };
+}
+
+const DOCUMENT_SELECT_SQL = `
+  SELECT d.id, d.vehicle_id AS "vehicleId", d.driver_id AS "driverId", d.name, to_char(d.expires_on, 'YYYY-MM-DD') AS "expiresOn"
+    FROM documents d`;
+
+function formatDocument(row: Record<string, unknown>) {
+  return {
+    id: Number(row.id),
+    vehicleId: nullableNumber(row.vehicleId),
+    driverId: nullableNumber(row.driverId),
+    name: String(row.name),
+    expiresOn: (row.expiresOn as string | null) ?? null,
+  };
+}
+
+async function seedDocuments(client: Queryable, actorId: number, owner: DocumentOwner) {
+  const names = owner.kind === "vehicle" ? VEHICLE_DOCUMENT_NAMES : DRIVER_DOCUMENT_NAMES;
+  const inserted = await client.query(
+    `INSERT INTO documents (vehicle_id, driver_id, name) SELECT $1, $2, n.name FROM unnest($3::text[]) WITH ORDINALITY AS n(name, i)
+     ORDER BY n.i RETURNING id, vehicle_id AS "vehicleId", driver_id AS "driverId", name, NULL AS "expiresOn"`,
+    [owner.kind === "vehicle" ? owner.id : null, owner.kind === "driver" ? owner.id : null, names],
+  ) as QueryResult;
+  for (const row of inserted.rows) {
+    const { id, ...after } = formatDocument(row);
+    await appendChange(client, actorId, "document", String(id), "created", null, after);
+  }
+}
+
+/** The expired documents of each Recorrido's Vehículo and Chofer on the Recorrido's day: a warning, never a refusal. */
+async function expiredDocumentWarnings(client: Queryable, routeIds: number[]) {
+  const result = await client.query(
+    `SELECT r.id AS "routeId", d.name, to_char(d.expires_on, 'YYYY-MM-DD') AS "expiresOn",
+            CASE WHEN d.vehicle_id IS NULL THEN 'driver' ELSE 'vehicle' END AS owner, COALESCE(v.plate, dr.name) AS "ownerLabel"
+       FROM routes r JOIN daily_plans p ON p.id = r.daily_plan_id
+       JOIN documents d ON d.vehicle_id = r.vehicle_id OR d.driver_id = r.driver_id
+       LEFT JOIN vehicles v ON v.id = d.vehicle_id LEFT JOIN drivers dr ON dr.id = d.driver_id
+      WHERE r.id = ANY($1::int[]) AND d.expires_on < p.plan_date
+      ORDER BY r.id, d.vehicle_id IS NULL, d.expires_on, d.id`,
+    [routeIds],
+  ) as QueryResult;
+  return result.rows.map((row) => {
+    const owner = row.owner === "vehicle" ? "vehicle" as const : "driver" as const;
+    return {
+      routeId: Number(row.routeId),
+      owner,
+      ownerLabel: String(row.ownerLabel),
+      document: String(row.name),
+      expiresOn: String(row.expiresOn),
+      message: `${owner === "vehicle" ? "Vehículo" : "Chofer"} ${row.ownerLabel}: ${row.name} expired on ${row.expiresOn}`,
+    };
+  });
+}
+
 const MEDICAL_ALERT_MAX_LENGTH = 140;
 
 function parseFeatureIds(value: unknown) {
@@ -1201,6 +1281,44 @@ export function createApp({ db, routing, router, geocoder, config }: {
     return existing.rows.length ? context.body(null, 204) : context.json({ error: "Passenger not found" }, 404);
   }
 
+  async function listDocuments(context: Context, kind: DocumentOwner["kind"]) {
+    const actor = await requireOffice(context);
+    if (actor instanceof Response) return actor;
+    const id = parseId(context.req.param("id") ?? "");
+    if (!id) return context.json({ error: "Invalid request" }, 400);
+    const owner = await db.query(`SELECT id FROM ${kind === "vehicle" ? "vehicles" : "drivers"} WHERE id = $1`, [id]) as QueryResult;
+    if (!owner.rows[0]) return context.json({ error: kind === "vehicle" ? "Vehicle not found" : "Driver not found" }, 404);
+    const result = await db.query(`${DOCUMENT_SELECT_SQL} WHERE d.${kind}_id = $1 ORDER BY d.id`, [id]) as QueryResult;
+    return context.json({ documents: result.rows.map(formatDocument) });
+  }
+
+  async function addDocument(context: Context, kind: DocumentOwner["kind"]) {
+    const actor = await requireOffice(context);
+    if (actor instanceof Response) return actor;
+    const id = parseId(context.req.param("id") ?? "");
+    const fields = parseDocument(await context.req.json().catch(() => null));
+    if (!id) return context.json({ error: "Invalid request" }, 400);
+    if ("error" in fields) return context.json({ error: fields.error }, 400);
+    try {
+      const document = await inTransaction(db, async (client) => {
+        const owner = await client.query(`SELECT id FROM ${kind === "vehicle" ? "vehicles" : "drivers"} WHERE id = $1 FOR SHARE`, [id]) as QueryResult;
+        if (!owner.rows[0]) throw new PlanningError(404, kind === "vehicle" ? "Vehicle not found" : "Driver not found");
+        const inserted = await client.query(
+          `INSERT INTO documents (${kind}_id, name, expires_on) VALUES ($1, $2, $3)
+           RETURNING id, vehicle_id AS "vehicleId", driver_id AS "driverId", name, to_char(expires_on, 'YYYY-MM-DD') AS "expiresOn"`,
+          [id, fields.name, fields.expiresOn],
+        ) as QueryResult;
+        const { id: documentId, ...after } = formatDocument(inserted.rows[0]);
+        await appendChange(client, actor.id, "document", String(documentId), "created", null, after);
+        return { id: documentId, ...after };
+      });
+      return context.json({ document }, 201);
+    } catch (error) {
+      if (isPostgresUniqueViolation(error)) return context.json({ error: "A document with this name already exists" }, 409);
+      return planningFailure(context, error);
+    }
+  }
+
   async function listSessions(userId: number) {
     const result = await db.query(
       `SELECT ${SESSION_COLUMNS} FROM sessions s JOIN users u ON u.id = s.user_id
@@ -1834,6 +1952,7 @@ export function createApp({ db, routing, router, geocoder, config }: {
             front: loaded.front,
             featureIds: loaded.featureIds,
           });
+          await seedDocuments(client, actor.id, { kind: "vehicle", id });
           return loaded;
         });
         return context.json({ vehicle: created }, 201);
@@ -1963,6 +2082,7 @@ export function createApp({ db, routing, router, geocoder, config }: {
           const id = Number(inserted.rows[0].id);
           const loaded = (await getDriverById(client, id))!;
           await appendChange(client, actor.id, "driver", String(id), "created", null, { userId, ...fields });
+          await seedDocuments(client, actor.id, { kind: "driver", id });
           return loaded;
         });
         return context.json({ driver: created }, 201);
@@ -2013,6 +2133,83 @@ export function createApp({ db, routing, router, geocoder, config }: {
         if (error instanceof InvalidReferenceError) return context.json({ error: "Invalid request" }, 400);
         throw error;
       }
+    })
+    .get("/vehicles/:id/documents", (context) => listDocuments(context, "vehicle"))
+    .post("/vehicles/:id/documents", (context) => addDocument(context, "vehicle"))
+    .get("/drivers/:id/documents", (context) => listDocuments(context, "driver"))
+    .post("/drivers/:id/documents", (context) => addDocument(context, "driver"))
+    // Replaces the document's name and date; the same values again change nothing and add no log entry.
+    .patch("/documents/:id", async (context) => {
+      const actor = await requireOffice(context);
+      if (actor instanceof Response) return actor;
+      const id = parseId(context.req.param("id"));
+      const fields = parseDocument(await context.req.json().catch(() => null));
+      if (!id) return context.json({ error: "Invalid request" }, 400);
+      if ("error" in fields) return context.json({ error: fields.error }, 400);
+      try {
+        const document = await inTransaction(db, async (client) => {
+          const locked = await client.query(`${DOCUMENT_SELECT_SQL} WHERE d.id = $1 FOR UPDATE`, [id]) as QueryResult;
+          if (!locked.rows[0]) throw new PlanningError(404, "Document not found");
+          const { id: _, ...before } = formatDocument(locked.rows[0]);
+          const after = { ...before, ...fields };
+          if (before.name !== after.name || before.expiresOn !== after.expiresOn) {
+            await client.query("UPDATE documents SET name = $1, expires_on = $2 WHERE id = $3", [fields.name, fields.expiresOn, id]);
+            await appendChange(client, actor.id, "document", String(id), "updated", before, after);
+          }
+          return { id, ...after };
+        });
+        return context.json({ document });
+      } catch (error) {
+        if (isPostgresUniqueViolation(error)) return context.json({ error: "A document with this name already exists" }, 409);
+        return planningFailure(context, error);
+      }
+    })
+    .delete("/documents/:id", async (context) => {
+      const actor = await requireOffice(context);
+      if (actor instanceof Response) return actor;
+      const id = parseId(context.req.param("id"));
+      if (!id) return context.json({ error: "Invalid request" }, 400);
+      try {
+        await inTransaction(db, async (client) => {
+          const locked = await client.query(`${DOCUMENT_SELECT_SQL} WHERE d.id = $1 FOR UPDATE`, [id]) as QueryResult;
+          if (!locked.rows[0]) throw new PlanningError(404, "Document not found");
+          await client.query("DELETE FROM documents WHERE id = $1", [id]);
+          const { id: _, ...before } = formatDocument(locked.rows[0]);
+          await appendChange(client, actor.id, "document", String(id), "removed", before, null);
+        });
+        return context.body(null, 204);
+      } catch (error) {
+        return planningFailure(context, error);
+      }
+    })
+    // The Vencimientos panel: documents expired or expiring within EXPIRY_ALERT_DAYS of today in Tucumán, by date, and
+    // apart the documents with no date, which are neither expired nor counted.
+    .get("/expiries", async (context) => {
+      const actor = await requireOffice(context);
+      if (actor instanceof Response) return actor;
+      const today = localDate(now());
+      const result = await db.query(
+        `SELECT d.id, d.name, to_char(d.expires_on, 'YYYY-MM-DD') AS "expiresOn", d.expires_on - $1::date AS "daysLeft",
+                d.vehicle_id AS "vehicleId", d.driver_id AS "driverId", COALESCE(v.plate, dr.name) AS "ownerLabel"
+           FROM documents d LEFT JOIN vehicles v ON v.id = d.vehicle_id LEFT JOIN drivers dr ON dr.id = d.driver_id
+          WHERE d.expires_on IS NULL OR d.expires_on <= $1::date + $2::int
+          ORDER BY d.expires_on NULLS LAST, "ownerLabel", d.id`,
+        [today, EXPIRY_ALERT_DAYS],
+      ) as QueryResult;
+      const items = result.rows.map((row) => ({
+        id: Number(row.id),
+        name: String(row.name),
+        expiresOn: (row.expiresOn as string | null) ?? null,
+        daysLeft: nullableNumber(row.daysLeft),
+        owner: row.vehicleId === null
+          ? { kind: "driver" as const, id: Number(row.driverId), label: String(row.ownerLabel) }
+          : { kind: "vehicle" as const, id: Number(row.vehicleId), label: String(row.ownerLabel) },
+      }));
+      return context.json({
+        today,
+        documents: items.filter((item) => item.expiresOn !== null),
+        undated: items.filter((item) => item.expiresOn === null),
+      });
     })
     .get("/passengers", async (context) => {
       const actor = await requireOffice(context);
@@ -2380,7 +2577,7 @@ export function createApp({ db, routing, router, geocoder, config }: {
           const id = await insertRoute(client, actor.id, planId, { driverId, vehicleId, startTime, endTime });
           return await getRouteById(client, id);
         });
-        return context.json({ route }, 201);
+        return context.json({ route, warnings: await expiredDocumentWarnings(db, [route.id]) }, 201);
       } catch (error) {
         return planningFailure(context, error);
       }
@@ -2403,7 +2600,7 @@ export function createApp({ db, routing, router, geocoder, config }: {
           }
           return await getRouteById(client, id);
         });
-        return context.json({ route });
+        return context.json({ route, warnings: await expiredDocumentWarnings(db, [id]) });
       } catch (error) {
         return planningFailure(context, error);
       }
@@ -2509,7 +2706,7 @@ export function createApp({ db, routing, router, geocoder, config }: {
           }
           return routes;
         });
-        return context.json({ routes: created }, 201);
+        return context.json({ routes: created, warnings: await expiredDocumentWarnings(db, created.map((route) => route.id)) }, 201);
       } catch (error) {
         return planningFailure(context, error);
       }
@@ -2527,7 +2724,7 @@ export function createApp({ db, routing, router, geocoder, config }: {
       }
       try {
         const result = await publishRoute(actor.id, id, reason?.trim() || null);
-        return context.json({ version: result.version, cascade: result.cascade }, 201);
+        return context.json({ version: result.version, cascade: result.cascade, warnings: await expiredDocumentWarnings(db, [id]) }, 201);
       } catch (error) {
         return planningFailure(context, error);
       }
@@ -2568,7 +2765,8 @@ export function createApp({ db, routing, router, geocoder, config }: {
             summary.failed.push({ routeId, error: error.message, ...error.extra });
           }
         }
-        return context.json(summary);
+        const published = [...summary.published.map((item) => item.routeId), ...summary.unchanged];
+        return context.json({ ...summary, warnings: await expiredDocumentWarnings(db, published) });
       } catch (error) {
         return planningFailure(context, error);
       }

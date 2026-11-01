@@ -55,6 +55,13 @@ const authorizationEvidence = new Map([
   ["POST /routes/:id/publish", "lets only the Oficina publish and read Versiones del plan"],
   ["GET /routes/:id/versions", "lets only the Oficina publish and read Versiones del plan"],
   ["POST /daily-plans/:date/publish", "lets only the Oficina publish and read Versiones del plan"],
+  ["GET /vehicles/:id/documents", "does not let a Chofer read or write Vencimientos"],
+  ["POST /vehicles/:id/documents", "does not let a Chofer read or write Vencimientos"],
+  ["GET /drivers/:id/documents", "does not let a Chofer read or write Vencimientos"],
+  ["POST /drivers/:id/documents", "does not let a Chofer read or write Vencimientos"],
+  ["PATCH /documents/:id", "does not let a Chofer read or write Vencimientos"],
+  ["DELETE /documents/:id", "does not let a Chofer read or write Vencimientos"],
+  ["GET /expiries", "does not let a Chofer read or write Vencimientos"],
 ]);
 
 describe("API route authorization coverage", () => {
