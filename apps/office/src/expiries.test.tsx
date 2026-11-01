@@ -62,6 +62,11 @@ describe("Vencimientos in the office app", () => {
     expect(renderToStaticMarkup(<DocumentWarnings routes={routes} warnings={[]} />)).toBe("");
   });
 
+  it("says when the expired documents could not be checked after a saved change", () => {
+    expect(renderToStaticMarkup(<DocumentWarnings routes={[]} warnings={[]} unavailable />))
+      .toBe("<p role=\"alert\">Saved, but expired documents could not be checked. Reload the plan to check them.</p>");
+  });
+
   it("shows a Vehículo's plate, model, seats, Adaptaciones and documents in its detail view", () => {
     const markup = renderToStaticMarkup(<VehicleDetailPage
       id={1}

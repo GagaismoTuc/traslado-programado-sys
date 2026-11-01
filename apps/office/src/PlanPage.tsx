@@ -41,6 +41,7 @@ export type PassengerViolations = {
 export type CascadeWarning = { routeId: number; version: number; fromRouteId: number; ok: boolean; problem: string | null };
 /** An expired document of a Recorrido's Vehículo or Chofer, reported when assigning or publishing; it never blocks. */
 export type DocumentWarning = { routeId: number; message: string };
+type WarningsResult = { warnings?: DocumentWarning[]; warningsUnavailable?: boolean };
 export type DaySummary = {
   published: { routeId: number; version: number }[];
   unchanged: number[];
@@ -124,7 +125,9 @@ export function CascadeWarnings({ cascade, routes }: { cascade: CascadeWarning[]
   </li>)}</ul>;
 }
 
-export function DocumentWarnings({ warnings, routes }: { warnings: DocumentWarning[]; routes: RouteNames }) {
+/** The expired documents of the saved Recorridos; unavailable when the API saved the change but could not read them. */
+export function DocumentWarnings({ warnings, routes, unavailable = false }: { warnings: DocumentWarning[]; routes: RouteNames; unavailable?: boolean }) {
+  if (unavailable) return <p role="alert">Saved, but expired documents could not be checked. Reload the plan to check them.</p>;
   if (!warnings.length) return null;
   return <ul role="alert">{warnings.map((warning, index) => <li key={index}>
     {`${routeName(routes, warning.routeId)}: ${warning.message}. It was not blocked.`}
@@ -187,6 +190,7 @@ export function PlanPage() {
   const [refusal, setRefusal] = useState<Refusal | null>(null);
   const [cascade, setCascade] = useState<CascadeWarning[]>([]);
   const [warnings, setWarnings] = useState<DocumentWarning[]>([]);
+  const [warningsUnavailable, setWarningsUnavailable] = useState(false);
   const [summary, setSummary] = useState<DaySummary | null>(null);
   const [publishing, setPublishing] = useState(false);
   const selectedDate = useRef(date);
@@ -237,6 +241,7 @@ export function PlanPage() {
     setRefusal(null);
     setCascade([]);
     setWarnings([]);
+    setWarningsUnavailable(false);
     setSummary(null);
     void load(date);
   }, [date]);
@@ -246,8 +251,9 @@ export function PlanPage() {
       const response = await send(path, method, body);
       if (await redirectUnauthorized(response)) return false;
       // Assigning a Vehículo or Chofer answers with the expired documents of the Recorrido, if any.
-      const result = response.ok ? await response.clone().json().catch(() => null) as { warnings?: DocumentWarning[] } | null : null;
+      const result = response.ok ? await response.clone().json().catch(() => null) as WarningsResult | null : null;
       setWarnings(result?.warnings ?? []);
+      setWarningsUnavailable(result?.warningsUnavailable === true);
       setMessage(response.ok ? done : await readError(response, "Unable to save the plan"));
       if (response.ok) await load(selectedDate.current);
       return response.ok;
@@ -266,19 +272,21 @@ export function PlanPage() {
       const response = await send(`/routes/${routeId}/publish`, "POST", overrideReason === undefined ? {} : { overrideReason });
       if (await redirectUnauthorized(response)) return false;
       const result = await response.json().catch(() => null) as
-        { version?: { version: number }; cascade?: CascadeWarning[]; warnings?: DocumentWarning[]; error?: string; violations?: PassengerViolations[] } | null;
+        WarningsResult & { version?: { version: number }; cascade?: CascadeWarning[]; error?: string; violations?: PassengerViolations[] } | null;
       if (forDate !== selectedDate.current) return false;
       setSummary(null);
       if (response.ok && result?.version) {
         setRefusal(null);
         setCascade(result.cascade ?? []);
         setWarnings(result.warnings ?? []);
+        setWarningsUnavailable(result.warningsUnavailable === true);
         setMessage(`Published as version ${result.version.version}`);
         await load(forDate);
         return true;
       }
       setCascade([]);
       setWarnings([]);
+      setWarningsUnavailable(false);
       const error = result?.error ?? "Unable to publish the Recorrido";
       setRefusal(result?.violations ? { routeId, error, violations: result.violations } : null);
       setMessage(error);
@@ -296,7 +304,7 @@ export function PlanPage() {
     try {
       const response = await send(`/daily-plans/${forDate}/publish`, "POST");
       if (await redirectUnauthorized(response)) return;
-      const result = response.ok ? await response.json() as DaySummary & { warnings?: DocumentWarning[] } : null;
+      const result = response.ok ? await response.json() as DaySummary & WarningsResult : null;
       const error = result ? "" : await readError(response, "Unable to publish the plan");
       if (forDate !== selectedDate.current) return;
       if (!result) {
@@ -306,6 +314,7 @@ export function PlanPage() {
       setRefusal(null);
       setCascade([]);
       setWarnings(result.warnings ?? []);
+      setWarningsUnavailable(result.warningsUnavailable === true);
       setSummary(result);
       setMessage("Plan diario published");
       await load(forDate);
@@ -370,7 +379,7 @@ export function PlanPage() {
     <label>Day<input type="date" name="date" value={date} required onChange={(e) => { if (e.target.value) setDate(e.target.value); }} /></label>
     {message && <p role="status">{message}</p>}
     <CascadeWarnings cascade={cascade} routes={view?.day?.routes ?? []} />
-    <DocumentWarnings warnings={warnings} routes={view?.day?.routes ?? []} />
+    <DocumentWarnings warnings={warnings} unavailable={warningsUnavailable} routes={view?.day?.routes ?? []} />
     {missing && <button type="button" onClick={() => void write("/daily-plans", "POST", { date }, "Plan diario created")}>Create plan</button>}
     {day && <>
       <p>Times are local to {day.plan.timeZone}. Day total: {kmLabel(day.km)}</p>

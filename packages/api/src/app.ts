@@ -428,6 +428,15 @@ async function expiredDocumentWarnings(client: Queryable, routeIds: number[]) {
   });
 }
 
+/** The expiry warnings read after the write committed: a failed read degrades to warningsUnavailable, never a failed write. */
+async function warningsAfterCommit(client: Queryable, routeIds: number[]) {
+  try {
+    return { warnings: await expiredDocumentWarnings(client, routeIds) };
+  } catch {
+    return { warnings: [], warningsUnavailable: true };
+  }
+}
+
 const MEDICAL_ALERT_MAX_LENGTH = 140;
 
 function parseFeatureIds(value: unknown) {
@@ -2666,7 +2675,7 @@ export function createApp({ db, routing, router, geocoder, config }: {
           const id = await insertRoute(client, actor.id, planId, { driverId, vehicleId, startTime, endTime });
           return await getRouteById(client, id);
         });
-        return context.json({ route, warnings: await expiredDocumentWarnings(db, [route.id]) }, 201);
+        return context.json({ route, ...await warningsAfterCommit(db, [route.id]) }, 201);
       } catch (error) {
         return planningFailure(context, error);
       }
@@ -2689,7 +2698,7 @@ export function createApp({ db, routing, router, geocoder, config }: {
           }
           return await getRouteById(client, id);
         });
-        return context.json({ route, warnings: await expiredDocumentWarnings(db, [id]) });
+        return context.json({ route, ...await warningsAfterCommit(db, [id]) });
       } catch (error) {
         return planningFailure(context, error);
       }
@@ -2795,7 +2804,7 @@ export function createApp({ db, routing, router, geocoder, config }: {
           }
           return routes;
         });
-        return context.json({ routes: created, warnings: await expiredDocumentWarnings(db, created.map((route) => route.id)) }, 201);
+        return context.json({ routes: created, ...await warningsAfterCommit(db, created.map((route) => route.id)) }, 201);
       } catch (error) {
         return planningFailure(context, error);
       }
@@ -2813,7 +2822,7 @@ export function createApp({ db, routing, router, geocoder, config }: {
       }
       try {
         const result = await publishRoute(actor.id, id, reason?.trim() || null);
-        return context.json({ version: result.version, cascade: await revalidateChained(actor.id, id), warnings: await expiredDocumentWarnings(db, [id]) }, 201);
+        return context.json({ version: result.version, cascade: await revalidateChained(actor.id, id), ...await warningsAfterCommit(db, [id]) }, 201);
       } catch (error) {
         return planningFailure(context, error);
       }
@@ -2856,7 +2865,7 @@ export function createApp({ db, routing, router, geocoder, config }: {
         // Only after every publication, so a chained next Recorrido published later in this call is already there.
         for (const { routeId } of summary.published) summary.cascade.push(...await revalidateChained(actor.id, routeId));
         const published = [...summary.published.map((item) => item.routeId), ...summary.unchanged];
-        return context.json({ ...summary, warnings: await expiredDocumentWarnings(db, published) });
+        return context.json({ ...summary, ...await warningsAfterCommit(db, published) });
       } catch (error) {
         return planningFailure(context, error);
       }

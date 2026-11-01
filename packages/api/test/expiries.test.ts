@@ -177,6 +177,28 @@ describe("Vencimientos of Vehículos and Choferes", () => {
     ]);
   });
 
+  it("keeps assignment success when expiry lookup fails after commit", async () => {
+    const { send, vehicle, driver } = await setup("r2b");
+    const van = await vehicle();
+    const chofer = await driver(van.id);
+    const date = "2026-11-05";
+    await ok(send("/daily-plans", "POST", { date }));
+    const before = await stored("SELECT count(*)::int AS count FROM routes");
+    await migrationPool.query("REVOKE SELECT ON documents FROM traslado_app");
+    let response: Response;
+    try {
+      response = await send("/daily-plans/" + date + "/routes", "POST", {
+        driverId: chofer.id, startTime: "07:00", endTime: "09:00",
+      });
+    } finally {
+      await migrationPool.query("GRANT SELECT ON documents TO traslado_app");
+    }
+    const after = await stored("SELECT count(*)::int AS count FROM routes");
+    expect({ status: response!.status, count: after[0].count })
+      .toEqual({ status: 201, count: before[0].count + 1 });
+    expect(await response!.json()).toMatchObject({ warnings: [], warningsUnavailable: true });
+  });
+
   it("lists a document as valid through its date and expired from the next day in Tucumán local time", async () => {
     const { vehicle, date, expiries } = await setup("r3");
     const vans = [await vehicle(), await vehicle(), await vehicle(), await vehicle()];
