@@ -124,7 +124,8 @@ export function StopActions({ route, stop, marking }: { route: DriverRoute; stop
   const status = stopStatus(stop, local, marking.planFetchedAt);
   // The Marca's own state, unless the Oficina changed the Traslado since it was confirmed.
   const shown = local && (local.state === "pending" || status === local.mark.kind) ? local : null;
-  const open = marking.handover?.transferId === stop.transferId ? marking.handover : null;
+  // The handover belongs to the drop-off, not to the pickup of the same Traslado.
+  const open = stop.kind === "dropoff" && marking.handover?.transferId === stop.transferId ? marking.handover : null;
   const disabled = marking.sending;
   return <>
     {MARKED[status] && <div>{`Marked: ${MARKED[status]}`}</div>}

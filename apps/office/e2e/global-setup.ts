@@ -1,14 +1,18 @@
 import { execFile, spawn } from "node:child_process";
 import { randomBytes } from "node:crypto";
+import { mkdtemp, rm } from "node:fs/promises";
 import { createServer as createNetServer } from "node:net";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { promisify } from "node:util";
 import { PostgreSqlContainer } from "@testcontainers/postgresql";
-import { createServer as createViteServer } from "vite";
+import { build, createServer as createViteServer, preview } from "vite";
 import { startFakeVroom } from "./fake-vroom";
 
 const run = promisify(execFile);
 const officeRoot = fileURLToPath(new URL("..", import.meta.url));
+const driverRoot = fileURLToPath(new URL("../../driver", import.meta.url));
 const apiRoot = fileURLToPath(new URL("../../../packages/api", import.meta.url));
 
 async function freePort() {
@@ -54,7 +58,7 @@ export default async function globalSetup() {
   await apiScript("src/bootstrap.ts", { BOOTSTRAP_DATABASE_URL: rootUrl, MIGRATION_PASSWORD: migrationPassword, APPLICATION_PASSWORD: applicationPassword });
   await apiScript("src/migrate.ts", { MIGRATION_DATABASE_URL: migrationUrl });
 
-  const [apiPort, webPort] = [await freePort(), await freePort()];
+  const [apiPort, webPort, driverPort] = [await freePort(), await freePort(), await freePort()];
   const vroom = await startFakeVroom();
   let apiOutput = "";
   const api = spawn(process.execPath, ["--import", "tsx", "src/server.ts"], {
@@ -81,10 +85,34 @@ export default async function globalSetup() {
   const web = await createViteServer({ root: officeRoot, server: { host: "localhost", port: webPort, strictPort: true } });
   await web.listen();
 
+  // The driver app as a phone runs it: the production build with its service worker, so a tab reloads without signal.
+  const driverOut = await mkdtemp(join(tmpdir(), "driver-e2e-"));
+  // The dev server above set NODE_ENV to development, which would build without the service worker registration.
+  const nodeEnv = process.env.NODE_ENV;
+  process.env.NODE_ENV = "production";
+  try {
+    await build({ root: driverRoot, logLevel: "warn", build: { outDir: driverOut, emptyOutDir: true } });
+  } finally {
+    if (nodeEnv === undefined) delete process.env.NODE_ENV;
+    else process.env.NODE_ENV = nodeEnv;
+  }
+  const driver = await preview({
+    root: driverRoot,
+    logLevel: "warn",
+    build: { outDir: driverOut },
+    preview: {
+      host: "localhost", port: driverPort, strictPort: true,
+      proxy: { "/api": { target: process.env.API_PROXY_TARGET, rewrite: (path) => path.replace(/^\/api/, "") } },
+    },
+  });
+
   process.env.E2E_BASE_URL = baseUrl;
+  process.env.E2E_DRIVER_URL = `http://localhost:${driverPort}`;
   process.env.E2E_DATABASE_URL = migrationUrl;
   return async () => {
     await web.close();
+    await driver.close();
+    await rm(driverOut, { recursive: true, force: true });
     api.kill();
     await vroom.close();
     await container.stop();
