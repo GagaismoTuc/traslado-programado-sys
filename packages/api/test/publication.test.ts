@@ -386,6 +386,47 @@ describe("Publication and Versiones del plan", () => {
     ]);
   });
 
+  it("revalidates a chained Recorrido created by publishing the whole Plan diario", async () => {
+    const { vehicle, driver, passenger, route, transfer, office } = await setup("regla7-batch");
+    const van = await vehicle();
+    const chofer = await driver(van);
+    const first = await route(chofer, "07:00", "08:00");
+    const next = await route(chofer, "08:10", "09:00");
+    await transfer(await passenger(), "07:30", first);
+    await transfer(await passenger({}, H2), "08:10", next);
+
+    const published = await ok(request(`/daily-plans/${DAY}/publish`, "POST", undefined, office), 200);
+    expect(published.published).toEqual([
+      { routeId: first, version: 1 },
+      { routeId: next, version: 1 },
+    ]);
+    expect(published.cascade).toEqual([
+      expect.objectContaining({ routeId: next, fromRouteId: first, ok: true }),
+    ]);
+  });
+
+  it("warns without blocking when the whole Plan diario publishes a chained pair the Chofer cannot reach", async () => {
+    const { vehicle, driver, passenger, route, transfer, office, destination } = await setup("regla7-batch-late");
+    const chofer = await driver(await vehicle());
+    const first = await route(chofer, "07:00", "08:00");
+    const next = await route(chofer, "08:10", "09:00");
+    await transfer(await passenger(), "07:30", first);
+    // A far drop-off at 08:00 makes first end at D2, 13 minutes away from next's pickup at H2 at 08:08.
+    const farSchool = await destination({ lat: -26.8, lng: -65.18 }, "Escuela lejana");
+    await transfer(await passenger(), "08:00", first, { destinationId: farSchool });
+    await transfer(await passenger({}, H2), "08:20", next);
+
+    expect(await ok(request(`/daily-plans/${DAY}/publish`, "POST", undefined, office), 200)).toEqual({
+      published: [{ routeId: first, version: 1 }, { routeId: next, version: 1 }],
+      unchanged: [],
+      failed: [],
+      cascade: [{
+        routeId: next, version: 1, fromRouteId: first, ok: false,
+        problem: "The Chofer reaches the first Parada at 08:11, after its planned 08:08",
+      }],
+    });
+  });
+
   it("stores the Distancia directa home → Destino for an entrada and Destino → home for a salida, each direction on its own", async () => {
     const { vehicle, driver, passenger, route, transfer, publish, school } = await setup("regla8");
     // A one-way street makes the way back 700 m longer.

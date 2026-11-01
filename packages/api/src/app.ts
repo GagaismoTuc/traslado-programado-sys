@@ -1213,7 +1213,7 @@ export function createApp({ db, routing, router, geocoder, config }: {
   /**
    * Publishes the Recorrido as its next Versión del plan. It reads the Recorrido and asks OSRM outside the transaction,
    * then publishes only if nothing it read changed meanwhile. With `onlyIfChanged` (the whole Plan diario), a Recorrido
-   * equal to its latest version keeps that version instead of getting a new one.
+   * equal to its latest version keeps that version instead of getting a new one. The caller revalidates the chain.
    */
   async function publishRoute(actorId: number, routeId: number, reason: string | null, onlyIfChanged = false) {
     const before = await loadPublicationSnapshot(db, routeId);
@@ -1222,7 +1222,7 @@ export function createApp({ db, routing, router, geocoder, config }: {
     const latest = onlyIfChanged ? await latestVersionSignature(db, routeId) : null;
     if (latest?.signature === expected) {
       const [version] = await loadPlanVersions(db, "pv.route_id = $1 AND pv.version = $2", [routeId, latest.version]);
-      return { created: false, version, cascade: [] as CascadeWarning[] };
+      return { created: false, version };
     }
     let legs: RouteLeg[];
     let direct: RouteLeg[];
@@ -1318,8 +1318,7 @@ export function createApp({ db, routing, router, geocoder, config }: {
       return { created: true, version };
     });
     const [version] = await loadPlanVersions(db, "pv.route_id = $1 AND pv.version = $2", [routeId, published.version]);
-    const cascade = published.created ? await revalidateChained(actorId, routeId) : [];
-    return { created: published.created, version, cascade };
+    return { created: published.created, version };
   }
 
   /** A Parada of a published version: its planned minute, where it is and how long its service takes. */
@@ -2527,7 +2526,7 @@ export function createApp({ db, routing, router, geocoder, config }: {
       }
       try {
         const result = await publishRoute(actor.id, id, reason?.trim() || null);
-        return context.json({ version: result.version, cascade: result.cascade }, 201);
+        return context.json({ version: result.version, cascade: await revalidateChained(actor.id, id) }, 201);
       } catch (error) {
         return planningFailure(context, error);
       }
@@ -2562,12 +2561,13 @@ export function createApp({ db, routing, router, geocoder, config }: {
             const result = await publishRoute(actor.id, routeId, null, true);
             if (result.created) summary.published.push({ routeId, version: result.version.version });
             else summary.unchanged.push(routeId);
-            summary.cascade.push(...result.cascade);
           } catch (error) {
             if (!(error instanceof PlanningError)) throw error;
             summary.failed.push({ routeId, error: error.message, ...error.extra });
           }
         }
+        // Only after every publication, so a chained next Recorrido published later in this call is already there.
+        for (const { routeId } of summary.published) summary.cascade.push(...await revalidateChained(actor.id, routeId));
         return context.json(summary);
       } catch (error) {
         return planningFailure(context, error);
