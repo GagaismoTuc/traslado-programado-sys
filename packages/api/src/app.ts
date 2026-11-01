@@ -1061,9 +1061,10 @@ const ORDER_TRANSFERS_SQL = `
    WHERE s.route_id = $1 AND s.kind = 'pickup'
    ORDER BY s.position`;
 
-// Where the last Parada of a Recorrido is and when its service ends (null while it has no planned time).
+// Where the last Parada of a Recorrido is, its Traslado and when its service ends (null while it has no planned time).
 const LAST_STOP_SQL = `
-  SELECT CASE WHEN (s.kind = 'pickup') = (t.direction = 'entrada') THEN COALESCE(o.latitude, p.home_latitude) ELSE d.latitude END AS lat,
+  SELECT s.transfer_id,
+         CASE WHEN (s.kind = 'pickup') = (t.direction = 'entrada') THEN COALESCE(o.latitude, p.home_latitude) ELSE d.latitude END AS lat,
          CASE WHEN (s.kind = 'pickup') = (t.direction = 'entrada') THEN COALESCE(o.longitude, p.home_longitude) ELSE d.longitude END AS lng,
          EXTRACT(EPOCH FROM s.planned_time) / 60
            + CASE s.kind WHEN 'pickup' THEN p.pickup_duration_minutes ELSE p.dropoff_duration_minutes END AS planned_end
@@ -1414,6 +1415,34 @@ async function orderInputKey(client: Queryable, routeId: number) {
   const rows = route ? (await client.query(ORDER_TRANSFERS_SQL, [routeId]) as QueryResult).rows : [];
   const neighbours = route ? await loadNeighbours(client, routeId, route) : {};
   return { route, rows, neighbours, key: JSON.stringify([route, rows, neighbours]) };
+}
+
+/**
+ * Locks every row Order read until it commits, so nothing changes between its last check and the commit: its Traslados
+ * and the previous Recorrido's last one, the Recorrido and its neighbours, the Chofer, the Vehículo, and the Pasajeros
+ * and Destinos of those Traslados. Every writer of these rows locks them first, so it waits. The order follows the other
+ * writers: Traslados before Recorridos as in PATCH /transfers, the Chofer before the Vehículo as in publishing. Deactivating
+ * a Vehículo goes the other way; if it meets Order, Postgres aborts one of the two and nothing is saved half-way.
+ */
+async function lockOrderInputs(client: Queryable, routeId: number, rows: Record<string, unknown>[], neighbours: Neighbours) {
+  const transferIds = [...rows.map((row) => Number(row.id)), ...(neighbours.last ? [Number(neighbours.last.transfer_id)] : [])];
+  await client.query("SELECT id FROM transfers WHERE id = ANY($1::int[]) ORDER BY id FOR SHARE", [transferIds]);
+  const routeIds = [routeId, neighbours.previous?.id, neighbours.next?.id].filter((value) => value !== undefined).map(Number);
+  await client.query("SELECT id FROM routes WHERE id = ANY($1::int[]) ORDER BY id FOR UPDATE", [routeIds]);
+  await lockRoute(client, routeId);
+  await client.query("SELECT d.id FROM drivers d JOIN routes r ON r.driver_id = d.id WHERE r.id = $1 FOR SHARE OF d", [routeId]);
+  await client.query("SELECT v.id FROM vehicles v JOIN routes r ON r.vehicle_id = v.id WHERE r.id = $1 FOR SHARE OF v", [routeId]);
+  await client.query(
+    "SELECT id FROM passengers WHERE id IN (SELECT passenger_id FROM transfers WHERE id = ANY($1::int[])) ORDER BY id FOR SHARE",
+    [transferIds],
+  );
+  await client.query(
+    `SELECT id FROM destinations
+      WHERE id IN (SELECT destination_id FROM transfers WHERE id = ANY($1::int[])
+                   UNION SELECT origin_destination_id FROM transfers WHERE id = ANY($1::int[]))
+      ORDER BY id FOR SHARE`,
+    [transferIds],
+  );
 }
 
 const PLAN_VERSION_SELECT_SQL = `
@@ -3041,8 +3070,7 @@ export function createApp({ db, routing, router, geocoder, solver, travelTime, c
     })
     // "Order": the engine orders the Borrador Recorrido's Paradas and plans their times. Traslados it cannot place leave
     // the Recorrido with their reason, so every Traslado is in the order or in `unassigned`. The engine runs outside the
-    // transaction; the result is applied only if neither the Recorrido nor the Chofer's Recorridos right before and after it
-    // changed meanwhile.
+    // transaction; the result is applied only if nothing the engine was given changed meanwhile.
     .post("/routes/:id/order", async (context) => {
       const actor = await requireOffice(context);
       if (actor instanceof Response) return actor;
@@ -3087,10 +3115,7 @@ export function createApp({ db, routing, router, geocoder, solver, travelTime, c
           }
         }
         const stops = await inTransaction(db, async (client) => {
-          // The neighbouring Recorridos are locked too, in id order, so none of them changes before this commits.
-          const locked = [id, neighbours.previous?.id, neighbours.next?.id].filter((value) => value !== undefined).map(Number);
-          await client.query("SELECT id FROM routes WHERE id = ANY($1::int[]) ORDER BY id FOR UPDATE", [locked]);
-          await lockRoute(client, id);
+          await lockOrderInputs(client, id, rows, neighbours);
           if ((await orderInputKey(client, id)).key !== key) {
             throw new PlanningError(409, "The Recorrido changed while it was being ordered: order it again");
           }
