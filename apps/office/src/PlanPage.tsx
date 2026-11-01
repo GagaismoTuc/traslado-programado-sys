@@ -13,7 +13,7 @@ type Transfer = {
   status: string;
   routeId: number | null;
 };
-type Stop = { id: number; kind: "pickup" | "dropoff"; passengerName: string; placeName: string | null };
+type Stop = { id: number; kind: "pickup" | "dropoff"; passengerName: string; placeName: string | null; plannedTime: string | null };
 type Route = {
   id: number;
   driverName: string;
@@ -24,6 +24,15 @@ type Route = {
   status: string;
   km: number | null;
   stops: Stop[];
+  startKind: "home" | "previous" | "point" | null;
+  startLat: number | null;
+  startLng: number | null;
+  endKind: "home" | "open" | null;
+  frontSeat: boolean;
+};
+type OrderResult = {
+  unassigned: { transferId: number; passengerName: string; reason: "capacity" | "time_window" | "adaptation" }[];
+  violations: { message: string }[];
 };
 type Day = { plan: { date: string; timeZone: string }; transfers: Transfer[]; routes: Route[]; km: number | null };
 type Option = { id: number; name: string };
@@ -59,7 +68,18 @@ function transferLabel(transfer: Transfer) {
 }
 
 function stopLabel(stop: Stop) {
-  return `${stop.kind === "pickup" ? "Pick up" : "Drop off"} ${stop.passengerName} at ${stop.placeName ?? "home"}`;
+  const label = `${stop.kind === "pickup" ? "Pick up" : "Drop off"} ${stop.passengerName} at ${stop.placeName ?? "home"}`;
+  return stop.plannedTime ? `${stop.plannedTime} ${label}` : label;
+}
+
+const UNASSIGNED_REASONS = {
+  capacity: "no seat left in the Vehicle",
+  time_window: "cannot make its time window",
+  adaptation: "the Vehicle lacks a required feature",
+};
+
+function routeLabel(route: Route) {
+  return `${route.driverName} ${route.startTime}-${route.endTime}${route.frontSeat ? " (front seat taken)" : ""}`;
 }
 
 export function PlanPage() {
@@ -74,6 +94,8 @@ export function PlanPage() {
   const [companions, setCompanions] = useState("0");
   const [routeVehicle, setRouteVehicle] = useState("");
   const [message, setMessage] = useState("");
+  // The last "Order" answer per Recorrido, so what the engine could not place stays on screen.
+  const [orders, setOrders] = useState<Record<number, OrderResult>>({});
   const selectedDate = useRef(date);
   selectedDate.current = date;
   const latestLoad = useRef(0);
@@ -157,6 +179,33 @@ export function PlanPage() {
     transferIds: values.getAll("transferIds").map(Number),
   }, "Recorridos created for the Chofer's day"));
 
+  async function order(route: Route) {
+    try {
+      const response = await send(`/routes/${route.id}/order`, "POST");
+      if (await redirectUnauthorized(response)) return;
+      if (!response.ok) {
+        setMessage(await readError(response, "Unable to order the Recorrido"));
+        return;
+      }
+      const result = await response.json() as OrderResult;
+      setOrders((current) => ({ ...current, [route.id]: result }));
+      setMessage(result.unassigned.length ? "Order applied: some Traslados did not fit" : "Order applied");
+      await load(selectedDate.current);
+    } catch {
+      setMessage("Unable to reach the server");
+    }
+  }
+
+  const saveEnds = (route: Route) => submit((values) => {
+    const startKind = values.get("startKind") || null;
+    return write(`/routes/${route.id}`, "PATCH", {
+      startKind,
+      startLat: startKind === "point" ? Number(values.get("startLat")) : null,
+      startLng: startKind === "point" ? Number(values.get("startLng")) : null,
+      endKind: values.get("endKind") || null,
+    }, "Start and end saved");
+  });
+
   function chooseDriver(value: string) {
     const usual = drivers.find((item) => String(item.id) === value)?.usualVehicleId;
     setRouteVehicle(usual ? String(usual) : "");
@@ -196,7 +245,7 @@ export function PlanPage() {
               }, "Recorrido changed")}
             >
               <option value="">Unassigned</option>
-              {routes.map((route) => <option key={route.id} value={route.id}>{`${route.driverName} ${route.startTime}-${route.endTime}`}</option>)}
+              {routes.map((route) => <option key={route.id} value={route.id}>{routeLabel(route)}</option>)}
             </select>
           </label>
           <button type="button" onClick={() => void write(`/transfers/${transfer.id}/absence`, "POST", {}, "Absence registered")}>Register absence</button>
@@ -251,6 +300,7 @@ export function PlanPage() {
       <ul>{routes.map((route) => <li key={route.id}>
         <strong>{`${route.driverName} ${route.startTime}-${route.endTime}`}</strong>
         <div>{route.status === "borrador" ? "Draft" : route.status} - {kmLabel(route.km)}</div>
+        {route.frontSeat && <p>Carries a Pasajero who needs the front seat: check it when changing the Chofer or the Vehicle.</p>}
         <label>
           Vehicle
           <select
@@ -262,6 +312,38 @@ export function PlanPage() {
             {vehicles.map((item) => <option key={item.id} value={item.id}>{item.plate}</option>)}
           </select>
         </label>
+        {route.status === "borrador" && <button type="button" onClick={() => void order(route)}>Order</button>}
+        {orders[route.id]?.unassigned.length ? <>
+          <p>Not placed by the engine (back among the unassigned Traslados):</p>
+          <ul>{orders[route.id].unassigned.map((item) => <li key={item.transferId}>
+            {`${item.passengerName}: ${UNASSIGNED_REASONS[item.reason]}`}
+          </li>)}</ul>
+        </> : null}
+        {orders[route.id]?.violations.length ? <ul>{orders[route.id].violations.map((violation, index) => <li key={index}>
+          {violation.message}
+        </li>)}</ul> : null}
+        <form key={`${route.startKind}-${route.startLat}-${route.startLng}-${route.endKind}`} onSubmit={saveEnds(route)}>
+          <label>
+            Starts at
+            <select name="startKind" defaultValue={route.startKind ?? ""}>
+              <option value="">Default (home, or where the previous Recorrido ended)</option>
+              <option value="home">The Chofer's home</option>
+              <option value="previous">Where the previous Recorrido ended</option>
+              <option value="point">A given point</option>
+            </select>
+          </label>
+          <label>Start latitude<input type="number" name="startLat" step="any" min={-90} max={90} defaultValue={route.startLat ?? ""} /></label>
+          <label>Start longitude<input type="number" name="startLng" step="any" min={-180} max={180} defaultValue={route.startLng ?? ""} /></label>
+          <label>
+            Ends at
+            <select name="endKind" defaultValue={route.endKind ?? ""}>
+              <option value="">Default (home after the day's last Recorrido, else open)</option>
+              <option value="home">The Chofer's home</option>
+              <option value="open">Open</option>
+            </select>
+          </label>
+          <button type="submit">Save start and end</button>
+        </form>
         <ol>{route.stops.map((stop, index) => <li key={stop.id}>
           {stopLabel(stop)}
           <div className="stop-actions">

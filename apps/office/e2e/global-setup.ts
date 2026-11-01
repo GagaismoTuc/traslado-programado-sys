@@ -5,6 +5,7 @@ import { fileURLToPath } from "node:url";
 import { promisify } from "node:util";
 import { PostgreSqlContainer } from "@testcontainers/postgresql";
 import { createServer as createViteServer } from "vite";
+import { startFakeVroom } from "./fake-vroom";
 
 const run = promisify(execFile);
 const officeRoot = fileURLToPath(new URL("..", import.meta.url));
@@ -54,6 +55,7 @@ export default async function globalSetup() {
   await apiScript("src/migrate.ts", { MIGRATION_DATABASE_URL: migrationUrl });
 
   const [apiPort, webPort] = [await freePort(), await freePort()];
+  const vroom = await startFakeVroom();
   let apiOutput = "";
   const api = spawn(process.execPath, ["--import", "tsx", "src/server.ts"], {
     cwd: apiRoot,
@@ -61,9 +63,9 @@ export default async function globalSetup() {
       ...process.env,
       SERVER_EPOCH: "c3-e2e",
       DATABASE_URL: withCredentials(rootUrl, "traslado_app", applicationPassword),
-      // Only /health uses routing; the C3 tests never call it.
+      // OSRM is only probed by /health, which the C3 tests never call; "Order" goes to the fake VROOM.
       OSRM_URL: "http://127.0.0.1:9",
-      VROOM_URL: "http://127.0.0.1:9",
+      VROOM_URL: vroom.url,
       PORT: String(apiPort),
       GEOCODER: "off",
     },
@@ -84,6 +86,7 @@ export default async function globalSetup() {
   return async () => {
     await web.close();
     api.kill();
+    await vroom.close();
     await container.stop();
   };
 }

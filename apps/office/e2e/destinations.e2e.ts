@@ -79,6 +79,27 @@ async function savedDestinations(name: string) {
   }
 }
 
+test("lets the Oficina change a Destino's Tolerancia de llegada", async ({ page }) => {
+  const pool = database();
+  try {
+    await pool.query(
+      `INSERT INTO destinations (name, kind, address, latitude, longitude, arrival_tolerance_minutes)
+       VALUES ('Centro Tolerancia E2E', 'therapy', 'Avenida Sintetica 303', -26.82, -65.2, 0)`,
+    );
+    await page.goto(`${process.env.E2E_BASE_URL}/destinations`);
+    const tolerance = page.getByLabel("Arrival tolerance of Centro Tolerancia E2E (minutes)");
+    await expect(tolerance).toHaveValue("0");
+    await tolerance.fill("15");
+    await page.getByRole("listitem").filter({ hasText: "Centro Tolerancia E2E" }).getByRole("button", { name: "Save tolerance" }).click();
+    await expect(page.getByRole("status")).toHaveText("Arrival tolerance of Centro Tolerancia E2E saved");
+    const saved = await pool.query("SELECT arrival_tolerance_minutes FROM destinations WHERE name = 'Centro Tolerancia E2E'");
+    expect(saved.rows).toEqual([{ arrival_tolerance_minutes: 15 }]);
+  } finally {
+    await pool.query("DELETE FROM destinations WHERE name = 'Centro Tolerancia E2E'");
+    await pool.end();
+  }
+});
+
 test("creates a Destino by dragging the pin", async ({ page }) => {
   await openDestinations(page);
   const save = page.getByRole("button", { name: "Save destination" });
