@@ -18,7 +18,7 @@ const unserved: PassengerViolations = {
   violations: [{ rule: "unserved_transfer", transferId: 4, message: "Transfer 4 is left unserved in route" }],
 };
 const transfer = (id: number, targetTime: string, status = "planificado") => ({
-  id, passengerName: "Pasajero Sintético", direction: "entrada" as const, destinationName: "Escuela Sintética",
+  id, passengerId: 7, passengerName: "Pasajero Sintético", direction: "entrada" as const, destinationName: "Escuela Sintética",
   originDestinationName: null, targetTime, exitTime: null, companions: 0, status, routeId: null,
 });
 

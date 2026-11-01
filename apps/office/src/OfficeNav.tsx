@@ -6,7 +6,8 @@ export function OfficeNav() {
     <a href="/vehicles">Vehicles</a>{" | "}
     <a href="/drivers">Drivers</a>{" | "}
     <a href="/passengers">Passengers</a>{" | "}
-    <a href="/plan">Plan diario</a>
+    <a href="/plan">Plan diario</a>{" | "}
+    <a href="/alerts">Alerts</a>
   </nav>;
 }
 
