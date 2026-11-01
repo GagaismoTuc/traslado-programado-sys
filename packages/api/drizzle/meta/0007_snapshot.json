@@ -1,5 +1,5 @@
 {
-  "id": "019f504e-a9f1-4e08-b0df-b48c1385a2d6",
+  "id": "7f7a0506-c451-4813-8beb-ccb7db4957d9",
   "prevId": "917d5c4e-e555-40bd-907e-ab8f8dfb483f",
   "version": "7",
   "dialect": "postgresql",
@@ -96,6 +96,102 @@
       "checkConstraints": {},
       "isRLSEnabled": false
     },
+    "public.authorized_adults": {
+      "name": "authorized_adults",
+      "schema": "",
+      "columns": {
+        "id": {
+          "name": "id",
+          "type": "integer",
+          "primaryKey": true,
+          "notNull": true,
+          "identity": {
+            "type": "always",
+            "name": "authorized_adults_id_seq",
+            "schema": "public",
+            "increment": "1",
+            "startWith": "1",
+            "minValue": "1",
+            "maxValue": "2147483647",
+            "cache": "1",
+            "cycle": false
+          }
+        },
+        "passenger_id": {
+          "name": "passenger_id",
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "name": {
+          "name": "name",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "dni": {
+          "name": "dni",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "relation": {
+          "name": "relation",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "phone": {
+          "name": "phone",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "legal_guardian": {
+          "name": "legal_guardian",
+          "type": "boolean",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "created_at": {
+          "name": "created_at",
+          "type": "timestamp with time zone",
+          "primaryKey": false,
+          "notNull": true,
+          "default": "now()"
+        }
+      },
+      "indexes": {},
+      "foreignKeys": {
+        "authorized_adults_passenger_id_passengers_id_fk": {
+          "name": "authorized_adults_passenger_id_passengers_id_fk",
+          "tableFrom": "authorized_adults",
+          "tableTo": "passengers",
+          "columnsFrom": [
+            "passenger_id"
+          ],
+          "columnsTo": [
+            "id"
+          ],
+          "onDelete": "restrict",
+          "onUpdate": "no action"
+        }
+      },
+      "compositePrimaryKeys": {},
+      "uniqueConstraints": {
+        "authorized_adults_id_passenger_unique": {
+          "name": "authorized_adults_id_passenger_unique",
+          "nullsNotDistinct": false,
+          "columns": [
+            "id",
+            "passenger_id"
+          ]
+        }
+      },
+      "policies": {},
+      "checkConstraints": {},
+      "isRLSEnabled": false
+    },
     "public.change_log": {
       "name": "change_log",
       "schema": "",
@@ -178,6 +274,79 @@
           ],
           "columnsTo": [
             "id"
+          ],
+          "onDelete": "restrict",
+          "onUpdate": "no action"
+        }
+      },
+      "compositePrimaryKeys": {},
+      "uniqueConstraints": {},
+      "policies": {},
+      "checkConstraints": {},
+      "isRLSEnabled": false
+    },
+    "public.consents": {
+      "name": "consents",
+      "schema": "",
+      "columns": {
+        "passenger_id": {
+          "name": "passenger_id",
+          "type": "integer",
+          "primaryKey": true,
+          "notNull": true
+        },
+        "signed_by_adult_id": {
+          "name": "signed_by_adult_id",
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "signed_at": {
+          "name": "signed_at",
+          "type": "date",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "other_adult_allowed": {
+          "name": "other_adult_allowed",
+          "type": "boolean",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "recorded_at": {
+          "name": "recorded_at",
+          "type": "timestamp with time zone",
+          "primaryKey": false,
+          "notNull": true,
+          "default": "now()"
+        }
+      },
+      "indexes": {},
+      "foreignKeys": {
+        "consents_passenger_id_passengers_id_fk": {
+          "name": "consents_passenger_id_passengers_id_fk",
+          "tableFrom": "consents",
+          "tableTo": "passengers",
+          "columnsFrom": [
+            "passenger_id"
+          ],
+          "columnsTo": [
+            "id"
+          ],
+          "onDelete": "restrict",
+          "onUpdate": "no action"
+        },
+        "consents_signed_by_adult_fk": {
+          "name": "consents_signed_by_adult_fk",
+          "tableFrom": "consents",
+          "tableTo": "authorized_adults",
+          "columnsFrom": [
+            "signed_by_adult_id",
+            "passenger_id"
+          ],
+          "columnsTo": [
+            "id",
+            "passenger_id"
           ],
           "onDelete": "restrict",
           "onUpdate": "no action"
@@ -317,13 +486,6 @@
           "primaryKey": false,
           "notNull": true
         },
-        "arrival_tolerance_minutes": {
-          "name": "arrival_tolerance_minutes",
-          "type": "integer",
-          "primaryKey": false,
-          "notNull": true,
-          "default": 0
-        },
         "created_at": {
           "name": "created_at",
           "type": "timestamp with time zone",
@@ -338,10 +500,6 @@
       "uniqueConstraints": {},
       "policies": {},
       "checkConstraints": {
-        "destinations_arrival_tolerance_check": {
-          "name": "destinations_arrival_tolerance_check",
-          "value": "\"destinations\".\"arrival_tolerance_minutes\" BETWEEN 0 AND 240"
-        },
         "destinations_kind_check": {
           "name": "destinations_kind_check",
           "value": "\"destinations\".\"kind\" IN ('school', 'clinic', 'therapy', 'day_centre', 'other')"
@@ -876,30 +1034,6 @@
           "notNull": true,
           "default": "'borrador'"
         },
-        "start_kind": {
-          "name": "start_kind",
-          "type": "text",
-          "primaryKey": false,
-          "notNull": false
-        },
-        "start_latitude": {
-          "name": "start_latitude",
-          "type": "double precision",
-          "primaryKey": false,
-          "notNull": false
-        },
-        "start_longitude": {
-          "name": "start_longitude",
-          "type": "double precision",
-          "primaryKey": false,
-          "notNull": false
-        },
-        "end_kind": {
-          "name": "end_kind",
-          "type": "text",
-          "primaryKey": false,
-          "notNull": false
-        },
         "created_at": {
           "name": "created_at",
           "type": "timestamp with time zone",
@@ -961,18 +1095,6 @@
         "routes_time_band_check": {
           "name": "routes_time_band_check",
           "value": "\"routes\".\"end_time\" >= \"routes\".\"start_time\""
-        },
-        "routes_start_kind_check": {
-          "name": "routes_start_kind_check",
-          "value": "\"routes\".\"start_kind\" IN ('home', 'previous', 'point')"
-        },
-        "routes_start_point_check": {
-          "name": "routes_start_point_check",
-          "value": "(\"routes\".\"start_kind\" = 'point' AND \"routes\".\"start_latitude\" BETWEEN -90 AND 90 AND \"routes\".\"start_longitude\" BETWEEN -180 AND 180)\n      OR (\"routes\".\"start_kind\" IS DISTINCT FROM 'point' AND \"routes\".\"start_latitude\" IS NULL AND \"routes\".\"start_longitude\" IS NULL)"
-        },
-        "routes_end_kind_check": {
-          "name": "routes_end_kind_check",
-          "value": "\"routes\".\"end_kind\" IN ('home', 'open')"
         }
       },
       "isRLSEnabled": false
@@ -1127,12 +1249,6 @@
         "leg_distance_meters": {
           "name": "leg_distance_meters",
           "type": "integer",
-          "primaryKey": false,
-          "notNull": false
-        },
-        "planned_time": {
-          "name": "planned_time",
-          "type": "time",
           "primaryKey": false,
           "notNull": false
         }

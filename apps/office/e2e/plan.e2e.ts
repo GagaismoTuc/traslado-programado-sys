@@ -12,10 +12,20 @@ async function seed() {
       `INSERT INTO destinations (name, kind, address, latitude, longitude)
        VALUES ('Escuela Plan E2E', 'school', 'Avenida Sintetica 303', -26.82, -65.2)`,
     );
-    await pool.query(
+    const passenger = await pool.query(
       `INSERT INTO passengers (name, home_address, home_latitude, home_longitude, companions, front_seat, wheelchair,
          max_ride_time_minutes, pickup_duration_minutes, dropoff_duration_minutes)
-       VALUES ('Pasajero Plan E2E', 'Calle Inventada 101', -26.83, -65.21, 1, false, false, 60, 5, 5)`,
+       VALUES ('Pasajero Plan E2E', 'Calle Inventada 101', -26.83, -65.21, 1, false, false, 60, 5, 5) RETURNING id`,
+    );
+    // A Traslado can only be assigned to a Recorrido once its Pasajero has a Consentimiento.
+    const signer = await pool.query(
+      `INSERT INTO authorized_adults (passenger_id, name, dni, relation, phone, legal_guardian)
+       VALUES ($1, 'Madre Plan E2E', '-1000001', 'madre', '381-000-0001', true) RETURNING id`,
+      [passenger.rows[0].id],
+    );
+    await pool.query(
+      "INSERT INTO consents (passenger_id, signed_by_adult_id, signed_at, other_adult_allowed) VALUES ($1, $2, '2026-10-01', false)",
+      [passenger.rows[0].id, signer.rows[0].id],
     );
     const vehicle = await pool.query("INSERT INTO vehicles (plate, model, seats) VALUES ('PL001AN', 'Furgón Sintético', 8) RETURNING id");
     const user = await pool.query("INSERT INTO users (username, password_hash, role) VALUES ('chofer-plan-e2e', 'unused', 'driver') RETURNING id");
@@ -32,7 +42,7 @@ async function seed() {
 async function cleanUp() {
   const pool = database();
   try {
-    for (const table of ["absences", "stops", "transfers", "routes", "daily_plans", "drivers", "passengers", "vehicles"]) {
+    for (const table of ["absences", "stops", "transfers", "routes", "daily_plans", "drivers", "consents", "authorized_adults", "passengers", "vehicles"]) {
       await pool.query(`DELETE FROM ${table}`);
     }
     await pool.query("DELETE FROM destinations WHERE name = 'Escuela Plan E2E'");

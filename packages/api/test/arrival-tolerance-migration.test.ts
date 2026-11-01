@@ -36,7 +36,7 @@ it("backfills the Tolerancia de llegada of existing Destinos from their kind", a
   url.pathname = `/${databaseName}`;
   const pool = new Pool({ connectionString: url.toString(), options: "-c timezone=UTC" });
   try {
-    await migrate(createDrizzle(pool), { migrationsFolder: await migrationsUpTo("0006_chilly_nebula") });
+    await migrate(createDrizzle(pool), { migrationsFolder: await migrationsUpTo("0007_purple_solo") });
     for (const kind of ["therapy", "clinic", "school", "day_centre", "other"]) {
       await pool.query(
         "INSERT INTO destinations (name, kind, address, latitude, longitude) VALUES ($1, $2, 'Avenida Sintetica 303', -26.82, -65.2)",

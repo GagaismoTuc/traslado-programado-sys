@@ -508,6 +508,65 @@ async function getPassengerById(client: Queryable, passengerId: number) {
   return result.rows[0] ? formatPassengerRow(result.rows[0]) : null;
 }
 
+function parseAuthorizedAdult(body: unknown) {
+  if (!isObject(body)) return null;
+  const name = boundedText(body.name, 200);
+  const dni = boundedText(body.dni, 20);
+  const relation = boundedText(body.relation, 100);
+  const phone = boundedText(body.phone, 50);
+  if (!name || !dni || !relation || !phone || typeof body.legalGuardian !== "boolean") return null;
+  return { name, dni, relation, phone, legalGuardian: body.legalGuardian };
+}
+
+const AUTHORIZED_ADULT_SELECT_SQL = `
+  SELECT id, passenger_id AS "passengerId", name, dni, relation, phone, legal_guardian AS "legalGuardian" FROM authorized_adults
+`;
+
+function formatAuthorizedAdult(row: Record<string, unknown>) {
+  return {
+    id: Number(row.id),
+    passengerId: Number(row.passengerId),
+    name: String(row.name),
+    dni: String(row.dni),
+    relation: String(row.relation),
+    phone: String(row.phone),
+    legalGuardian: Boolean(row.legalGuardian),
+  };
+}
+
+const SIGNER_MUST_STAY = "This Adulto autorizado signed the Consentimiento: record it with another Responsable legal first";
+
+async function signedConsent(client: Queryable, adultId: number) {
+  const result = await client.query("SELECT 1 FROM consents WHERE signed_by_adult_id = $1", [adultId]) as QueryResult;
+  return result.rows.length > 0;
+}
+
+function parseConsent(body: unknown) {
+  if (!isObject(body)) return null;
+  const signedByAdultId = positiveInt(body.signedByAdultId);
+  const signedAt = parsePlanDate(body.signedAt);
+  if (!signedByAdultId || !signedAt || typeof body.otherAdultAllowed !== "boolean") return null;
+  return { signedByAdultId, signedAt, otherAdultAllowed: body.otherAdultAllowed };
+}
+
+async function getConsent(client: Queryable, passengerId: number) {
+  const result = await client.query(
+    `SELECT c.signed_by_adult_id AS "signedByAdultId", a.name AS "signedByName", to_char(c.signed_at, 'YYYY-MM-DD') AS "signedAt",
+            c.other_adult_allowed AS "otherAdultAllowed"
+       FROM consents c JOIN authorized_adults a ON a.id = c.signed_by_adult_id
+      WHERE c.passenger_id = $1`,
+    [passengerId],
+  ) as QueryResult;
+  const row = result.rows[0];
+  if (!row) return null;
+  return {
+    signedByAdultId: Number(row.signedByAdultId),
+    signedByName: String(row.signedByName),
+    signedAt: String(row.signedAt),
+    otherAdultAllowed: Boolean(row.otherAdultAllowed),
+  };
+}
+
 /** A planning write refused with its HTTP status; thrown inside a transaction so nothing is kept. */
 class PlanningError extends Error {
   constructor(readonly status: 400 | 404 | 409, message: string) {
@@ -750,6 +809,20 @@ async function removeStops(client: Queryable, transferId: number) {
   const routeId = removed.rows[0] ? Number(removed.rows[0].route_id) : null;
   if (routeId !== null) await settleStops(client, routeId);
   return routeId;
+}
+
+// A Traslado reaches a Recorrido only when its Pasajero has a Consentimiento; a recorded one is never removed, so no lock is needed.
+async function assertConsent(client: Queryable, transferIds: number[]) {
+  const missing = await client.query(
+    `SELECT DISTINCT p.id, p.name FROM transfers t JOIN passengers p ON p.id = t.passenger_id
+      WHERE t.id = ANY($1::int[]) AND NOT EXISTS (SELECT 1 FROM consents c WHERE c.passenger_id = p.id)
+      ORDER BY p.name, p.id`,
+    [transferIds],
+  ) as QueryResult;
+  if (missing.rows.length) {
+    const names = missing.rows.map((row) => String(row.name)).join(", ");
+    throw new PlanningError(409, `No Consentimiento recorded for ${names}: record it before assigning a Recorrido`);
+  }
 }
 
 // The Recorrido's Vehículo defaults to the Chofer's usual Vehículo and must be active.
@@ -1800,6 +1873,130 @@ export function createApp({ db, routing, geocoder, solver, travelTime, config }:
       if (!id) return context.json({ error: "Invalid request" }, 400);
       return await setPassengerActive(context, actor.id, id, true);
     })
+    .get("/passengers/:id/authorized-adults", async (context) => {
+      const actor = await requireOffice(context);
+      if (actor instanceof Response) return actor;
+      const id = parseId(context.req.param("id"));
+      if (!id) return context.json({ error: "Invalid request" }, 400);
+      const passenger = await db.query("SELECT id FROM passengers WHERE id = $1", [id]) as QueryResult;
+      if (!passenger.rows[0]) return context.json({ error: "Passenger not found" }, 404);
+      const adults = await db.query(`${AUTHORIZED_ADULT_SELECT_SQL} WHERE passenger_id = $1 ORDER BY lower(name), id`, [id]) as QueryResult;
+      return context.json({ adults: adults.rows.map(formatAuthorizedAdult) });
+    })
+    .post("/passengers/:id/authorized-adults", async (context) => {
+      const actor = await requireOffice(context);
+      if (actor instanceof Response) return actor;
+      const id = parseId(context.req.param("id"));
+      const fields = parseAuthorizedAdult(await context.req.json().catch(() => null));
+      if (!id || !fields) return context.json({ error: "Invalid request" }, 400);
+      const adult = await inTransaction(db, async (client) => {
+        const passenger = await client.query("SELECT id FROM passengers WHERE id = $1 FOR SHARE", [id]) as QueryResult;
+        if (!passenger.rows[0]) return null;
+        const inserted = await client.query(
+          `INSERT INTO authorized_adults (passenger_id, name, dni, relation, phone, legal_guardian)
+           VALUES ($1, $2, $3, $4, $5, $6) RETURNING id`,
+          [id, fields.name, fields.dni, fields.relation, fields.phone, fields.legalGuardian],
+        ) as QueryResult;
+        const adultId = Number(inserted.rows[0].id);
+        await appendChange(client, actor.id, "authorized_adult", String(adultId), "created", null, { passengerId: id, ...fields });
+        return { id: adultId, passengerId: id, ...fields };
+      });
+      return adult ? context.json({ adult }, 201) : context.json({ error: "Passenger not found" }, 404);
+    })
+    .patch("/authorized-adults/:id", async (context) => {
+      const actor = await requireOffice(context);
+      if (actor instanceof Response) return actor;
+      const id = parseId(context.req.param("id"));
+      const fields = parseAuthorizedAdult(await context.req.json().catch(() => null));
+      if (!id || !fields) return context.json({ error: "Invalid request" }, 400);
+      try {
+        const adult = await inTransaction(db, async (client) => {
+          const locked = await client.query(`${AUTHORIZED_ADULT_SELECT_SQL} WHERE id = $1 FOR UPDATE`, [id]) as QueryResult;
+          if (!locked.rows[0]) throw new PlanningError(404, "Adulto autorizado not found");
+          const { id: _, passengerId, ...before } = formatAuthorizedAdult(locked.rows[0]);
+          if (before.legalGuardian && !fields.legalGuardian && await signedConsent(client, id)) throw new PlanningError(409, SIGNER_MUST_STAY);
+          await client.query(
+            "UPDATE authorized_adults SET name = $1, dni = $2, relation = $3, phone = $4, legal_guardian = $5 WHERE id = $6",
+            [fields.name, fields.dni, fields.relation, fields.phone, fields.legalGuardian, id],
+          );
+          await appendChange(client, actor.id, "authorized_adult", String(id), "updated", before, fields);
+          return { id, passengerId, ...fields };
+        });
+        return context.json({ adult });
+      } catch (error) {
+        return planningFailure(context, error);
+      }
+    })
+    .delete("/authorized-adults/:id", async (context) => {
+      const actor = await requireOffice(context);
+      if (actor instanceof Response) return actor;
+      const id = parseId(context.req.param("id"));
+      if (!id) return context.json({ error: "Invalid request" }, 400);
+      try {
+        await inTransaction(db, async (client) => {
+          const locked = await client.query(`${AUTHORIZED_ADULT_SELECT_SQL} WHERE id = $1 FOR UPDATE`, [id]) as QueryResult;
+          if (!locked.rows[0]) throw new PlanningError(404, "Adulto autorizado not found");
+          if (await signedConsent(client, id)) throw new PlanningError(409, SIGNER_MUST_STAY);
+          await client.query("DELETE FROM authorized_adults WHERE id = $1", [id]);
+          const { id: _, ...before } = formatAuthorizedAdult(locked.rows[0]);
+          await appendChange(client, actor.id, "authorized_adult", String(id), "removed", before, null);
+        });
+        return context.body(null, 204);
+      } catch (error) {
+        return planningFailure(context, error);
+      }
+    })
+    .get("/passengers/:id/consent", async (context) => {
+      const actor = await requireOffice(context);
+      if (actor instanceof Response) return actor;
+      const id = parseId(context.req.param("id"));
+      if (!id) return context.json({ error: "Invalid request" }, 400);
+      const passenger = await db.query("SELECT id FROM passengers WHERE id = $1", [id]) as QueryResult;
+      if (!passenger.rows[0]) return context.json({ error: "Passenger not found" }, 404);
+      return context.json({ consent: await getConsent(db, id) });
+    })
+    // Records or replaces the Pasajero's Consentimiento; the same values again change nothing and add no log entry.
+    .post("/passengers/:id/consent", async (context) => {
+      const actor = await requireOffice(context);
+      if (actor instanceof Response) return actor;
+      const id = parseId(context.req.param("id"));
+      const fields = parseConsent(await context.req.json().catch(() => null));
+      if (!id || !fields) return context.json({ error: "Invalid request" }, 400);
+      try {
+        const result = await inTransaction(db, async (client) => {
+          // Locking the Pasajero serialises two first recordings of the same Consentimiento.
+          const passenger = await client.query("SELECT id FROM passengers WHERE id = $1 FOR UPDATE", [id]) as QueryResult;
+          if (!passenger.rows[0]) throw new PlanningError(404, "Passenger not found");
+          // FOR SHARE keeps the signer from losing the Responsable legal flag before this commits.
+          const signer = await client.query(
+            "SELECT legal_guardian FROM authorized_adults WHERE id = $1 AND passenger_id = $2 FOR SHARE",
+            [fields.signedByAdultId, id],
+          ) as QueryResult;
+          if (signer.rows[0]?.legal_guardian !== true) {
+            throw new PlanningError(409, "The Consentimiento must be signed by a Responsable legal of this Pasajero");
+          }
+          const current = await getConsent(client, id);
+          const before = current && {
+            signedByAdultId: current.signedByAdultId,
+            signedAt: current.signedAt,
+            otherAdultAllowed: current.otherAdultAllowed,
+          };
+          if (JSON.stringify(before) !== JSON.stringify(fields)) {
+            await client.query(
+              `INSERT INTO consents (passenger_id, signed_by_adult_id, signed_at, other_adult_allowed) VALUES ($1, $2, $3, $4)
+               ON CONFLICT (passenger_id) DO UPDATE SET signed_by_adult_id = EXCLUDED.signed_by_adult_id, signed_at = EXCLUDED.signed_at,
+                 other_adult_allowed = EXCLUDED.other_adult_allowed, recorded_at = now()`,
+              [id, fields.signedByAdultId, fields.signedAt, fields.otherAdultAllowed],
+            );
+            await appendChange(client, actor.id, "consent", String(id), before ? "updated" : "recorded", before, fields);
+          }
+          return { created: before === null, consent: await getConsent(client, id) };
+        });
+        return context.json({ consent: result.consent }, result.created ? 201 : 200);
+      } catch (error) {
+        return planningFailure(context, error);
+      }
+    })
     // Creating the Plan diario of a date that already has one returns it unchanged.
     .post("/daily-plans", async (context) => {
       const actor = await requireOffice(context);
@@ -1885,6 +2082,7 @@ export function createApp({ db, routing, geocoder, solver, travelTime, config }:
           const currentRouteId = nullableNumber(row.route_id);
           if (targetRouteId !== undefined && targetRouteId !== currentRouteId) {
             if (row.status !== "planificado") throw new PlanningError(409, "Only a Planificado Traslado can change Recorrido");
+            if (targetRouteId !== null) await assertConsent(client, [id]);
             // Both Recorridos are locked in id order, so two opposite moves cannot deadlock.
             for (const routeId of [currentRouteId, targetRouteId].filter((value) => value !== null).sort((a, b) => a - b)) {
               const route = await lockRoute(client, routeId);
@@ -2171,6 +2369,7 @@ export function createApp({ db, routing, geocoder, solver, travelTime, config }:
               throw new PlanningError(409, "Only Planificado Traslados without a Recorrido can be given to a Chofer");
             }
           }
+          await assertConsent(client, transferIds);
           const segments: { id: number; target: string }[][] = [];
           for (const row of locked.rows) {
             const transfer = { id: Number(row.id), target: String(row.target) };

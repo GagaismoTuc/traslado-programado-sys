@@ -1,6 +1,7 @@
 import { renderToStaticMarkup } from "react-dom/server";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { App } from "./App";
+import { AuthorizedAdultsPanel } from "./AuthorizedAdultsPanel";
 import { MAP_STYLE_URL, PinPicker } from "./PinPicker";
 import pinPickerSource from "./PinPicker.tsx?raw";
 
@@ -132,6 +133,19 @@ describe("office screens", () => {
     } finally {
       vi.useRealTimers();
     }
+  });
+
+  it("renders the Adultos autorizados and Consentimiento panel of a Pasajero with every field", () => {
+    const markup = renderToStaticMarkup(<AuthorizedAdultsPanel passenger={{ id: 1, name: "Pasajero Sintético" }} onClose={() => undefined} />);
+    expect(markup).toContain("<h2>Authorized adults and consent: Pasajero Sintético</h2>");
+    for (const field of [
+      'name="adultName"', 'name="dni"', 'name="relation"', 'name="phone"', 'name="legalGuardian"',
+      'name="signedByAdultId"', 'name="signedAt"', 'name="otherAdultAllowed"',
+    ]) expect(markup).toContain(field);
+    expect(markup).toContain("May be handed to another adult at home");
+    expect(markup).toContain("No consent recorded: this passenger cannot be assigned to a Recorrido.");
+    expect(markup).toContain("Save adult");
+    expect(markup).toContain("Save consent");
   });
 
   it("proposes a required Tiempo máximo a bordo of 60 minutes", () => {

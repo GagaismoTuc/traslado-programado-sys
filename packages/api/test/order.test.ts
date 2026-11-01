@@ -139,11 +139,19 @@ async function world(name: string, target: App, vehicleSeats = 8) {
     userId, name: `Chofer ${name}`, homeAddress: "Pasaje de Prueba 202", homeLat: HOME_OF_DRIVER[1], homeLng: HOME_OF_DRIVER[0], usualVehicleId: vehicleId,
   })).driver.id as number;
   expect([200, 201]).toContain((await request(target, "/daily-plans", "POST", { date: DAY }, office)).status);
-  const passenger = async (fields: Record<string, unknown> = {}) => (await call("/passengers", "POST", {
-    name: "Pasajero Sintético", homeAddress: "Calle Inventada 101", homeLat: HOME_OF_PASSENGER[1], homeLng: HOME_OF_PASSENGER[0],
-    companions: 0, frontSeat: false, wheelchair: false, maxRideTimeMinutes: 60, pickupDurationMinutes: 5, dropoffDurationMinutes: 5,
-    ...fields,
-  })).passenger.id as number;
+  // Each Pasajero gets a Consentimiento, which a Traslado needs before it can be assigned to a Recorrido.
+  const passenger = async (fields: Record<string, unknown> = {}) => {
+    const id = (await call("/passengers", "POST", {
+      name: "Pasajero Sintético", homeAddress: "Calle Inventada 101", homeLat: HOME_OF_PASSENGER[1], homeLng: HOME_OF_PASSENGER[0],
+      companions: 0, frontSeat: false, wheelchair: false, maxRideTimeMinutes: 60, pickupDurationMinutes: 5, dropoffDurationMinutes: 5,
+      ...fields,
+    })).passenger.id as number;
+    const signer = (await call(`/passengers/${id}/authorized-adults`, "POST", {
+      name: "Madre Sintética", dni: "-1000001", relation: "madre", phone: "381-000-0001", legalGuardian: true,
+    })).adult.id as number;
+    await call(`/passengers/${id}/consent`, "POST", { signedByAdultId: signer, signedAt: "2026-10-01", otherAdultAllowed: false });
+    return id;
+  };
   const route = async (fields: Record<string, unknown> = {}) =>
     (await call(`/daily-plans/${DAY}/routes`, "POST", { driverId, startTime: "07:00", endTime: "09:00", ...fields })).route.id as number;
   /** A Traslado assigned to `routeId`; entrada to the school by default. */
