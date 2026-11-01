@@ -142,14 +142,38 @@ describe("Autorización puntual", () => {
     expect(await answer(record({}), 409)).toEqual({ error: "The Traslado is closed: an Autorización puntual expires when its Traslado closes" });
   });
 
-  it("flags a handover whose typed DNI differs from the authorised one", async () => {
-    const { record, transferId, driver, routeId } = await salida("dni");
+  it("flags a handover whose typed DNI differs from the authorised one and leaves the authorization unused", async () => {
+    const { record, transferId, driver, routeId, served, passengerId, handover, office } = await salida("dni");
     const { authorization } = await answer(record({}), 201);
     // Case table row 5, seen by the server: the DNI does not match.
     const receiver = { kind: "other_adult", name: AUNT.name, dni: "-3000009", authorizationId: authorization.id };
+    expect((await answer(mark(driver.cookie, routeId, markBody(transferId, "subio")), 201)).mark.flags).toEqual([]);
     expect((await answer(mark(driver.cookie, routeId, markBody(transferId, "entregado", { receiver })), 201)).mark.flags)
       .toEqual(["consent_mismatch"]);
     expect((await alerts())[0].details).toEqual({ authorized: false, name: AUNT.name, dni: "-3000009" });
+    // Naming it on another Traslado does not use it either.
+    const other = await served(passengerId, "salida", "15:00");
+    const elsewhere = { kind: "other_adult", ...AUNT, authorizationId: authorization.id };
+    expect((await answer(mark(other.driver.cookie, other.routeId, markBody(other.transferId, "entregado", { receiver: elsewhere })), 201)).mark.flags)
+      .toEqual(["consent_mismatch"]);
+    const listed = await answer(request(`/transfers/${transferId}/authorizations`, "GET", undefined, office), 200);
+    expect(listed.authorizations.map((item: { status: string }) => item.status)).toEqual(["expired"]);
+    expect(await answer(request(`/authorizations/${authorization.id}/revocation`, "POST", {}, office), 409))
+      .toEqual({ error: "The Autorización puntual expired when its Traslado closed" });
+    expect((await alerts()).map((alert) => alert.kind)).not.toContain("authorization_conflict");
+    expect((await handover()).authorizations).toEqual([]);
+  });
+
+  it("stays valid and revocable after a Marca names it with another DNI before its Traslado closes", async () => {
+    const { record, transferId, driver, routeId, handover, office } = await salida("unused");
+    const { authorization } = await answer(record({}), 201);
+    // A Subió after the wrong-DNI Entregado (newer phone time) keeps the Traslado open, as an Oficina correction would.
+    await answer(mark(driver.cookie, routeId, markBody(transferId, "entregado", {
+      phoneTime: "2026-10-23T11:00:00.000Z", receiver: { kind: "other_adult", name: AUNT.name, dni: "-3000009", authorizationId: authorization.id },
+    })), 201);
+    await answer(mark(driver.cookie, routeId, markBody(transferId, "subio")), 201);
+    expect((await handover()).authorizations).toEqual([{ id: authorization.id, ...AUNT }]);
+    expect((await answer(request(`/authorizations/${authorization.id}/revocation`, "POST", {}, office), 201)).authorization.status).toBe("revoked");
   });
 
   it("downloads an Autorización puntual recorded after the phone last asked, only to the Chofer of that Recorrido", async () => {

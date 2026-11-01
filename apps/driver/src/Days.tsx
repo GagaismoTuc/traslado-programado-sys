@@ -117,13 +117,15 @@ export function StopActions({ route, stop, marking }: { route: DriverRoute; stop
         kind: "destination", destinationId: stop.place.destinationId!,
       })}>{`Entregado at ${stop.place.name}`}</button>
       : !open && <button type="button" disabled={disabled} onClick={() => marking.onOpenHandover(route, stop)}>Entregado</button>)}
-    {open && (open.data
-      ? <HandoverView handover={open.data} blocked={open.blocked} searching={open.searching} actions={{
+    {open && (open.data || open.blocked
+      // Without the downloaded data (no signal) nobody but company staff at the base may receive: the app keeps blocking.
+      ? <HandoverView handover={open.data ?? { transferId: stop.transferId, otherAdultAllowed: false, adults: [], authorizations: [], base: null }}
+        blocked={open.blocked} searching={open.searching} actions={{
         onReceiver: (receiver) => marking.onMark(route, stop, "entregado", receiver),
         onOtherAdult: (typed) => marking.onOtherAdult(route, stop, typed),
         onSearch: () => marking.onSearch(route, stop),
       }} />
-      : <p>{open.blocked ?? "Loading who may receive..."}</p>)}
+      : <p>Loading who may receive...</p>)}
   </>;
 }
 

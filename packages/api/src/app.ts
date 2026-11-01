@@ -1521,7 +1521,7 @@ function parseMark(body: unknown): MarkFields | { error: string } | null {
 }
 
 const MARK_SELECT_SQL = `
-  SELECT m.id, m.client_id, m.transfer_id, pv.route_id, pv.version, m.kind, m.phone_time, m.server_time, m.latitude, m.longitude,
+  SELECT m.id, m.client_id, m.driver_id, m.transfer_id, pv.route_id, pv.version, m.kind, m.phone_time, m.server_time, m.latitude, m.longitude,
          m.receiver_kind, m.receiver_adult_id, m.receiver_destination_id, m.receiver_name, m.receiver_dni, m.authorization_id, m.flags
     FROM marks m JOIN plan_versions pv ON pv.id = m.plan_version_id
 `;
@@ -1568,14 +1568,19 @@ async function insertAlert(client: Queryable, alert: {
   );
 }
 
+// A Marca uses an Autorización puntual only when it names it on that Traslado with the authorised DNI: a Marca naming it
+// with another DNI, or on another Traslado, is flagged and leaves it unused.
+const AUTHORIZATION_USE_SQL = `m.authorization_id = oa.id AND m.transfer_id = oa.transfer_id
+  AND regexp_replace(m.receiver_dni, '[.[:space:]]', '', 'g') = regexp_replace(oa.dni, '[.[:space:]]', '', 'g')`;
+
 /**
- * An Autorización puntual with its state: used once a Marca names it (even after a revocation), revoked, expired once its
+ * An Autorización puntual with its state: used once a Marca uses it (even after a revocation), revoked, expired once its
  * Traslado closed unused, otherwise valid.
  */
 const AUTHORIZATION_SELECT_SQL = `
   SELECT oa.id, oa.transfer_id, oa.authorized_by_adult_id, a.name AS authorized_by_name, oa.called_phone, oa.name, oa.dni,
          oa.recorded_by, oa.recorded_at, r.revoked_by, r.revoked_at,
-         CASE WHEN EXISTS (SELECT 1 FROM marks m WHERE m.authorization_id = oa.id) THEN 'used'
+         CASE WHEN EXISTS (SELECT 1 FROM marks m WHERE ${AUTHORIZATION_USE_SQL}) THEN 'used'
               WHEN r.authorization_id IS NOT NULL THEN 'revoked'
               WHEN t.status = ANY('{entregado,ausente,cancelado_ausencia}'::text[]) THEN 'expired'
               ELSE 'valid' END AS status
@@ -1741,6 +1746,8 @@ export function createApp({ db, routing, router, geocoder, solver, travelTime, c
     const content = markContent({ ...fields, routeId });
     const stored = async () => (await client.query(`${MARK_SELECT_SQL} WHERE m.client_id = $1`, [fields.id]) as QueryResult).rows[0];
     const resend = async (row: Record<string, unknown>) => {
+      // A UUID is the phone's own: another Chofer's Marca is neither shown nor compared.
+      if (Number(row.driver_id) !== chofer.driverId) throw new PlanningError(409, "This Marca belongs to another Chofer");
       const mark = formatMark(row);
       if (markContent(mark) === content) return { status: 200 as const, mark };
       const { id: _, ...sent } = fields;
@@ -3612,7 +3619,8 @@ export function createApp({ db, routing, router, geocoder, solver, travelTime, c
           if (current.status === "expired") throw new PlanningError(409, "The Autorización puntual expired when its Traslado closed");
           if (current.status === "used") {
             const use = (await client.query(
-              "SELECT m.id, pv.route_id FROM marks m JOIN plan_versions pv ON pv.id = m.plan_version_id WHERE m.authorization_id = $1 ORDER BY m.id LIMIT 1",
+              `SELECT m.id, pv.route_id FROM marks m JOIN plan_versions pv ON pv.id = m.plan_version_id
+                 JOIN one_off_authorizations oa ON oa.id = $1 WHERE ${AUTHORIZATION_USE_SQL} ORDER BY m.id LIMIT 1`,
               [id],
             ) as QueryResult).rows[0];
             await insertAlert(client, {

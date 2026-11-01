@@ -156,6 +156,19 @@ describe("Marcas in the driver app", () => {
     expect(renderToStaticMarkup(<RouteView route={salida} sending={false} onAcknowledge={() => undefined} marking={open} />)).toContain("<h4>Who receives?</h4>");
   });
 
+  it("keeps blocking without signal and still offers buscar autorización and the base", () => {
+    const actionsFor = marking({ handover: { transferId: 3, data: null, blocked: "Unable to reach the server", searching: false } });
+    const salida = route("en_curso", [stop("dropoff", "subio", null)]);
+    const view = <RouteView route={salida} sending={false} onAcknowledge={() => undefined} marking={actionsFor} />;
+    const markup = renderToStaticMarkup(view);
+    expect(markup).toContain("<p role=\"alert\">no entregues, llamá a la Oficina</p>");
+    expect(markup).toContain("<p role=\"alert\">Unable to reach the server</p>");
+    press(view, "Buscar autorización");
+    press(view, "Company staff at the base");
+    expect(actionsFor.onSearch).toHaveBeenCalledWith(salida, salida.stops[0]);
+    expect(actionsFor.onMark).toHaveBeenCalledWith(salida, salida.stops[0], "entregado", { kind: "base_staff" });
+  });
+
   it("keeps a Marca's UUID and phone time to send it again after a failure", async () => {
     const mark = newMark({ transferId: 3, kind: "subio", location: null, version: 2 }, new Date("2026-10-23T12:00:00.000Z"), "00000000-0000-4000-8000-000000000001");
     expect(mark).toEqual({ id: "00000000-0000-4000-8000-000000000001", phoneTime: "2026-10-23T12:00:00.000Z", transferId: 3, kind: "subio", location: null, version: 2 });

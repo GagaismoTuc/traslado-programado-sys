@@ -181,6 +181,12 @@ describe("Marcas", () => {
       .toEqual({ error: "Versión del plan not found" });
     expect(await answer(mark(mine.driver.cookie, theirs.routeId, markBody(theirs.transferId, "subio")), 403))
       .toEqual({ error: "This Recorrido belongs to another Chofer" });
+    // A UUID another Chofer already used is neither returned nor compared.
+    const theirMark = markBody(theirs.transferId, "entregado", { receiver: { kind: "other_adult", name: "Tía Sintética", dni: "-3000001" } });
+    await answer(mark(theirs.driver.cookie, theirs.routeId, theirMark), 201);
+    expect(await answer(mark(mine.driver.cookie, mine.routeId, { ...theirMark, transferId: mine.transferId, kind: "subio", receiver: undefined }), 409))
+      .toEqual({ error: "This Marca belongs to another Chofer" });
+    expect((await alerts()).map((alert) => alert.kind)).toEqual(["other_adult_handover", "mark_flagged"]);
     for (const body of [
       markBody(mine.transferId, "subio", { id: "not-a-uuid" }),
       markBody(mine.transferId, "subio", { phoneTime: "2026-10-23 09:00" }),
@@ -189,7 +195,7 @@ describe("Marcas", () => {
     ]) {
       expect(await answer(mark(mine.driver.cookie, mine.routeId, body), 400), JSON.stringify(body)).toEqual({ error: "Invalid request" });
     }
-    expect(await marks()).toEqual([]);
+    expect((await marks()).map((row) => row.client_id)).toEqual([theirMark.id]);
   });
 });
 
