@@ -64,6 +64,13 @@
       "when": 1793494380827,
       "tag": "0008_handy_rage",
       "breakpoints": true
+    },
+    {
+      "idx": 9,
+      "version": "7",
+      "when": 1793502276774,
+      "tag": "0009_cheerful_vindicator",
+      "breakpoints": true
     }
   ]
 }
