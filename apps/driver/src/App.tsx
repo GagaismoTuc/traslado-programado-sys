@@ -2,21 +2,51 @@ import { useEffect, useState, type FormEvent } from "react";
 import { hc } from "hono/client";
 import type { AppType } from "@traslado/api";
 import { DriverHome } from "./Days";
+import { indexedDbStore, isRevoked } from "./offline";
 
 const apiUrl = import.meta.env.VITE_API_URL ?? "http://localhost:3000";
 const api = hc<AppType>(apiUrl);
 void api.health.$get;
 
+// Set while a Chofer is signed in on this phone, so the app opens on the plan saved on the phone without signal.
+const SIGNED_IN_KEY = "driver-signed-in";
+
+function rememberedSignIn() {
+  try {
+    return globalThis.localStorage?.getItem(SIGNED_IN_KEY) === "1";
+  } catch {
+    return false;
+  }
+}
+
 export function App() {
   const [error, setError] = useState("");
-  const [signedIn, setSignedIn] = useState(false);
+  const [signedIn, setSignedInState] = useState(rememberedSignIn);
   const [loading, setLoading] = useState(false);
 
-  // On open, a Chofer whose session is still valid goes straight to the Recorridos.
+  function setSignedIn(value: boolean) {
+    try {
+      if (value) localStorage.setItem(SIGNED_IN_KEY, "1");
+      else localStorage.removeItem(SIGNED_IN_KEY);
+    } catch {
+      // Without storage the app still works online.
+    }
+    setSignedInState(value);
+  }
+
+  // On open, a Chofer whose session is still valid goes straight to the Recorridos; without signal the phone's memory
+  // decides. A 401 asks to sign in again, keeping the queue, unless the device was revoked: then the phone is wiped.
   useEffect(() => {
     fetch(`${apiUrl}/auth/me`, { credentials: "include" })
-      .then(async (response) => response.ok ? await response.json() as { user?: { role?: string } } : null)
-      .then((result) => { if (result?.user?.role === "driver") setSignedIn(true); })
+      .then(async (response) => {
+        if (response.status === 401) {
+          if (await isRevoked(response)) await indexedDbStore().clear().catch(() => undefined);
+          setSignedIn(false);
+          return;
+        }
+        const result = response.ok ? await response.json() as { user?: { role?: string } } : null;
+        if (result?.user?.role === "driver") setSignedIn(true);
+      })
       .catch(() => undefined);
   }, []);
 

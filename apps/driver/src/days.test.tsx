@@ -1,6 +1,6 @@
 import { renderToStaticMarkup } from "react-dom/server";
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { acknowledgeVersion, driverDays, RouteView, startRefetching, StopView, type DriverRoute, type DriverStop } from "./Days";
+import { acknowledgeVersion, driverDays, RouteView, startRefetching, StopView, visibleDays, type DriverRoute, type DriverStop } from "./Days";
 
 // Synthetic data only.
 const passenger = { name: "Pasajero Sintético", wheelchair: true, medicalAlert: "Alergia sintética a la penicilina" };
@@ -54,6 +54,14 @@ describe("driver Recorridos", () => {
   it("asks for today and tomorrow in the Plan diario's zone", () => {
     expect(driverDays(new Date("2026-10-23T12:00:00.000Z"))).toEqual(["2026-10-23", "2026-10-24"]);
     expect(driverDays(new Date("2026-10-24T02:30:00.000Z"))).toEqual(["2026-10-23", "2026-10-24"]);
+  });
+
+  it("opens the plan saved on the phone for today and tomorrow, so last evening's download is today's plan", () => {
+    const day = (date: string) => ({ date, routes: [route(1, null)] });
+    // Downloaded on the evening of the 22nd, opened at 06:30 of the 23rd without signal.
+    expect(visibleDays([day("2026-10-22"), day("2026-10-23")], new Date("2026-10-23T09:30:00.000Z"))).toEqual([day("2026-10-23")]);
+    expect(visibleDays([day("2026-10-23"), day("2026-10-24")], new Date("2026-10-23T09:30:00.000Z"))).toEqual([day("2026-10-23"), day("2026-10-24")]);
+    expect(visibleDays([day("2026-10-21"), day("2026-10-22")], new Date("2026-10-23T09:30:00.000Z"))).toEqual([]);
   });
 });
 
