@@ -6,6 +6,7 @@ import { DestinationsPage } from "./DestinationsPage";
 import { DriversPage } from "./DriversPage";
 import { OfficeNav } from "./OfficeNav";
 import { PassengersPage } from "./PassengersPage";
+import { PlanPage } from "./PlanPage";
 import { SecondFactorPage } from "./SecondFactor";
 import { DeviceSessions, PersistentSessionToggle } from "./UserAccess";
 import { VehicleFeaturesPage } from "./VehicleFeaturesPage";
@@ -145,5 +146,6 @@ export function App() {
   if (path === "/vehicles") return <VehiclesPage />;
   if (path === "/drivers") return <DriversPage />;
   if (path === "/passengers") return <PassengersPage />;
+  if (path === "/plan") return <PlanPage />;
   return path === "/users" ? <UsersPage /> : <SignInPage />;
 }

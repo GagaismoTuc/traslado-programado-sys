@@ -6,6 +6,10 @@ const configSchema = z.object({
   OSRM_URL: z.string({ error: "OSRM_URL must be a valid URL" }).url("OSRM_URL must be a valid URL"),
   VROOM_URL: z.string({ error: "VROOM_URL must be a valid URL" }).url("VROOM_URL must be a valid URL"),
   PORT: z.coerce.number().int().min(1).max(65535).default(3000),
+  ROUTE_GAP_MINUTES: z.coerce.number({ error: "ROUTE_GAP_MINUTES must be a whole number of minutes from 1" })
+    .int("ROUTE_GAP_MINUTES must be a whole number of minutes from 1")
+    .min(1, "ROUTE_GAP_MINUTES must be a whole number of minutes from 1")
+    .default(60),
   GEOCODER: z.enum(["off", "nominatim"], { error: "GEOCODER must be off or nominatim" }).default("off"),
   NOMINATIM_URL: z.string().url("NOMINATIM_URL must be a valid URL").default("https://nominatim.openstreetmap.org"),
   NOMINATIM_USER_AGENT: z.string().trim().min(1).default("traslado-programado (+https://github.com/GagaismoTuc/traslado-programado-sys)"),
@@ -17,6 +21,7 @@ export type ServerConfig = {
   osrmUrl: string;
   vroomUrl: string;
   port: number;
+  routeGapMinutes: number;
   trustedOrigins: string[];
   geocoder: "off" | "nominatim";
   nominatimUrl: string;
@@ -58,6 +63,7 @@ export function readConfig(environment: NodeJS.ProcessEnv = process.env): Server
     osrmUrl: result.data.OSRM_URL,
     vroomUrl: result.data.VROOM_URL,
     port: result.data.PORT,
+    routeGapMinutes: result.data.ROUTE_GAP_MINUTES,
     trustedOrigins: readTrustedOrigins(environment.AUTH_ALLOWED_ORIGINS),
     geocoder: result.data.GEOCODER,
     nominatimUrl: result.data.NOMINATIM_URL,

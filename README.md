@@ -37,6 +37,8 @@ Browser mutations must include an allowed `Origin`. The API trusts the local Off
 
 The Office "Suggest pin" button geocodes an address through the API. Geocoding is off unless `GEOCODER=nominatim`; then the API calls `NOMINATIM_URL` (default `https://nominatim.openstreetmap.org`) with the `NOMINATIM_USER_AGENT` header, at most once per second for the whole process, caching repeated queries. Tests, CI and development keep it off. The Office map loads its style from `VITE_MAP_STYLE_URL` (OpenFreeMap Liberty by default).
 
+The Office plans each day at `/plan`. Giving a Chofer their whole day cuts it into Recorridos wherever two consecutive target times are more than `ROUTE_GAP_MINUTES` apart (default 60).
+
 ## Checks
 
 ```sh
