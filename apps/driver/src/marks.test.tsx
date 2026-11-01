@@ -1,7 +1,8 @@
 import { isValidElement, type ReactElement, type ReactNode } from "react";
 import { renderToStaticMarkup } from "react-dom/server";
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { RouteView, type DriverRoute, type DriverStop, type Marking } from "./Days";
+import { RouteView, undoneKinds, type DriverRoute, type DriverStop, type Marking } from "./Days";
+import { latestMarks } from "./offline";
 import {
   CALL_THE_OFFICE, currentLocation, fetchHandover, HandoverView, newMark, otherAdultReceiver, sendMark, startRoute, undoMark,
   type Handover, type HandoverActions,
@@ -27,7 +28,8 @@ const route = (status: string, stops: DriverStop[]): DriverRoute => ({
   routeId: 9, version: 2, startTime: "07:00", endTime: "18:00", vehiclePlate: "AAA001", status, acknowledgedVersion: 2, stops,
 });
 const marking = (fields: Partial<Marking> = {}): Marking => ({
-  sending: false, unsent: {}, last: null, handover: null, onStart: vi.fn(), onMark: vi.fn(), onResend: vi.fn(), onUndo: vi.fn(), onOpenHandover: vi.fn(),
+  sending: false, marks: {}, undone: {}, planFetchedAt: "2026-10-23T11:00:00.000Z", handover: null, onStart: vi.fn(), onMark: vi.fn(), onFlush: vi.fn(),
+  onUndo: vi.fn(), onOpenHandover: vi.fn(),
   onOtherAdult: vi.fn(), onSearch: vi.fn(), ...fields,
 });
 const actions = (): HandoverActions => ({ onReceiver: vi.fn(), onOtherAdult: vi.fn(), onSearch: vi.fn() });
@@ -169,10 +171,10 @@ describe("Marcas in the driver app", () => {
     expect(actionsFor.onMark).toHaveBeenCalledWith(salida, salida.stops[0], "entregado", { kind: "base_staff" });
   });
 
-  it("offers Deshacer on the Chofer's last confirmed Marca and sends an undo that names it with the tap's phone time", () => {
+  it("offers Deshacer on the Marca on the phone and sends an undo that names it with the tap's phone time", () => {
     const subio = newMark({ transferId: 3, kind: "subio", location: null, version: 2 }, new Date("2026-10-23T12:00:00.000Z"), "00000000-0000-4000-8000-000000000001");
-    const actionsFor = marking({ last: subio });
-    const entrada = route("en_curso", [stop("pickup", "subio", 4), stop("dropoff", "subio", 4)]);
+    const actionsFor = marking({ marks: { 3: { id: subio.id, routeId: 9, mark: subio, state: "confirmed", confirmedAt: "2026-10-23T12:00:05.000Z", note: null } } });
+    const entrada = route("en_curso", [stop("pickup", "planificado", 4), stop("dropoff", "planificado", 4)]);
     const view = <RouteView route={entrada} sending={false} onAcknowledge={() => undefined} marking={actionsFor} />;
     expect(buttons(view).filter((item) => item.text === "Deshacer")).toHaveLength(1);
     press(view, "Deshacer");
@@ -181,24 +183,70 @@ describe("Marcas in the driver app", () => {
       id: "00000000-0000-4000-8000-000000000002", phoneTime: "2026-10-23T12:01:30.000Z", transferId: 3, kind: "undo",
       corrects: subio.id, location: null, version: 2,
     });
-    // Without a Marca confirmed from this phone there is nothing to undo.
+    // Without a Marca on the phone there is nothing to undo.
     expect(buttons(<RouteView route={entrada} sending={false} onAcknowledge={() => undefined} marking={marking()} />).map((item) => item.text))
       .not.toContain("Deshacer");
+  });
+
+  it("returns the Traslado to its state before the undone Marca while the undo waits on the phone, and offers no Deshacer of it", () => {
+    const subio = newMark({ transferId: 3, kind: "subio", location: null, version: 2 }, new Date("2026-10-23T12:00:00.000Z"), "00000000-0000-4000-8000-000000000001");
+    const undo = undoMark(subio, 2, null, new Date("2026-10-23T12:01:30.000Z"), "00000000-0000-4000-8000-000000000002");
+    const items = [
+      { id: subio.id, routeId: 9, mark: subio, state: "confirmed" as const, confirmedAt: "2026-10-23T12:00:05.000Z", note: null },
+      { id: undo.id, routeId: 9, mark: undo, state: "pending" as const, confirmedAt: null, note: null },
+    ];
+    expect(undoneKinds(items)).toEqual({ [undo.id]: "subio" });
+    // The plan was downloaded after the Subió was confirmed, so the server still says Subió.
+    const entrada = route("en_curso", [stop("pickup", "subio", 4), stop("dropoff", "subio", 4)]);
+    const view = <RouteView route={entrada} sending={false} onAcknowledge={() => undefined}
+      marking={marking({ marks: latestMarks(items), undone: undoneKinds(items), planFetchedAt: "2026-10-23T12:00:10.000Z" })} />;
+    const markup = renderToStaticMarkup(view);
+    expect(markup).not.toContain("Marked:");
+    expect(markup).toContain("<div>Saved on phone</div>");
+    expect(buttons(view).map((item) => item.text)).toEqual(["Send now", "Subió", "Ausente", "Send now"]);
   });
 
   it("keeps a Marca's UUID and phone time to send it again after a failure", async () => {
     const mark = newMark({ transferId: 3, kind: "subio", location: null, version: 2 }, new Date("2026-10-23T12:00:00.000Z"), "00000000-0000-4000-8000-000000000001");
     expect(mark).toEqual({ id: "00000000-0000-4000-8000-000000000001", phoneTime: "2026-10-23T12:00:00.000Z", transferId: 3, kind: "subio", location: null, version: 2 });
-    const actionsFor = marking({ unsent: { 3: mark } });
+    const actionsFor = marking({ marks: { 3: { id: mark.id, routeId: 9, mark, state: "pending", confirmedAt: null, note: null } } });
     const view = <RouteView route={route("en_curso", [stop("pickup", "planificado", null)])} sending={false} onAcknowledge={() => undefined} marking={actionsFor} />;
-    press(view, "Send again");
-    expect(vi.mocked(actionsFor.onResend).mock.calls[0][1]).toBe(mark);
+    press(view, "Send now");
+    expect(actionsFor.onFlush).toHaveBeenCalledTimes(1);
     const fetchMock = vi.fn(async () => new Response("{}", { status: 201 }));
     vi.stubGlobal("fetch", fetchMock);
     await sendMark("https://api.example", 9, mark);
     expect(fetchMock).toHaveBeenCalledWith("https://api.example/driver/routes/9/marks", {
       method: "POST", credentials: "include", headers: { "Content-Type": "application/json" }, body: JSON.stringify(mark),
     });
+  });
+
+  it("shows each Marca as saved on phone until the server confirms it, and does not offer it again", () => {
+    const subio = newMark({ transferId: 3, kind: "subio", location: null, version: 2 }, new Date("2026-10-23T12:00:00.000Z"), "00000000-0000-4000-8000-000000000001");
+    const queued = (state: "pending" | "confirmed", confirmedAt: string | null = null, note: string | null = null) => ({
+      3: { id: subio.id, routeId: 9, mark: subio, state, confirmedAt, note },
+    });
+    // The plan was downloaded at 11:00, before the Marca: it still says Planificado.
+    const entrada = route("en_curso", [stop("pickup", "planificado", 4), stop("dropoff", "planificado", 4)]);
+    const render = (fields: Partial<Marking>, shown = entrada) => renderToStaticMarkup(
+      <RouteView route={shown} sending={false} onAcknowledge={() => undefined} marking={marking(fields)} />,
+    );
+
+    const saved = render({ marks: queued("pending", null, "This Recorrido is closed") });
+    expect(saved).toContain("<div>Marked: Subió</div><div>Saved on phone</div><p role=\"alert\">This Recorrido is closed</p><button type=\"button\">Send now</button>");
+    expect(saved).not.toContain(">Ausente</button>");
+    expect(saved).toContain(">Entregado at Escuela Sintética</button>");
+
+    const confirmed = render({ marks: queued("confirmed", "2026-10-23T12:00:05.000Z") });
+    expect(confirmed).toContain("<div>Marked: Subió</div><div>Confirmed by server</div>");
+    expect(confirmed).not.toContain("Send now");
+    expect(render({ marks: queued("confirmed", "2026-10-23T12:00:05.000Z") }, route("en_curso", [stop("pickup", "subio", 4)])))
+      .toContain("<div>Marked: Subió</div><div>Confirmed by server</div>");
+    // A plan requested after the confirmation is the server's word: an Oficina change since then wins.
+    const changed = render({ marks: queued("confirmed", "2026-10-23T12:00:05.000Z"), planFetchedAt: "2026-10-23T12:30:00.000Z" });
+    expect(changed).not.toContain("Marked:");
+    expect(changed).not.toContain("Confirmed by server");
+    expect(changed).toContain(">Subió</button>");
   });
 
   it("takes the phone's position, or none when the GPS fails or is missing", async () => {
