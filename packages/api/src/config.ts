@@ -19,6 +19,8 @@ const configSchema = z.object({
   GEOCODER: z.enum(["off", "nominatim"], { error: "GEOCODER must be off or nominatim" }).default("off"),
   NOMINATIM_URL: z.string().url("NOMINATIM_URL must be a valid URL").default("https://nominatim.openstreetmap.org"),
   NOMINATIM_USER_AGENT: z.string().trim().min(1).default("traslado-programado (+https://github.com/GagaismoTuc/traslado-programado-sys)"),
+  // Where company staff receive a Pasajero nobody else can receive (`inferido`); empty or unset means not configured.
+  BASE_ADDRESS: z.string().trim().max(500, "BASE_ADDRESS must be at most 500 characters").optional(),
 });
 
 export type ServerConfig = {
@@ -33,6 +35,7 @@ export type ServerConfig = {
   geocoder: "off" | "nominatim";
   nominatimUrl: string;
   nominatimUserAgent: string;
+  baseAddress: string | null;
 };
 
 const DEFAULT_TRUSTED_ORIGINS = [
@@ -79,5 +82,6 @@ export function readConfig(environment: NodeJS.ProcessEnv = process.env): Server
     geocoder: result.data.GEOCODER,
     nominatimUrl: result.data.NOMINATIM_URL,
     nominatimUserAgent: result.data.NOMINATIM_USER_AGENT,
+    baseAddress: result.data.BASE_ADDRESS || null,
   };
 }

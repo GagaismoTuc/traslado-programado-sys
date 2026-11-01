@@ -120,20 +120,20 @@ describe("Driver app scope", () => {
     expect(await answer(request(`/driver/days/${TODAY}`, "GET", undefined, first.cookie), 200)).toEqual({
       date: TODAY,
       routes: [{
-        routeId: today.routeId, version: 1, startTime: "06:00", endTime: "18:00", vehiclePlate: "SCO001", acknowledgedVersion: null,
+        routeId: today.routeId, version: 1, startTime: "06:00", endTime: "18:00", vehiclePlate: "SCO001", status: "publicado", acknowledgedVersion: null,
         stops: [
-          { position: 1, kind: "pickup", plannedTime: "07:51", transferId: today.transferId, direction: "entrada", place: home, passenger, companions: 1 },
-          { position: 2, kind: "dropoff", plannedTime: "08:00", transferId: today.transferId, direction: "entrada", place: school, passenger, companions: 1 },
+          { position: 1, kind: "pickup", plannedTime: "07:51", transferId: today.transferId, direction: "entrada", transferStatus: "planificado", place: home, passenger, companions: 1 },
+          { position: 2, kind: "dropoff", plannedTime: "08:00", transferId: today.transferId, direction: "entrada", transferStatus: "planificado", place: school, passenger, companions: 1 },
         ],
       }],
     });
     expect(await answer(request(`/driver/days/${TOMORROW}`, "GET", undefined, first.cookie), 200)).toEqual({
       date: TOMORROW,
       routes: [{
-        routeId: tomorrow.routeId, version: 1, startTime: "06:00", endTime: "18:00", vehiclePlate: "SCO001", acknowledgedVersion: null,
+        routeId: tomorrow.routeId, version: 1, startTime: "06:00", endTime: "18:00", vehiclePlate: "SCO001", status: "publicado", acknowledgedVersion: null,
         stops: [
-          { position: 1, kind: "pickup", plannedTime: "13:00", transferId: tomorrow.transferId, direction: "salida", place: school, passenger, companions: 1 },
-          { position: 2, kind: "dropoff", plannedTime: "13:08", transferId: tomorrow.transferId, direction: "salida", place: home, passenger, companions: 1 },
+          { position: 1, kind: "pickup", plannedTime: "13:00", transferId: tomorrow.transferId, direction: "salida", transferStatus: "planificado", place: school, passenger, companions: 1 },
+          { position: 2, kind: "dropoff", plannedTime: "13:08", transferId: tomorrow.transferId, direction: "salida", transferStatus: "planificado", place: home, passenger, companions: 1 },
         ],
       }],
     });
@@ -188,6 +188,11 @@ describe("Driver app scope", () => {
     const endpoints: [string, string, unknown][] = [
       [`/driver/days/${TODAY}`, "GET", undefined],
       [`/driver/routes/${mine.routeId}/acknowledgements`, "POST", { version: 1 }],
+      [`/driver/routes/${mine.routeId}/start`, "POST", {}],
+      [`/driver/routes/${mine.routeId}/marks`, "POST", {
+        id: "00000000-0000-4000-8000-000000000001", transferId: mine.transferId, kind: "subio", phoneTime: "2026-10-23T12:00:00.000Z", location: null, version: 1,
+      }],
+      [`/driver/routes/${mine.routeId}/transfers/${mine.transferId}/handover`, "GET", undefined],
     ];
     for (const [path, method, body] of endpoints) {
       expect(await answer(request(path, method, body), 401)).toEqual({ error: "Authentication required" });
@@ -195,6 +200,8 @@ describe("Driver app scope", () => {
       expect(await answer(request(path, method, body, office), 403)).toEqual({ error: "Chofer role required" });
     }
     expect(await acknowledgements()).toEqual([]);
+    expect((await migrationPool.query("SELECT count(*)::int AS marks FROM marks")).rows[0].marks).toBe(0);
+    expect((await migrationPool.query("SELECT status FROM routes WHERE id = $1", [mine.routeId])).rows[0].status).toBe("publicado");
   });
 });
 

@@ -44,6 +44,8 @@ export type AppConfig = {
   // A Chofer's day is cut into Recorridos where two consecutive target times are further apart than this.
   routeGapMinutes?: number;
   planner?: PlannerSettings;
+  // Where company staff receive a Pasajero nobody else can receive (`inferido`); null when not configured.
+  baseAddress?: string | null;
 };
 
 type UserRow = {
@@ -573,7 +575,7 @@ async function getConsent(client: Queryable, passengerId: number) {
 
 /** A planning write refused with its HTTP status; thrown inside a transaction so nothing is kept. */
 class PlanningError extends Error {
-  constructor(readonly status: 400 | 404 | 409 | 502, message: string, readonly extra: Record<string, unknown> = {}) {
+  constructor(readonly status: 400 | 403 | 404 | 409 | 502, message: string, readonly extra: Record<string, unknown> = {}) {
     super(message);
   }
 }
@@ -1384,7 +1386,7 @@ async function loadDriverDay(client: Queryable, driverId: number, date: string) 
   const versions = await client.query(
     `SELECT * FROM (
        SELECT DISTINCT ON (pv.route_id) pv.id, pv.route_id, pv.version, to_char(pv.start_time, 'HH24:MI') AS start_time,
-              to_char(pv.end_time, 'HH24:MI') AS end_time, v.plate,
+              to_char(pv.end_time, 'HH24:MI') AS end_time, v.plate, r.status,
               (SELECT max(seen.version) FROM version_acknowledgements va JOIN plan_versions seen ON seen.id = va.plan_version_id
                 WHERE seen.route_id = pv.route_id AND va.driver_id = $2) AS acknowledged
          FROM plan_versions pv JOIN routes r ON r.id = pv.route_id JOIN daily_plans dp ON dp.id = r.daily_plan_id
@@ -1396,7 +1398,7 @@ async function loadDriverDay(client: Queryable, driverId: number, date: string) 
   ) as QueryResult;
   const legs = await client.query(
     `SELECT l.plan_version_id, l.position, l.kind, to_char(l.planned_time, 'HH24:MI') AS planned_time, l.transfer_id, t.direction,
-            pvt.companions, p.name, p.home_address, p.access_notes AS home_notes, p.wheelchair, p.medical_alert,
+            t.status, pvt.companions, p.name, p.home_address, p.access_notes AS home_notes, p.wheelchair, p.medical_alert,
             d.name AS d_name, d.address AS d_address, d.access_notes AS d_notes,
             o.name AS o_name, o.address AS o_address, o.access_notes AS o_notes
        FROM plan_version_legs l
@@ -1419,6 +1421,8 @@ async function loadDriverDay(client: Queryable, driverId: number, date: string) 
       plannedTime: String(leg.planned_time),
       transferId: Number(leg.transfer_id),
       direction: String(leg.direction),
+      // The Traslado's state now (Planificado, Subió, Entregado, ...), so the app shows what is already marked.
+      transferStatus: String(leg.status),
       place: prefix === null
         ? { name: null, address: String(leg.home_address), accessNotes: (leg.home_notes as string | null) ?? null }
         : { name: String(leg[`${prefix}_name`]), address: String(leg[`${prefix}_address`]), accessNotes: (leg[`${prefix}_notes`] as string | null) ?? null },
@@ -1434,10 +1438,175 @@ async function loadDriverDay(client: Queryable, driverId: number, date: string) 
       startTime: String(row.start_time),
       endTime: String(row.end_time),
       vehiclePlate: String(row.plate),
+      status: String(row.status),
       acknowledgedVersion: nullableNumber(row.acknowledged),
       stops: legs.rows.filter((leg) => Number(leg.plan_version_id) === Number(row.id)).map(stop),
     })),
   };
+}
+
+type MarkKind = "subio" | "ausente" | "entregado";
+type MarkReceiver =
+  | { kind: "authorized_adult"; adultId: number }
+  | { kind: "destination"; destinationId: number }
+  | { kind: "other_adult"; name: string; dni: string; authorizationId: number | null }
+  | { kind: "base_staff" };
+type MarkLocation = { lat: number; lng: number } | null;
+type MarkFields = {
+  id: string;
+  transferId: number;
+  kind: MarkKind;
+  phoneTime: string;
+  location: MarkLocation;
+  version: number;
+  receiver: MarkReceiver | null;
+};
+
+const MARK_KINDS: MarkKind[] = ["subio", "ausente", "entregado"];
+const UUID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+const RECEIVER_REQUIRED = "Entregado requires a Receptor";
+// A Traslado in one of these states is closed: an Autorización puntual on it has expired.
+const CLOSED_TRANSFER_STATUSES = ["entregado", "ausente", "cancelado_ausencia"];
+
+/** The DNI as digits and sign only, so "12.345.678" and "12345678" are the same person. */
+function normalizeDni(value: string) {
+  return value.replace(/[.\s]/g, "");
+}
+
+function parseMarkReceiver(value: unknown): MarkReceiver | null {
+  if (!isObject(value)) return null;
+  if (value.kind === "authorized_adult") {
+    const adultId = positiveInt(value.adultId);
+    return adultId ? { kind: "authorized_adult", adultId } : null;
+  }
+  if (value.kind === "destination") {
+    const destinationId = positiveInt(value.destinationId);
+    return destinationId ? { kind: "destination", destinationId } : null;
+  }
+  if (value.kind === "other_adult") {
+    const name = boundedText(value.name, 200);
+    const dni = boundedText(value.dni, 20);
+    const authorizationId = value.authorizationId === undefined || value.authorizationId === null ? null : positiveInt(value.authorizationId);
+    if (!name || !dni || (value.authorizationId !== undefined && value.authorizationId !== null && !authorizationId)) return null;
+    return { kind: "other_adult", name, dni, authorizationId };
+  }
+  return value.kind === "base_staff" ? { kind: "base_staff" } : null;
+}
+
+/** A Marca as the phone sends it; only Entregado carries a Receptor, and it must. */
+function parseMark(body: unknown): MarkFields | { error: string } | null {
+  if (!isObject(body)) return null;
+  const id = typeof body.id === "string" && UUID_PATTERN.test(body.id) ? body.id.toLowerCase() : null;
+  const transferId = positiveInt(body.transferId);
+  const version = positiveInt(body.version);
+  const kind = MARK_KINDS.find((candidate) => candidate === body.kind);
+  const phoneTime = typeof body.phoneTime === "string" && /T.*(Z|[+-]\d{2}:\d{2})$/.test(body.phoneTime) ? new Date(body.phoneTime) : null;
+  const location = body.location === null ? null : isObject(body.location)
+    && typeof body.location.lat === "number" && Math.abs(body.location.lat) <= 90
+    && typeof body.location.lng === "number" && Math.abs(body.location.lng) <= 180
+    ? { lat: body.location.lat, lng: body.location.lng }
+    : undefined;
+  if (!id || !transferId || !version || !kind || !phoneTime || Number.isNaN(phoneTime.getTime()) || location === undefined) return null;
+  if (kind === "entregado" && (body.receiver === undefined || body.receiver === null)) return { error: RECEIVER_REQUIRED };
+  if (kind !== "entregado" && body.receiver !== undefined && body.receiver !== null) return null;
+  const receiver = kind === "entregado" ? parseMarkReceiver(body.receiver) : null;
+  if (kind === "entregado" && !receiver) return null;
+  return { id, transferId, kind, phoneTime: phoneTime.toISOString(), location, version, receiver };
+}
+
+const MARK_SELECT_SQL = `
+  SELECT m.id, m.client_id, m.transfer_id, pv.route_id, pv.version, m.kind, m.phone_time, m.server_time, m.latitude, m.longitude,
+         m.receiver_kind, m.receiver_adult_id, m.receiver_destination_id, m.receiver_name, m.receiver_dni, m.authorization_id, m.flags
+    FROM marks m JOIN plan_versions pv ON pv.id = m.plan_version_id
+`;
+
+function formatMarkReceiver(row: Record<string, unknown>): MarkReceiver | null {
+  switch (row.receiver_kind) {
+    case "authorized_adult": return { kind: "authorized_adult", adultId: Number(row.receiver_adult_id) };
+    case "destination": return { kind: "destination", destinationId: Number(row.receiver_destination_id) };
+    case "other_adult": return {
+      kind: "other_adult", name: String(row.receiver_name), dni: String(row.receiver_dni), authorizationId: nullableNumber(row.authorization_id),
+    };
+    case "base_staff": return { kind: "base_staff" };
+    default: return null;
+  }
+}
+
+function formatMark(row: Record<string, unknown>) {
+  return {
+    id: String(row.client_id),
+    transferId: Number(row.transfer_id),
+    routeId: Number(row.route_id),
+    version: Number(row.version),
+    kind: String(row.kind) as MarkKind,
+    phoneTime: new Date(String(row.phone_time)).toISOString(),
+    serverTime: new Date(String(row.server_time)).toISOString(),
+    location: row.latitude === null ? null : { lat: Number(row.latitude), lng: Number(row.longitude) },
+    receiver: formatMarkReceiver(row),
+    flags: row.flags as string[],
+  };
+}
+
+/** What a Marca says, in one key order: two sends of one UUID are the same Marca only when this is equal. */
+function markContent(mark: Omit<MarkFields, "id"> & { routeId: number }) {
+  return JSON.stringify([mark.transferId, mark.routeId, mark.version, mark.kind, mark.phoneTime, mark.location, mark.receiver]);
+}
+
+async function insertAlert(client: Queryable, alert: {
+  kind: string; transferId?: number | null; routeId?: number | null; markId?: number | null; details: unknown; dedupeKey?: string | null;
+}, createdAt: Date) {
+  await client.query(
+    `INSERT INTO alerts (kind, transfer_id, route_id, mark_id, details, dedupe_key, created_at) VALUES ($1, $2, $3, $4, $5, $6, $7)
+     ON CONFLICT (dedupe_key) DO NOTHING`,
+    [alert.kind, alert.transferId ?? null, alert.routeId ?? null, alert.markId ?? null, JSON.stringify(alert.details), alert.dedupeKey ?? null, createdAt],
+  );
+}
+
+/**
+ * An Autorización puntual with its state: used once a Marca names it (even after a revocation), revoked, expired once its
+ * Traslado closed unused, otherwise valid.
+ */
+const AUTHORIZATION_SELECT_SQL = `
+  SELECT oa.id, oa.transfer_id, oa.authorized_by_adult_id, a.name AS authorized_by_name, oa.called_phone, oa.name, oa.dni,
+         oa.recorded_by, oa.recorded_at, r.revoked_by, r.revoked_at,
+         CASE WHEN EXISTS (SELECT 1 FROM marks m WHERE m.authorization_id = oa.id) THEN 'used'
+              WHEN r.authorization_id IS NOT NULL THEN 'revoked'
+              WHEN t.status = ANY('{entregado,ausente,cancelado_ausencia}'::text[]) THEN 'expired'
+              ELSE 'valid' END AS status
+    FROM one_off_authorizations oa
+    JOIN authorized_adults a ON a.id = oa.authorized_by_adult_id
+    JOIN transfers t ON t.id = oa.transfer_id
+    LEFT JOIN one_off_authorization_revocations r ON r.authorization_id = oa.id
+`;
+
+function formatAuthorization(row: Record<string, unknown>) {
+  return {
+    id: Number(row.id),
+    transferId: Number(row.transfer_id),
+    authorizedBy: { adultId: Number(row.authorized_by_adult_id), name: String(row.authorized_by_name) },
+    calledPhone: String(row.called_phone),
+    name: String(row.name),
+    dni: String(row.dni),
+    recordedBy: Number(row.recorded_by),
+    recordedAt: new Date(String(row.recorded_at)).toISOString(),
+    revokedBy: nullableNumber(row.revoked_by),
+    revokedAt: row.revoked_at === null ? null : new Date(String(row.revoked_at)).toISOString(),
+    status: String(row.status),
+  };
+}
+
+// Fields that would say where the handover happens: an Autorización puntual never carries them.
+const PLACE_FIELDS = ["address", "place", "lat", "lng", "location", "destinationId"];
+const NOT_A_PLACE = "An Autorización puntual changes who receives, never where: a different place is a new Parada through a Versión del plan";
+
+function parseAuthorization(body: unknown): { legalGuardianId: number; call: "outgoing" | "incoming"; name: string; dni: string } | { error: string } | null {
+  if (!isObject(body)) return null;
+  if (PLACE_FIELDS.some((field) => field in body)) return { error: NOT_A_PLACE };
+  const legalGuardianId = positiveInt(body.legalGuardianId);
+  const name = boundedText(body.name, 200);
+  const dni = boundedText(body.dni, 20);
+  if (!legalGuardianId || !name || !dni || (body.call !== "outgoing" && body.call !== "incoming")) return null;
+  return { legalGuardianId, call: body.call, name, dni };
 }
 
 export function createApp({ db, routing, router, geocoder, solver, travelTime, config }: {
@@ -1530,6 +1699,146 @@ export function createApp({ db, routing, router, geocoder, solver, travelTime, c
     if (changed) return context.body(null, 204);
     const existing = await db.query("SELECT id FROM passengers WHERE id = $1", [id]) as QueryResult;
     return existing.rows.length ? context.body(null, 204) : context.json({ error: "Passenger not found" }, 404);
+  }
+
+  /** The Chofer's own Recorrido, or the refusal; `anyDay` drops the today-and-tomorrow scope for what already happened. */
+  async function ownRoute(context: Context, driverId: number, routeId: number, anyDay = false) {
+    const route = await db.query(
+      "SELECT r.driver_id, to_char(dp.plan_date, 'YYYY-MM-DD') AS date FROM routes r JOIN daily_plans dp ON dp.id = r.daily_plan_id WHERE r.id = $1",
+      [routeId],
+    ) as QueryResult;
+    const row = route.rows[0];
+    if (!row) return context.json({ error: "Recorrido not found" }, 404);
+    if (Number(row.driver_id) !== driverId) return context.json({ error: "This Recorrido belongs to another Chofer" }, 403);
+    if (!anyDay && !driverDays(now()).includes(String(row.date))) return context.json({ error: OUT_OF_DRIVER_SCOPE }, 403);
+    return row;
+  }
+
+  /**
+   * Stores a Marca the Chofer made from Recorrido `routeId`. It is never refused for being late or for a moved Traslado:
+   * it is flagged and the Oficina gets an alert. A resent UUID returns the stored Marca; with other content it keeps the
+   * first one and raises one conflict alert per different content.
+   */
+  async function recordMark(client: Queryable, chofer: { user: AuthenticatedUser; driverId: number }, routeId: number, fields: MarkFields) {
+    const seen = await client.query(
+      `SELECT pv.id, EXISTS (SELECT 1 FROM plan_version_transfers pvt WHERE pvt.plan_version_id = pv.id AND pvt.transfer_id = $3) AS served
+         FROM plan_versions pv WHERE pv.route_id = $1 AND pv.version = $2`,
+      [routeId, fields.version, fields.transferId],
+    ) as QueryResult;
+    if (!seen.rows[0]) throw new PlanningError(404, "Versión del plan not found");
+    if (!seen.rows[0].served) throw new PlanningError(404, "Traslado not found in this Versión del plan");
+    // Locking the Traslado serialises its Marcas with the Oficina's moves, Ausencias and revocations.
+    const transfer = (await client.query(
+      "SELECT passenger_id, daily_plan_id, direction FROM transfers WHERE id = $1 FOR UPDATE",
+      [fields.transferId],
+    ) as QueryResult).rows[0];
+    const content = markContent({ ...fields, routeId });
+    const stored = async () => (await client.query(`${MARK_SELECT_SQL} WHERE m.client_id = $1`, [fields.id]) as QueryResult).rows[0];
+    const resend = async (row: Record<string, unknown>) => {
+      const mark = formatMark(row);
+      if (markContent(mark) === content) return { status: 200 as const, mark };
+      const { id: _, ...sent } = fields;
+      await insertAlert(client, {
+        kind: "mark_conflict", transferId: mark.transferId, routeId: mark.routeId, markId: Number(row.id), details: { sent: { ...sent, routeId } },
+        dedupeKey: `mark_conflict:${row.id}:${createHash("sha256").update(content).digest("hex")}`,
+      }, now());
+      return { status: 200 as const, mark, conflict: true };
+    };
+    const existing = await stored();
+    if (existing) return await resend(existing);
+
+    const flags: string[] = [];
+    const placement = (await client.query(
+      `SELECT EXISTS (SELECT 1 FROM stops WHERE transfer_id = $1 AND route_id = $2) AS assigned,
+              EXISTS (SELECT 1 FROM plan_version_transfers pvt JOIN plan_versions pv ON pv.id = pvt.plan_version_id
+                       WHERE pvt.transfer_id = $1 AND pv.route_id = $2
+                         AND pv.version = (SELECT max(version) FROM plan_versions WHERE route_id = $2)) AS published`,
+      [fields.transferId, routeId],
+    ) as QueryResult).rows[0];
+    if (!placement.assigned || !placement.published) flags.push("transfer_moved");
+    const receiver = fields.receiver;
+    let authorized = false;
+    if (receiver?.kind === "authorized_adult") {
+      const adult = (await client.query("SELECT passenger_id, removed_at FROM authorized_adults WHERE id = $1", [receiver.adultId]) as QueryResult).rows[0];
+      if (!adult) throw new PlanningError(400, "Invalid request");
+      if (Number(adult.passenger_id) !== Number(transfer.passenger_id) || adult.removed_at !== null) flags.push("consent_mismatch");
+    } else if (receiver?.kind === "destination") {
+      const destination = await client.query("SELECT 1 FROM destinations WHERE id = $1", [receiver.destinationId]) as QueryResult;
+      if (!destination.rows[0]) throw new PlanningError(400, "Invalid request");
+    } else if (receiver?.kind === "other_adult") {
+      const consent = (await client.query("SELECT other_adult_allowed FROM consents WHERE passenger_id = $1", [transfer.passenger_id]) as QueryResult).rows[0];
+      let allowed = consent?.other_adult_allowed === true;
+      if (receiver.authorizationId !== null) {
+        const authorization = (await client.query(`${AUTHORIZATION_SELECT_SQL} WHERE oa.id = $1`, [receiver.authorizationId]) as QueryResult).rows[0];
+        if (!authorization) throw new PlanningError(400, "Invalid request");
+        const fits = Number(authorization.transfer_id) === fields.transferId && normalizeDni(String(authorization.dni)) === normalizeDni(receiver.dni);
+        // A revocation the phone had not seen keeps the Entregado, flagged as a conflict; a used or expired one does not count.
+        authorized = fits && (authorization.status === "valid" || authorization.status === "revoked");
+        if (authorized && authorization.status === "revoked") flags.push("authorization_revoked");
+        allowed ||= authorized;
+      }
+      if (!allowed) flags.push("consent_mismatch");
+    }
+    const serverTime = now();
+    const inserted = await client.query(
+      `INSERT INTO marks (client_id, transfer_id, plan_version_id, driver_id, session_id, kind, phone_time, server_time, latitude, longitude,
+                          receiver_kind, receiver_adult_id, receiver_destination_id, receiver_name, receiver_dni, authorization_id, flags)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17)
+       ON CONFLICT (client_id) DO NOTHING RETURNING id`,
+      [
+        fields.id, fields.transferId, Number(seen.rows[0].id), chofer.driverId, chofer.user.session_id, fields.kind, fields.phoneTime, serverTime,
+        fields.location?.lat ?? null, fields.location?.lng ?? null, receiver?.kind ?? null,
+        receiver?.kind === "authorized_adult" ? receiver.adultId : null,
+        receiver?.kind === "destination" ? receiver.destinationId : null,
+        receiver?.kind === "other_adult" ? receiver.name : null,
+        receiver?.kind === "other_adult" ? receiver.dni : null,
+        receiver?.kind === "other_adult" ? receiver.authorizationId : null,
+        JSON.stringify(flags),
+      ],
+    ) as QueryResult;
+    // Another request stored this UUID first.
+    if (!inserted.rows[0]) return await resend((await stored())!);
+    const markId = Number(inserted.rows[0].id);
+    // The Traslado follows its Marca with the latest phone time, so one that arrives late does not undo a newer one.
+    await client.query(
+      `UPDATE transfers t SET status = latest.kind
+         FROM (SELECT kind FROM marks WHERE transfer_id = $1 ORDER BY phone_time DESC, id DESC LIMIT 1) latest
+        WHERE t.id = $1`,
+      [fields.transferId],
+    );
+    const started = await client.query("UPDATE routes SET status = 'en_curso' WHERE id = $1 AND status = 'publicado' RETURNING id", [routeId]) as QueryResult;
+    if (started.rows[0]) {
+      await appendChange(client, chofer.user.id, "route", String(routeId), "started", { status: "publicado" }, { status: "en_curso" });
+    }
+    const alert = { transferId: fields.transferId, routeId, markId };
+    if (receiver?.kind === "other_adult") {
+      await insertAlert(client, { ...alert, kind: "other_adult_handover", details: { authorized, name: receiver.name, dni: receiver.dni } }, serverTime);
+    }
+    if (flags.length) await insertAlert(client, { ...alert, kind: "mark_flagged", details: { reasons: flags } }, serverTime);
+    if (fields.kind === "ausente" && transfer.direction === "entrada") {
+      // The Oficina decides about the rest of the day: nothing is cancelled here.
+      const remaining = await client.query(
+        `SELECT t.id, t.direction, to_char(t.target_time, 'HH24:MI') AS target_time, d.name AS destination_name, o.name AS origin_name
+           FROM transfers t JOIN destinations d ON d.id = t.destination_id LEFT JOIN destinations o ON o.id = t.origin_destination_id
+          WHERE t.passenger_id = $1 AND t.daily_plan_id = $2 AND t.id <> $3 AND t.status = 'planificado'
+          ORDER BY t.target_time, t.id`,
+        [transfer.passenger_id, transfer.daily_plan_id, fields.transferId],
+      ) as QueryResult;
+      await insertAlert(client, {
+        ...alert,
+        kind: "absent_on_entrada",
+        details: {
+          remaining: remaining.rows.map((row) => ({
+            transferId: Number(row.id),
+            direction: String(row.direction),
+            targetTime: String(row.target_time),
+            destinationName: String(row.destination_name),
+            originDestinationName: (row.origin_name as string | null) ?? null,
+          })),
+        },
+      }, serverTime);
+    }
+    return { status: 201 as const, mark: formatMark((await stored())!) };
   }
 
   async function listSessions(userId: number) {
@@ -2460,7 +2769,10 @@ export function createApp({ db, routing, router, geocoder, solver, travelTime, c
       if (!id) return context.json({ error: "Invalid request" }, 400);
       const passenger = await db.query("SELECT id FROM passengers WHERE id = $1", [id]) as QueryResult;
       if (!passenger.rows[0]) return context.json({ error: "Passenger not found" }, 404);
-      const adults = await db.query(`${AUTHORIZED_ADULT_SELECT_SQL} WHERE passenger_id = $1 ORDER BY lower(name), id`, [id]) as QueryResult;
+      const adults = await db.query(
+        `${AUTHORIZED_ADULT_SELECT_SQL} WHERE passenger_id = $1 AND removed_at IS NULL ORDER BY lower(name), id`,
+        [id],
+      ) as QueryResult;
       return context.json({ adults: adults.rows.map(formatAuthorizedAdult) });
     })
     .post("/passengers/:id/authorized-adults", async (context) => {
@@ -2491,7 +2803,7 @@ export function createApp({ db, routing, router, geocoder, solver, travelTime, c
       if (!id || !fields) return context.json({ error: "Invalid request" }, 400);
       try {
         const adult = await inTransaction(db, async (client) => {
-          const locked = await client.query(`${AUTHORIZED_ADULT_SELECT_SQL} WHERE id = $1 FOR UPDATE`, [id]) as QueryResult;
+          const locked = await client.query(`${AUTHORIZED_ADULT_SELECT_SQL} WHERE id = $1 AND removed_at IS NULL FOR UPDATE`, [id]) as QueryResult;
           if (!locked.rows[0]) throw new PlanningError(404, "Adulto autorizado not found");
           const { id: _, passengerId, ...before } = formatAuthorizedAdult(locked.rows[0]);
           if (before.legalGuardian && !fields.legalGuardian && await signedConsent(client, id)) throw new PlanningError(409, SIGNER_MUST_STAY);
@@ -2514,10 +2826,11 @@ export function createApp({ db, routing, router, geocoder, solver, travelTime, c
       if (!id) return context.json({ error: "Invalid request" }, 400);
       try {
         await inTransaction(db, async (client) => {
-          const locked = await client.query(`${AUTHORIZED_ADULT_SELECT_SQL} WHERE id = $1 FOR UPDATE`, [id]) as QueryResult;
+          const locked = await client.query(`${AUTHORIZED_ADULT_SELECT_SQL} WHERE id = $1 AND removed_at IS NULL FOR UPDATE`, [id]) as QueryResult;
           if (!locked.rows[0]) throw new PlanningError(404, "Adulto autorizado not found");
           if (await signedConsent(client, id)) throw new PlanningError(409, SIGNER_MUST_STAY);
-          await client.query("DELETE FROM authorized_adults WHERE id = $1", [id]);
+          // A logical delete: a Marca or an Autorización puntual may still name this adult.
+          await client.query("UPDATE authorized_adults SET removed_at = $2 WHERE id = $1", [id, now()]);
           const { id: _, ...before } = formatAuthorizedAdult(locked.rows[0]);
           await appendChange(client, actor.id, "authorized_adult", String(id), "removed", before, null);
         });
@@ -2549,7 +2862,7 @@ export function createApp({ db, routing, router, geocoder, solver, travelTime, c
           if (!passenger.rows[0]) throw new PlanningError(404, "Passenger not found");
           // FOR SHARE keeps the signer from losing the Responsable legal flag before this commits.
           const signer = await client.query(
-            "SELECT legal_guardian FROM authorized_adults WHERE id = $1 AND passenger_id = $2 FOR SHARE",
+            "SELECT legal_guardian FROM authorized_adults WHERE id = $1 AND passenger_id = $2 AND removed_at IS NULL FOR SHARE",
             [fields.signedByAdultId, id],
           ) as QueryResult;
           if (signer.rows[0]?.legal_guardian !== true) {
@@ -3140,6 +3453,209 @@ export function createApp({ db, routing, router, geocoder, solver, travelTime, c
         acknowledgement: { routeId: id, version, acknowledgedAt: new Date(stored.acknowledged_at as string | Date).toISOString() },
         latestVersion: Number(latest.rows[0].version),
       }, inserted.rows[0] ? 201 : 200);
+    })
+    // Starting a published Recorrido moves it to En curso; starting it again changes nothing.
+    .post("/driver/routes/:id/start", async (context) => {
+      const chofer = await requireDriver(context);
+      if (chofer instanceof Response) return chofer;
+      const id = parseId(context.req.param("id"));
+      if (!id) return context.json({ error: "Invalid request" }, 400);
+      const route = await ownRoute(context, chofer.driverId, id);
+      if (route instanceof Response) return route;
+      try {
+        await inTransaction(db, async (client) => {
+          const status = (await client.query("SELECT status FROM routes WHERE id = $1 FOR UPDATE", [id]) as QueryResult).rows[0].status;
+          if (status === "borrador") throw new PlanningError(409, "A Recorrido can be started once it is published");
+          if (status === "cerrado") throw new PlanningError(409, "This Recorrido is closed");
+          if (status === "publicado") {
+            await client.query("UPDATE routes SET status = 'en_curso' WHERE id = $1", [id]);
+            await appendChange(client, chofer.user.id, "route", String(id), "started", { status }, { status: "en_curso" });
+          }
+        });
+        return context.json({ route: { routeId: id, status: "en_curso" } });
+      } catch (error) {
+        return planningFailure(context, error);
+      }
+    })
+    // A Marca Subió, Ausente or Entregado, idempotent by the phone's UUID; see recordMark.
+    .post("/driver/routes/:id/marks", async (context) => {
+      const chofer = await requireDriver(context);
+      if (chofer instanceof Response) return chofer;
+      const id = parseId(context.req.param("id"));
+      const fields = parseMark(await context.req.json().catch(() => null));
+      if (!id || !fields) return context.json({ error: "Invalid request" }, 400);
+      if ("error" in fields) return context.json({ error: fields.error }, 400);
+      // A late Marca is still accepted, so the today-and-tomorrow scope does not apply here.
+      const route = await ownRoute(context, chofer.driverId, id, true);
+      if (route instanceof Response) return route;
+      try {
+        const { status, ...result } = await inTransaction(db, async (client) => await recordMark(client, chofer, id, fields));
+        return context.json(result, status);
+      } catch (error) {
+        return planningFailure(context, error);
+      }
+    })
+    // What the Chofer needs to hand the Pasajero over at home: the Consentimiento's rule, the Adultos autorizados, the valid
+    // Autorizaciones puntuales and the base. "Buscar autorización" calls it again to download a newly recorded one.
+    .get("/driver/routes/:id/transfers/:transferId/handover", async (context) => {
+      const chofer = await requireDriver(context);
+      if (chofer instanceof Response) return chofer;
+      const id = parseId(context.req.param("id"));
+      const transferId = parseId(context.req.param("transferId"));
+      if (!id || !transferId) return context.json({ error: "Invalid request" }, 400);
+      const route = await ownRoute(context, chofer.driverId, id);
+      if (route instanceof Response) return route;
+      const served = await db.query(
+        `SELECT t.passenger_id FROM plan_version_transfers pvt JOIN transfers t ON t.id = pvt.transfer_id
+          WHERE pvt.transfer_id = $2 AND pvt.plan_version_id = (SELECT id FROM plan_versions WHERE route_id = $1 ORDER BY version DESC LIMIT 1)`,
+        [id, transferId],
+      ) as QueryResult;
+      const passengerId = served.rows[0]?.passenger_id;
+      if (passengerId === undefined) return context.json({ error: "Traslado not found in this Recorrido" }, 404);
+      const consent = await db.query("SELECT other_adult_allowed FROM consents WHERE passenger_id = $1", [passengerId]) as QueryResult;
+      const adults = await db.query(
+        "SELECT id, name, relation FROM authorized_adults WHERE passenger_id = $1 AND removed_at IS NULL ORDER BY lower(name), id",
+        [passengerId],
+      ) as QueryResult;
+      const authorizations = await db.query(`${AUTHORIZATION_SELECT_SQL} WHERE oa.transfer_id = $1 ORDER BY oa.id`, [transferId]) as QueryResult;
+      return context.json({
+        transferId,
+        otherAdultAllowed: consent.rows[0]?.other_adult_allowed === true,
+        adults: adults.rows.map((row) => ({ id: Number(row.id), name: String(row.name), relation: String(row.relation) })),
+        authorizations: authorizations.rows.filter((row) => row.status === "valid")
+          .map((row) => ({ id: Number(row.id), name: String(row.name), dni: String(row.dni) })),
+        base: config.baseAddress ? { address: config.baseAddress } : null,
+      });
+    })
+    .get("/transfers/:id/authorizations", async (context) => {
+      const actor = await requireOffice(context);
+      if (actor instanceof Response) return actor;
+      const id = parseId(context.req.param("id"));
+      if (!id) return context.json({ error: "Invalid request" }, 400);
+      const transfer = await db.query("SELECT id FROM transfers WHERE id = $1", [id]) as QueryResult;
+      if (!transfer.rows[0]) return context.json({ error: "Traslado not found" }, 404);
+      const result = await db.query(`${AUTHORIZATION_SELECT_SQL} WHERE oa.transfer_id = $1 ORDER BY oa.id`, [id]) as QueryResult;
+      return context.json({ authorizations: result.rows.map(formatAuthorization) });
+    })
+    // Records an Autorización puntual on a salida: only a Responsable legal of the Pasajero gives it, on a call the Oficina makes.
+    .post("/transfers/:id/authorizations", async (context) => {
+      const actor = await requireOffice(context);
+      if (actor instanceof Response) return actor;
+      const id = parseId(context.req.param("id"));
+      const fields = parseAuthorization(await context.req.json().catch(() => null));
+      if (!id || !fields) return context.json({ error: "Invalid request" }, 400);
+      if ("error" in fields) return context.json({ error: fields.error }, 400);
+      try {
+        const authorization = await inTransaction(db, async (client) => {
+          const transfer = (await client.query(
+            "SELECT passenger_id, direction, status FROM transfers WHERE id = $1 FOR UPDATE",
+            [id],
+          ) as QueryResult).rows[0];
+          if (!transfer) throw new PlanningError(404, "Traslado not found");
+          if (transfer.direction !== "salida") {
+            throw new PlanningError(409, "An Autorización puntual is for a handover at home, and only a salida ends there");
+          }
+          if (CLOSED_TRANSFER_STATUSES.includes(String(transfer.status))) {
+            throw new PlanningError(409, "The Traslado is closed: an Autorización puntual expires when its Traslado closes");
+          }
+          const consent = await client.query("SELECT other_adult_allowed FROM consents WHERE passenger_id = $1", [transfer.passenger_id]) as QueryResult;
+          if (consent.rows[0]?.other_adult_allowed === true) {
+            throw new PlanningError(409, "The Consentimiento already allows another adult: no Autorización puntual is needed");
+          }
+          const guardian = (await client.query(
+            "SELECT passenger_id, phone, legal_guardian FROM authorized_adults WHERE id = $1 AND removed_at IS NULL FOR SHARE",
+            [fields.legalGuardianId],
+          ) as QueryResult).rows[0];
+          if (!guardian || Number(guardian.passenger_id) !== Number(transfer.passenger_id) || guardian.legal_guardian !== true) {
+            throw new PlanningError(409, "Only a Responsable legal of this Pasajero can give an Autorización puntual");
+          }
+          if (fields.call !== "outgoing") {
+            throw new PlanningError(409, "Only a call the Oficina makes to the Responsable legal's registered phone counts, not an incoming call");
+          }
+          const inserted = await client.query(
+            `INSERT INTO one_off_authorizations (transfer_id, authorized_by_adult_id, called_phone, name, dni, recorded_by, recorded_at)
+             VALUES ($1, $2, $3, $4, $5, $6, $7) RETURNING id`,
+            [id, fields.legalGuardianId, guardian.phone, fields.name, fields.dni, actor.id, now()],
+          ) as QueryResult;
+          const authorizationId = Number(inserted.rows[0].id);
+          await appendChange(client, actor.id, "one_off_authorization", String(authorizationId), "recorded", null, {
+            transferId: id, legalGuardianId: fields.legalGuardianId, calledPhone: guardian.phone, name: fields.name, dni: fields.dni,
+          });
+          return formatAuthorization((await client.query(`${AUTHORIZATION_SELECT_SQL} WHERE oa.id = $1`, [authorizationId]) as QueryResult).rows[0]);
+        });
+        return context.json({ authorization }, 201);
+      } catch (error) {
+        return planningFailure(context, error);
+      }
+    })
+    // Revokes an unused Autorización puntual. One already used keeps its Entregado and raises a conflict alert instead.
+    .post("/authorizations/:id/revocation", async (context) => {
+      const actor = await requireOffice(context);
+      if (actor instanceof Response) return actor;
+      const id = parseId(context.req.param("id"));
+      if (!id) return context.json({ error: "Invalid request" }, 400);
+      try {
+        const result = await inTransaction(db, async (client) => {
+          const target = (await client.query("SELECT transfer_id FROM one_off_authorizations WHERE id = $1", [id]) as QueryResult).rows[0];
+          if (!target) throw new PlanningError(404, "Autorización puntual not found");
+          // The Traslado's lock orders this against a Marca that would use the authorization.
+          await client.query("SELECT id FROM transfers WHERE id = $1 FOR UPDATE", [target.transfer_id]);
+          const load = async () => formatAuthorization((await client.query(`${AUTHORIZATION_SELECT_SQL} WHERE oa.id = $1`, [id]) as QueryResult).rows[0]);
+          const current = await load();
+          if (current.status === "revoked") return { status: 200 as const, body: { authorization: current } };
+          if (current.status === "expired") throw new PlanningError(409, "The Autorización puntual expired when its Traslado closed");
+          if (current.status === "used") {
+            const use = (await client.query(
+              "SELECT m.id, pv.route_id FROM marks m JOIN plan_versions pv ON pv.id = m.plan_version_id WHERE m.authorization_id = $1 ORDER BY m.id LIMIT 1",
+              [id],
+            ) as QueryResult).rows[0];
+            await insertAlert(client, {
+              kind: "authorization_conflict", transferId: current.transferId, routeId: Number(use.route_id), markId: Number(use.id),
+              details: { authorizationId: id, name: current.name }, dedupeKey: `authorization_conflict:${id}`,
+            }, now());
+            return {
+              status: 409 as const,
+              body: { error: "The Autorización puntual was already used: the Entregado stands and the conflict is in the alert inbox" },
+            };
+          }
+          await client.query(
+            "INSERT INTO one_off_authorization_revocations (authorization_id, revoked_by, revoked_at) VALUES ($1, $2, $3)",
+            [id, actor.id, now()],
+          );
+          await appendChange(client, actor.id, "one_off_authorization", String(id), "revoked", { status: current.status }, { status: "revoked" });
+          return { status: 201 as const, body: { authorization: await load() } };
+        });
+        return context.json(result.body, result.status);
+      } catch (error) {
+        return planningFailure(context, error);
+      }
+    })
+    // The Oficina's alert inbox, newest first; the office app polls it.
+    .get("/alerts", async (context) => {
+      const actor = await requireOffice(context);
+      if (actor instanceof Response) return actor;
+      const result = await db.query(
+        `SELECT al.id, al.kind, al.created_at, al.transfer_id, al.route_id, m.client_id AS mark_id, p.name AS passenger_name,
+                dr.name AS driver_name, al.details
+           FROM alerts al
+           LEFT JOIN marks m ON m.id = al.mark_id
+           LEFT JOIN transfers t ON t.id = al.transfer_id LEFT JOIN passengers p ON p.id = t.passenger_id
+           LEFT JOIN routes r ON r.id = al.route_id LEFT JOIN drivers dr ON dr.id = r.driver_id
+          ORDER BY al.id DESC LIMIT 200`,
+      ) as QueryResult;
+      return context.json({
+        alerts: result.rows.map((row) => ({
+          id: Number(row.id),
+          kind: String(row.kind),
+          createdAt: new Date(String(row.created_at)).toISOString(),
+          transferId: nullableNumber(row.transfer_id),
+          routeId: nullableNumber(row.route_id),
+          markId: (row.mark_id as string | null) ?? null,
+          passengerName: (row.passenger_name as string | null) ?? null,
+          driverName: (row.driver_name as string | null) ?? null,
+          details: row.details as Record<string, unknown>,
+        })),
+      });
     })
     .post("/geocode", async (context) => {
       const user = await requireOffice(context);
