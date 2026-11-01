@@ -37,6 +37,7 @@ const REASONS: Record<string, string> = {
   transfer_moved: "the Traslado had been moved",
   consent_mismatch: "the Receptor does not match the Consentimiento",
   authorization_revoked: "the Autorización puntual had been revoked",
+  route_closed: "the Recorrido was already closed",
 };
 
 type OpenTransfer = { transferId: number; passengerName: string; status: "planificado" | "subio" };

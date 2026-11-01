@@ -150,6 +150,11 @@ describe("Marcas in the driver app", () => {
       + "<li>Pasajero Sintético: on board, mark Entregado</li>"
       + "<li>Pasajera Sintética: not marked, mark Subió or Ausente, or call the Oficina to reassign or cancel it</li></ul></div>",
     );
+    // Once the Chofer marks a listed Traslado, the list shows its state now and drops it when it is resolved.
+    const progressed = renderToStaticMarkup(<RouteView route={route("en_curso", [
+      { ...stop("dropoff", "entregado", null), transferId: 3 }, { ...stop("pickup", "subio", 4), transferId: 4 },
+    ])} sending={false} onAcknowledge={() => undefined} marking={refused} />);
+    expect(progressed).toContain("<ul><li>Pasajera Sintética: on board, mark Entregado</li></ul>");
     const closed = renderToStaticMarkup(<RouteView route={route("cerrado", [])} sending={false} onAcknowledge={() => undefined} marking={marking()} />);
     expect(closed).toContain("<p>Recorrido closed.</p>");
     expect(closed).not.toContain("Close Recorrido");

@@ -151,6 +151,20 @@ describe("Closing a Recorrido", () => {
     const { routeId, transfers: [atBase], close, send } = await startedRoute("base", [{ direction: "salida", targetTime: "13:00" }]);
     await send(atBase.transferId, "subio");
     await send(atBase.transferId, "entregado", { receiver: { kind: "base_staff" } });
+    expect(await rows("SELECT kind, receiver_kind FROM marks WHERE transfer_id = $1 ORDER BY id", [atBase.transferId]))
+      .toEqual([{ kind: "subio", receiver_kind: null }, { kind: "entregado", receiver_kind: "base_staff" }]);
+    expect((await rows("SELECT status FROM transfers WHERE id = $1", [atBase.transferId]))[0].status).toBe("entregado");
     expect(await close(200)).toEqual({ route: { routeId, status: "cerrado" } });
+  });
+
+  it("rule 1: flags a Subió that reaches a closed Recorrido and alerts the Oficina", async () => {
+    const { driver, routeId, transfers: [absent], close, send } = await startedRoute("late-board", [{ direction: "entrada", targetTime: "08:00" }]);
+    await send(absent.transferId, "ausente");
+    await close(200);
+    const late = await answer(mark(driver.cookie, routeId, markBody(absent.transferId, "subio")), 201);
+    expect(late.mark.flags).toEqual(["route_closed"]);
+    expect(await rows("SELECT kind, transfer_id, route_id, details FROM alerts WHERE kind = 'mark_flagged'")).toEqual([
+      { kind: "mark_flagged", transfer_id: absent.transferId, route_id: routeId, details: { reasons: ["route_closed"] } },
+    ]);
   });
 });

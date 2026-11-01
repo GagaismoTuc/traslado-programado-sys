@@ -135,6 +135,14 @@ export function StopActions({ route, stop, marking }: { route: DriverRoute; stop
   </>;
 }
 
+/** The refused list with each Traslado's state now, without those resolved since; one the app does not show stays as listed. */
+export function stillOpen(route: DriverRoute, transfers: OpenTransfer[]): OpenTransfer[] {
+  return transfers.flatMap((transfer) => {
+    const status = route.stops.find((stop) => stop.transferId === transfer.transferId)?.transferStatus ?? transfer.status;
+    return status === "planificado" || status === "subio" ? [{ ...transfer, status }] : [];
+  });
+}
+
 /** What the Chofer has to resolve before the Recorrido can close. */
 export function CloseRefusal({ transfers }: { transfers: OpenTransfer[] }) {
   return <div role="alert">
@@ -162,7 +170,7 @@ export function RouteView({ route, sending, onAcknowledge, marking }: {
     {marking && route.status === "en_curso" && <>
       <p>Recorrido en curso.</p>
       <button type="button" disabled={marking.sending} onClick={() => marking.onClose(route)}>Close Recorrido</button>
-      {marking.refusedClose?.routeId === route.routeId && <CloseRefusal transfers={marking.refusedClose.transfers} />}
+      {marking.refusedClose?.routeId === route.routeId && <CloseRefusal transfers={stillOpen(route, marking.refusedClose.transfers)} />}
     </>}
     {marking && route.status === "cerrado" && <p>Recorrido closed.</p>}
     <ol>{route.stops.map((stop) => <li key={stop.position}>

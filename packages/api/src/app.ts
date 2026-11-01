@@ -1921,6 +1921,9 @@ export function createApp({ db, routing, router, geocoder, solver, travelTime, c
       [fields.transferId, routeId],
     ) as QueryResult).rows[0];
     if (!placement.assigned || !placement.published) flags.push("transfer_moved");
+    // The close holds this Traslado's lock, so a Marca that waited on it sees the Recorrido Cerrado and the Oficina is told.
+    const routeState = (await client.query("SELECT status FROM routes WHERE id = $1", [routeId]) as QueryResult).rows[0];
+    if (routeState?.status === "cerrado") flags.push("route_closed");
     const receiver = fields.receiver;
     let authorized = false;
     if (receiver?.kind === "authorized_adult") {

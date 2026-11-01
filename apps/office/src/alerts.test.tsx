@@ -77,6 +77,8 @@ describe("Oficina alert inbox", () => {
       "<ul><li><time dateTime=\"2026-10-23T12:00:00.000Z\">09:00</time> Chofer Sintético tried to close Recorrido 9 with Traslados still open:"
       + "<ul><li>Pasajero Sintético: on board without Entregado</li><li>Pasajera Sintética: not marked</li></ul></li></ul>",
     );
+    expect(renderToStaticMarkup(<AlertList alerts={[alert("mark_flagged", { reasons: ["route_closed"] })]} />))
+      .toContain("Marca accepted with a warning for Pasajero Sintético (Chofer Sintético): the Recorrido was already closed");
   });
 });
 
