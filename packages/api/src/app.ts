@@ -945,12 +945,13 @@ function lngLat(lat: unknown, lng: unknown): LngLat {
  * or after a gap longer than routeGapMinutes; otherwise the previous Recorrido's last Parada when it used the same
  * Vehículo, else the Oficina must set it. Default end: home for the Chofer's last Recorrido of the day, open otherwise.
  * "Previous" is the same Chofer's Recorrido with the latest earlier start; its planned end bounds this one's departure.
+ * When the Oficina set the previous one to end at home, the chain starts there instead of at its last Parada.
  */
 async function resolveRouteEnds(client: Queryable, routeId: number, route: Record<string, unknown>, routeGapMinutes: number) {
   const home = lngLat(route.home_latitude, route.home_longitude);
   const startTime = String(route.start_time);
   const previousResult = await client.query(
-    `SELECT id, vehicle_id, to_char(end_time, 'HH24:MI') AS end_time FROM routes
+    `SELECT id, vehicle_id, end_kind, to_char(end_time, 'HH24:MI') AS end_time FROM routes
       WHERE daily_plan_id = $1 AND driver_id = $2 AND id <> $3 AND (start_time < $4 OR (start_time = $4 AND id < $3))
       ORDER BY start_time DESC, id DESC LIMIT 1`,
     [route.daily_plan_id, route.driver_id, routeId, startTime],
@@ -968,7 +969,8 @@ async function resolveRouteEnds(client: Queryable, routeId: number, route: Recor
       ? minutesOf(String(previous.end_time))
       : Math.ceil(Number(last.planned_end));
   }
-  const chained = last ? lngLat(last.lat, last.lng) : null;
+  const previousStop = last ? lngLat(last.lat, last.lng) : null;
+  const chained = previousStop && previous!.end_kind === "home" ? home : previousStop;
 
   let start: LngLat;
   if (route.start_kind === "home") start = home;
@@ -981,7 +983,7 @@ async function resolveRouteEnds(client: Queryable, routeId: number, route: Recor
   else throw new PlanningError(409, "Set where this Recorrido starts: the previous Recorrido has another Vehículo or no Paradas");
 
   const endKind = route.end_kind ?? (nextResult.rows.length ? "open" : "home");
-  return { start, end: endKind === "home" ? home : null, previousEnd, previousStop: chained };
+  return { start, end: endKind === "home" ? home : null, previousEnd, previousStop, previousEndPoint: chained };
 }
 
 function stopLocation(row: Record<string, unknown>, kind: "pickup" | "dropoff"): LngLat {
@@ -2252,12 +2254,15 @@ export function createApp({ db, routing, geocoder, solver, travelTime, config }:
           const ends = await resolveRouteEnds(db, id, route, routeGapMinutes);
           const startMinutes = minutesOf(String(route.start_time));
           try {
-            // Not before the previous Recorrido's planned end plus the drive from its last Parada to this start.
+            // Not before the previous Recorrido's planned end plus the drive from its last Parada to where it ends
+            // and from there to this start.
             let notBeforeMinutes = ends.previousEnd;
-            if (notBeforeMinutes !== undefined && ends.previousStop
-              && (ends.previousStop[0] !== ends.start[0] || ends.previousStop[1] !== ends.start[1])) {
-              const drive = await travelTime(ends.previousStop, ends.start);
-              notBeforeMinutes += Math.ceil(drive / 60 / speedFactorAt(plannerSettings.speedFactors, startMinutes));
+            if (notBeforeMinutes !== undefined && ends.previousStop && ends.previousEndPoint) {
+              for (const [from, to] of [[ends.previousStop, ends.previousEndPoint], [ends.previousEndPoint, ends.start]]) {
+                if (from[0] === to[0] && from[1] === to[1]) continue;
+                const drive = await travelTime(from, to);
+                notBeforeMinutes += Math.ceil(drive / 60 / speedFactorAt(plannerSettings.speedFactors, startMinutes));
+              }
             }
             plan = await planRoute({
               transfers: rows.map(toPlanTransfer),

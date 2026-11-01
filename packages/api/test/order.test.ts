@@ -418,6 +418,37 @@ describe("the engine orders a Recorrido", () => {
     expect((await changes("route")).length).toBe(logged);
   });
 
+  it("Rule 8: starts from where the previous Recorrido is set to end, not before its planned end plus the drive there", async () => {
+    const engine = fakeEngine();
+    const app = appWith(engine.solver);
+    const w = await world("regla8-fin", app);
+    const previous = await w.route({ startTime: "07:00", endTime: "08:00" });
+    await w.transfer(previous, { targetTime: "08:00" });
+    const routeId = await w.route({ startTime: "08:30", endTime: "09:30" });
+    await w.transfer(routeId, { targetTime: "09:30" });
+    // The previous Recorrido's last Parada is at the school, but the Oficina sends the Chofer home after it.
+    await w.call(`/routes/${previous}`, "PATCH", { endKind: "home" }, 200);
+    await w.order(previous);
+    expect(engine.problems.at(-1)!.vehicles[0].end).toEqual(HOME_OF_DRIVER);
+
+    // Planned end 08:05 (08:00 + 5 min of drop-off) plus 10 min from the school to home.
+    await w.call(`/routes/${routeId}`, "PATCH", { startKind: "previous" }, 200);
+    await w.order(routeId);
+    expect(engine.problems.at(-1)!.vehicles[0]).toMatchObject({ start: HOME_OF_DRIVER, time_window: [seconds("08:15"), expect.any(Number)] });
+    expect(drives.at(-1)).toEqual([SCHOOL, HOME_OF_DRIVER]);
+
+    // The default chain with the same Vehículo follows the same end.
+    await w.call(`/routes/${routeId}`, "PATCH", { startKind: null }, 200);
+    await w.order(routeId);
+    expect(engine.problems.at(-1)!.vehicles[0]).toMatchObject({ start: HOME_OF_DRIVER, time_window: [seconds("08:15"), expect.any(Number)] });
+
+    // Starting at a point adds the drive from home to it as well.
+    await w.call(`/routes/${routeId}`, "PATCH", { startKind: "point", startLat: -26.81, startLng: -65.23 }, 200);
+    await w.order(routeId);
+    expect(engine.problems.at(-1)!.vehicles[0]).toMatchObject({ start: [-65.23, -26.81], time_window: [seconds("08:25"), expect.any(Number)] });
+    expect(drives.slice(-2)).toEqual([[SCHOOL, HOME_OF_DRIVER], [HOME_OF_DRIVER, [-65.23, -26.81]]]);
+  });
+
   it("Rule 9: sends seats and the Asiento delantero as capacity, with each Acompañante taking a seat", async () => {
     const engine = fakeEngine();
     const w = await world("regla9", appWith(engine.solver), 5);
