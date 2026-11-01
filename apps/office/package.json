@@ -10,6 +10,7 @@
   },
   "dependencies": {
     "@traslado/api": "workspace:*",
+    "@traslado/shared": "workspace:*",
     "hono": "4.13.13",
     "maplibre-gl": "6.15.0",
     "qrcode-generator": "2.0.4",

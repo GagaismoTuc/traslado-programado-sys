@@ -206,6 +206,19 @@ describe("Marcas in the driver app", () => {
     expect(buttons(view).map((item) => item.text)).toEqual(["Send now", "Subió", "Ausente", "Send now"]);
   });
 
+  it("targets the newest queued Marca when phone times tie", () => {
+    const time = new Date("2026-10-23T12:00:00.000Z");
+    const first = newMark({ transferId: 3, kind: "subio", location: null, version: 2 }, time, "00000000-0000-4000-8000-000000000001");
+    const last = newMark({ transferId: 3, kind: "ausente", location: null, version: 2 }, time, "ffffffff-ffff-4000-8000-000000000002");
+    const items = [first, last].map((mark) => ({
+      id: mark.id, routeId: 9, mark, state: "pending" as const, confirmedAt: null, note: null,
+    }));
+    const actionsFor = marking({ marks: latestMarks(items), planFetchedAt: null });
+    const entrada = route("en_curso", [stop("pickup", "planificado", 4), stop("dropoff", "planificado", 4)]);
+    press(<RouteView route={entrada} sending={false} onAcknowledge={() => undefined} marking={actionsFor} />, "Deshacer");
+    expect(actionsFor.onUndo).toHaveBeenCalledWith(entrada, last);
+  });
+
   it("keeps a Marca's UUID and phone time to send it again after a failure", async () => {
     const mark = newMark({ transferId: 3, kind: "subio", location: null, version: 2 }, new Date("2026-10-23T12:00:00.000Z"), "00000000-0000-4000-8000-000000000001");
     expect(mark).toEqual({ id: "00000000-0000-4000-8000-000000000001", phoneTime: "2026-10-23T12:00:00.000Z", transferId: 3, kind: "subio", location: null, version: 2 });

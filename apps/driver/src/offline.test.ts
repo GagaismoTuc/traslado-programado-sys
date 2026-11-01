@@ -95,6 +95,41 @@ describe("Marca queue on the phone", () => {
     expect(latestMarks([...marks.values()])[1].mark).toEqual(mark(1));
   });
 
+  it("takes as the newest Marca of a Traslado the one the server stores last, also when phone times tie", async () => {
+    const { store, marks } = memoryStore();
+    const time = new Date("2026-10-23T12:00:00.000Z");
+    const tied = (id: string, kind: Mark["kind"]) => newMark({ transferId: 3, kind, location: null, version: 1 }, time, id);
+    const high = tied("ffffffff-ffff-4000-8000-000000000001", "subio");
+    const low = tied("00000000-0000-4000-8000-000000000002", "ausente");
+    const sent: string[] = [];
+    const queue = markQueue(store, async (_routeId, body) => {
+      sent.push(body.id);
+      return stored(body);
+    });
+    await queue.add(9, high);
+    await queue.flush();
+    // Saved later with the same phone time, it reaches the server after the confirmed one, whatever its UUID.
+    await queue.add(9, low);
+    expect(latestMarks([...marks.values()])[3].mark).toEqual(low);
+    await queue.flush();
+    expect(sent).toEqual([high.id, low.id]);
+    expect(latestMarks([...marks.values()])[3].mark).toEqual(low);
+
+    // Two pending ties go out in one round: the last one sent is the newest.
+    const other = memoryStore();
+    const order: string[] = [];
+    const round = markQueue(other.store, async (_routeId, body) => {
+      order.push(body.id);
+      return stored(body);
+    });
+    await round.add(9, low);
+    await round.add(9, high);
+    expect(latestMarks([...other.marks.values()])[3].id).toBe(high.id);
+    await round.flush();
+    expect(order).toEqual([low.id, high.id]);
+    expect(latestMarks([...other.marks.values()])[3].id).toBe(order.at(-1));
+  });
+
   it("rule 1: a 401 when the app opens or loads the plan keeps the queue on an expired session and wipes it only on a revoked device", async () => {
     const { store, marks, getPlan } = memoryStore();
     await markQueue(store, async () => json({}, 500)).add(9, mark(1));

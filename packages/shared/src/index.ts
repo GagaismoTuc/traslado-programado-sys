@@ -405,3 +405,12 @@ export function validateRoute(
 export function isRouteValid(violations: RouteViolation[]): boolean {
   return violations.length === 0;
 }
+
+/**
+ * The order the server keeps a Traslado's Marcas in, oldest first: by phone time, and Marcas with the same phone time in
+ * the order they reached the server (the API's `ORDER BY phone_time, id`). The latest Marca is the last one in this order.
+ * `arrival` compares two Marcas by when they reached the server, or will reach it.
+ */
+export function markOrder<T>(phoneTime: (item: T) => string, arrival: (a: T, b: T) => number) {
+  return (a: T, b: T) => Date.parse(phoneTime(a)) - Date.parse(phoneTime(b)) || arrival(a, b);
+}
