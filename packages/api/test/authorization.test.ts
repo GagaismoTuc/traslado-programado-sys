@@ -21,6 +21,7 @@ const authorizationEvidence = new Map([
   ["DELETE /users/:id/sessions/:sessionId", "lists and revokes a user's device sessions only for the Oficina and only by a matching user and session"],
   ["GET /destinations", "allows only an authenticated Oficina user to create or list Destinos"],
   ["POST /destinations", "allows only an authenticated Oficina user to create or list Destinos"],
+  ["PATCH /destinations/:id", "lets only the Oficina order a Recorrido or edit a Destino's Tolerancia de llegada"],
   ["GET /vehicle-features", "lets only Oficina create, list and edit Adaptaciones with unique names and change log entries"],
   ["POST /vehicle-features", "lets only Oficina create, list and edit Adaptaciones with unique names and change log entries"],
   ["PATCH /vehicle-features/:id", "lets only Oficina create, list and edit Adaptaciones with unique names and change log entries"],
@@ -45,6 +46,7 @@ const authorizationEvidence = new Map([
   ["POST /daily-plans/:date/routes", "lets only the Oficina read and write the Plan diario"],
   ["PATCH /routes/:id", "lets only the Oficina read and write the Plan diario"],
   ["PATCH /routes/:id/stops", "lets only the Oficina read and write the Plan diario"],
+  ["POST /routes/:id/order", "lets only the Oficina order a Recorrido or edit a Destino's Tolerancia de llegada"],
   ["POST /daily-plans/:date/driver-days", "lets only the Oficina read and write the Plan diario"],
 ]);
 
@@ -73,6 +75,7 @@ describe("API route authorization coverage", () => {
       ["DELETE", "/users/1/sessions/1"],
       ["GET", "/destinations"],
       ["POST", "/destinations", { name: "Escuela", kind: "school", address: "Calle Inventada 101", lat: -26.8, lng: -65.2 }],
+      ["PATCH", "/destinations/1", { arrivalToleranceMinutes: 10 }],
       ["GET", "/vehicle-features"],
       ["POST", "/vehicle-features", { name: "rampa para silla de ruedas" }],
       ["PATCH", "/vehicle-features/1", { name: "rampa hidráulica" }],
@@ -97,6 +100,7 @@ describe("API route authorization coverage", () => {
       ["POST", "/daily-plans/2026-11-02/routes", { driverId: 1, startTime: "07:00", endTime: "09:00" }],
       ["PATCH", "/routes/1", { vehicleId: 1 }],
       ["PATCH", "/routes/1/stops", { stopIds: [1, 2] }],
+      ["POST", "/routes/1/order"],
       ["POST", "/daily-plans/2026-11-02/driver-days", { driverId: 1, transferIds: [1] }],
     ];
     for (const [method, path, body] of probes) {
