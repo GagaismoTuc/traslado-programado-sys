@@ -2,6 +2,7 @@ import { useEffect, useState, type FormEvent } from "react";
 import { hc } from "hono/client";
 import type { AppType } from "@traslado/api";
 import { apiUrl, readError, redirectUnauthorized, send } from "./api";
+import { AlertsPage } from "./AlertsPage";
 import { DestinationsPage } from "./DestinationsPage";
 import { DriversPage } from "./DriversPage";
 import { ExpiriesPage } from "./Expiries";
@@ -152,5 +153,6 @@ export function App() {
   if (path === "/drivers") return <DriversPage />;
   if (path === "/passengers") return <PassengersPage />;
   if (path === "/plan") return <PlanPage />;
+  if (path === "/alerts") return <AlertsPage />;
   return path === "/users" ? <UsersPage /> : <SignInPage />;
 }

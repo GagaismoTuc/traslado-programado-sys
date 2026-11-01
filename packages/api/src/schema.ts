@@ -1,6 +1,6 @@
 import { sql } from "drizzle-orm";
 import {
-  boolean, check, date, doublePrecision, foreignKey, integer, jsonb, pgTable, primaryKey, text, time, timestamp, unique, uniqueIndex,
+  boolean, check, date, doublePrecision, foreignKey, integer, jsonb, pgTable, primaryKey, text, time, timestamp, unique, uniqueIndex, uuid,
 } from "drizzle-orm/pg-core";
 
 export const foundationPermissionProbe = pgTable("foundation_permission_probe", {
@@ -166,6 +166,7 @@ export const passengerRequiredFeatures = pgTable("passenger_required_features", 
 ]);
 
 // A Responsable legal is the Adulto autorizado who signed the Consentimiento; only they can give an Autorización puntual.
+// Removing an adult sets removed_at, so a Marca or an Autorización puntual that names them keeps its reference.
 export const authorizedAdults = pgTable("authorized_adults", {
   id: integer().generatedAlwaysAsIdentity().primaryKey(),
   passengerId: integer("passenger_id").notNull().references(() => passengers.id, { onDelete: "restrict" }),
@@ -175,6 +176,7 @@ export const authorizedAdults = pgTable("authorized_adults", {
   phone: text().notNull(),
   legalGuardian: boolean("legal_guardian").notNull(),
   createdAt: timestamp("created_at", { withTimezone: true, mode: "string" }).defaultNow().notNull(),
+  removedAt: timestamp("removed_at", { withTimezone: true, mode: "string" }),
 }, (table) => [
   unique("authorized_adults_id_passenger_unique").on(table.id, table.passengerId),
 ]);
@@ -336,6 +338,89 @@ export const versionAcknowledgements = pgTable("version_acknowledgements", {
   acknowledgedAt: timestamp("acknowledged_at", { withTimezone: true, mode: "string" }).defaultNow().notNull(),
 }, (table) => [
   uniqueIndex("version_acknowledgements_version_driver_unique").on(table.planVersionId, table.driverId),
+]);
+
+// An Autorización puntual: a Responsable legal, called by the Oficina on their registered phone, lets one named adult
+// receive the Pasajero on one Traslado. Append-only (the app role has no UPDATE or DELETE); a revocation is its own row.
+export const oneOffAuthorizations = pgTable("one_off_authorizations", {
+  id: integer().generatedAlwaysAsIdentity().primaryKey(),
+  transferId: integer("transfer_id").notNull().references(() => transfers.id, { onDelete: "restrict" }),
+  authorizedByAdultId: integer("authorized_by_adult_id").notNull().references(() => authorizedAdults.id, { onDelete: "restrict" }),
+  // The registered phone the Oficina called, as it was when the call was made.
+  calledPhone: text("called_phone").notNull(),
+  name: text().notNull(),
+  dni: text().notNull(),
+  recordedBy: integer("recorded_by").notNull().references(() => users.id, { onDelete: "restrict" }),
+  recordedAt: timestamp("recorded_at", { withTimezone: true, mode: "string" }).defaultNow().notNull(),
+});
+
+export const oneOffAuthorizationRevocations = pgTable("one_off_authorization_revocations", {
+  authorizationId: integer("authorization_id").primaryKey().references(() => oneOffAuthorizations.id, { onDelete: "restrict" }),
+  revokedBy: integer("revoked_by").notNull().references(() => users.id, { onDelete: "restrict" }),
+  revokedAt: timestamp("revoked_at", { withTimezone: true, mode: "string" }).defaultNow().notNull(),
+});
+
+// A Marca as the Chofer's phone made it: client_id is the phone's UUID, so a resent Marca is found instead of stored twice.
+// Append-only (the app role has no UPDATE or DELETE). flags are why the server accepted it with a warning.
+export const marks = pgTable("marks", {
+  id: integer().generatedAlwaysAsIdentity().primaryKey(),
+  clientId: uuid("client_id").notNull(),
+  transferId: integer("transfer_id").notNull().references(() => transfers.id, { onDelete: "restrict" }),
+  planVersionId: integer("plan_version_id").notNull().references(() => planVersions.id, { onDelete: "restrict" }),
+  driverId: integer("driver_id").notNull().references(() => drivers.id, { onDelete: "restrict" }),
+  sessionId: integer("session_id").notNull().references(() => sessions.id, { onDelete: "restrict" }),
+  kind: text().notNull(),
+  phoneTime: timestamp("phone_time", { withTimezone: true, mode: "string" }).notNull(),
+  serverTime: timestamp("server_time", { withTimezone: true, mode: "string" }).defaultNow().notNull(),
+  latitude: doublePrecision(),
+  longitude: doublePrecision(),
+  receiverKind: text("receiver_kind"),
+  receiverAdultId: integer("receiver_adult_id").references(() => authorizedAdults.id, { onDelete: "restrict" }),
+  receiverDestinationId: integer("receiver_destination_id").references(() => destinations.id, { onDelete: "restrict" }),
+  receiverName: text("receiver_name"),
+  receiverDni: text("receiver_dni"),
+  authorizationId: integer("authorization_id").references(() => oneOffAuthorizations.id, { onDelete: "restrict" }),
+  flags: jsonb().default([]).notNull(),
+}, (table) => [
+  uniqueIndex("marks_client_id_unique").on(table.clientId),
+  check("marks_kind_check", sql`${table.kind} IN ('subio', 'ausente', 'entregado')`),
+  check(
+    "marks_location_check",
+    sql`(${table.latitude} IS NULL AND ${table.longitude} IS NULL)
+      OR (${table.latitude} BETWEEN -90 AND 90 AND ${table.longitude} BETWEEN -180 AND 180)`,
+  ),
+  // Entregado requires a Receptor, and only Entregado has one.
+  check("marks_receiver_check", sql`(${table.kind} = 'entregado') = (${table.receiverKind} IS NOT NULL)`),
+  check(
+    "marks_receiver_kind_check",
+    sql`${table.receiverKind} IS NULL
+      OR (${table.receiverKind} = 'authorized_adult' AND ${table.receiverAdultId} IS NOT NULL AND ${table.receiverDestinationId} IS NULL
+        AND ${table.receiverName} IS NULL AND ${table.receiverDni} IS NULL AND ${table.authorizationId} IS NULL)
+      OR (${table.receiverKind} = 'destination' AND ${table.receiverDestinationId} IS NOT NULL AND ${table.receiverAdultId} IS NULL
+        AND ${table.receiverName} IS NULL AND ${table.receiverDni} IS NULL AND ${table.authorizationId} IS NULL)
+      OR (${table.receiverKind} = 'other_adult' AND ${table.receiverName} IS NOT NULL AND ${table.receiverDni} IS NOT NULL
+        AND ${table.receiverAdultId} IS NULL AND ${table.receiverDestinationId} IS NULL)
+      OR (${table.receiverKind} = 'base_staff' AND ${table.receiverAdultId} IS NULL AND ${table.receiverDestinationId} IS NULL
+        AND ${table.receiverName} IS NULL AND ${table.receiverDni} IS NULL AND ${table.authorizationId} IS NULL)`,
+  ),
+]);
+
+// The Oficina's alert inbox; later tickets add kinds. dedupe_key keeps a repeated event (a resent Marca) to one alert.
+export const alerts = pgTable("alerts", {
+  id: integer().generatedAlwaysAsIdentity().primaryKey(),
+  kind: text().notNull(),
+  transferId: integer("transfer_id").references(() => transfers.id, { onDelete: "restrict" }),
+  routeId: integer("route_id").references(() => routes.id, { onDelete: "restrict" }),
+  markId: integer("mark_id").references(() => marks.id, { onDelete: "restrict" }),
+  details: jsonb().default({}).notNull(),
+  dedupeKey: text("dedupe_key"),
+  createdAt: timestamp("created_at", { withTimezone: true, mode: "string" }).defaultNow().notNull(),
+}, (table) => [
+  uniqueIndex("alerts_dedupe_key_unique").on(table.dedupeKey),
+  check(
+    "alerts_kind_check",
+    sql`${table.kind} IN ('other_adult_handover', 'mark_flagged', 'mark_conflict', 'authorization_conflict', 'absent_on_entrada')`,
+  ),
 ]);
 
 export const absences = pgTable("absences", {

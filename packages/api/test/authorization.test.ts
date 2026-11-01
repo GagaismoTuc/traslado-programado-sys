@@ -67,6 +67,13 @@ const authorizationEvidence = new Map([
   ["GET /daily-plans/:date/acknowledgements", "records the Chofer's acknowledgement once and the Oficina sees who has not acknowledged the latest version"],
   ["GET /driver/days/:date", "refuses unauthenticated callers and the Oficina on every driver endpoint"],
   ["POST /driver/routes/:id/acknowledgements", "refuses unauthenticated callers and the Oficina on every driver endpoint"],
+  ["POST /driver/routes/:id/start", "refuses unauthenticated callers and the Oficina on every driver endpoint"],
+  ["POST /driver/routes/:id/marks", "refuses unauthenticated callers and the Oficina on every driver endpoint"],
+  ["GET /driver/routes/:id/transfers/:transferId/handover", "refuses unauthenticated callers and the Oficina on every driver endpoint"],
+  ["GET /transfers/:id/authorizations", "lets only the Oficina record, list and revoke Autorizaciones puntuales and read the alert inbox"],
+  ["POST /transfers/:id/authorizations", "lets only the Oficina record, list and revoke Autorizaciones puntuales and read the alert inbox"],
+  ["POST /authorizations/:id/revocation", "lets only the Oficina record, list and revoke Autorizaciones puntuales and read the alert inbox"],
+  ["GET /alerts", "lets only the Oficina record, list and revoke Autorizaciones puntuales and read the alert inbox"],
 ]);
 
 describe("API route authorization coverage", () => {
@@ -130,6 +137,13 @@ describe("API route authorization coverage", () => {
       ["GET", "/daily-plans/2026-11-02/acknowledgements"],
       ["GET", "/driver/days/2026-11-02"],
       ["POST", "/driver/routes/1/acknowledgements", { version: 1 }],
+      ["POST", "/driver/routes/1/start", {}],
+      ["POST", "/driver/routes/1/marks", { id: "00000000-0000-4000-8000-000000000001", transferId: 1, kind: "subio", phoneTime: "2026-11-02T12:00:00.000Z", location: null, version: 1 }],
+      ["GET", "/driver/routes/1/transfers/1/handover"],
+      ["GET", "/transfers/1/authorizations"],
+      ["POST", "/transfers/1/authorizations", { legalGuardianId: 1, call: "outgoing", name: "Tía Sintética", dni: "-3000001" }],
+      ["POST", "/authorizations/1/revocation", {}],
+      ["GET", "/alerts"],
     ];
     for (const [method, path, body] of probes) {
       const response = await app.request(path, {

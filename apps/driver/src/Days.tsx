@@ -1,4 +1,8 @@
 import { useCallback, useEffect, useRef, useState } from "react";
+import {
+  currentLocation, fetchHandover, HandoverView, newMark, otherAdultReceiver, sendMark, startRoute,
+  type Handover, type Mark, type MarkKind, type Receiver,
+} from "./Marks";
 
 export type DriverStop = {
   position: number;
@@ -6,8 +10,10 @@ export type DriverStop = {
   plannedTime: string;
   transferId: number;
   direction: "entrada" | "salida";
-  // name is the Destino, or null for the Pasajero's home.
-  place: { name: string | null; address: string; accessNotes: string | null };
+  // The Traslado's state on the server: planificado, subio, ausente, entregado or cancelado_ausencia.
+  transferStatus: string;
+  // name and destinationId are the Destino, or null for the Pasajero's home.
+  place: { name: string | null; destinationId: number | null; address: string; accessNotes: string | null };
   passenger: { name: string; wheelchair: boolean; medicalAlert: string | null };
   companions: number;
 };
@@ -17,6 +23,8 @@ export type DriverRoute = {
   startTime: string;
   endTime: string;
   vehiclePlate: string;
+  // borrador, publicado, en_curso or cerrado.
+  status: string;
   acknowledgedVersion: number | null;
   stops: DriverStop[];
 };
@@ -72,7 +80,58 @@ export function StopView({ stop }: { stop: DriverStop }) {
 
 type Acknowledge = (routeId: number, version: number) => void;
 
-export function RouteView({ route, sending, onAcknowledge }: { route: DriverRoute; sending: boolean; onAcknowledge: Acknowledge }) {
+const MARKED: Record<string, string> = { subio: "Subió", ausente: "Ausente", entregado: "Entregado", cancelado_ausencia: "Cancelled: absence" };
+
+/** What the Chofer does on a Recorrido: start it, mark its Paradas, hand a Pasajero over at home and resend a failed Marca. */
+export type Marking = {
+  sending: boolean;
+  // Marcas that did not reach the server, by Traslado: sending them again repeats their UUID.
+  unsent: Record<number, Mark>;
+  // The open home drop-off with its downloaded data and the last refusal.
+  handover: { transferId: number; data: Handover | null; blocked: string | null; searching: boolean } | null;
+  onStart: (route: DriverRoute) => void;
+  onMark: (route: DriverRoute, stop: DriverStop, kind: MarkKind, receiver?: Receiver) => void;
+  onResend: (route: DriverRoute, mark: Mark) => void;
+  onOpenHandover: (route: DriverRoute, stop: DriverStop) => void;
+  onOtherAdult: (route: DriverRoute, stop: DriverStop, typed: { name: string; dni: string; adultConfirmed: boolean }) => void;
+  onSearch: (route: DriverRoute, stop: DriverStop) => void;
+};
+
+/** Subió or Ausente at a pickup; Entregado at a drop-off once the Pasajero is on board, to the Destino or at home. */
+export function StopActions({ route, stop, marking }: { route: DriverRoute; stop: DriverStop; marking: Marking }) {
+  const unsent = marking.unsent[stop.transferId];
+  const open = marking.handover?.transferId === stop.transferId ? marking.handover : null;
+  const disabled = marking.sending;
+  return <>
+    {MARKED[stop.transferStatus] && <div>{`Marked: ${MARKED[stop.transferStatus]}`}</div>}
+    {unsent && <p role="alert">
+      {"The Marca did not reach the server. "}
+      <button type="button" disabled={disabled} onClick={() => marking.onResend(route, unsent)}>Send again</button>
+    </p>}
+    {stop.kind === "pickup" && stop.transferStatus === "planificado" && <div>
+      <button type="button" disabled={disabled} onClick={() => marking.onMark(route, stop, "subio")}>Subió</button>
+      <button type="button" disabled={disabled} onClick={() => marking.onMark(route, stop, "ausente")}>Ausente</button>
+    </div>}
+    {stop.kind === "dropoff" && stop.transferStatus === "subio" && (stop.place.destinationId !== null
+      ? <button type="button" disabled={disabled} onClick={() => marking.onMark(route, stop, "entregado", {
+        kind: "destination", destinationId: stop.place.destinationId!,
+      })}>{`Entregado at ${stop.place.name}`}</button>
+      : !open && <button type="button" disabled={disabled} onClick={() => marking.onOpenHandover(route, stop)}>Entregado</button>)}
+    {open && (open.data || open.blocked
+      // Without the downloaded data (no signal) nobody but company staff at the base may receive: the app keeps blocking.
+      ? <HandoverView handover={open.data ?? { transferId: stop.transferId, otherAdultAllowed: false, adults: [], authorizations: [], base: null }}
+        blocked={open.blocked} searching={open.searching} actions={{
+        onReceiver: (receiver) => marking.onMark(route, stop, "entregado", receiver),
+        onOtherAdult: (typed) => marking.onOtherAdult(route, stop, typed),
+        onSearch: () => marking.onSearch(route, stop),
+      }} />
+      : <p>Loading who may receive...</p>)}
+  </>;
+}
+
+export function RouteView({ route, sending, onAcknowledge, marking }: {
+  route: DriverRoute; sending: boolean; onAcknowledge: Acknowledge; marking?: Marking;
+}) {
   return <section>
     <h3>{`${route.startTime}-${route.endTime}, ${route.vehiclePlate}, version ${route.version}`}</h3>
     {route.acknowledgedVersion === route.version
@@ -83,15 +142,22 @@ export function RouteView({ route, sending, onAcknowledge }: { route: DriverRout
           {`Acknowledge version ${route.version}`}
         </button>
       </>}
-    <ol>{route.stops.map((stop) => <li key={stop.position}><StopView stop={stop} /></li>)}</ol>
+    {marking && route.status === "publicado" && <button type="button" disabled={marking.sending} onClick={() => marking.onStart(route)}>Start Recorrido</button>}
+    {marking && route.status === "en_curso" && <p>Recorrido en curso.</p>}
+    <ol>{route.stops.map((stop) => <li key={stop.position}>
+      <StopView stop={stop} />
+      {marking && <StopActions route={route} stop={stop} marking={marking} />}
+    </li>)}</ol>
   </section>;
 }
 
-export function DayView({ title, day, sending, onAcknowledge }: { title: string; day: DriverDay; sending: boolean; onAcknowledge: Acknowledge }) {
+export function DayView({ title, day, sending, onAcknowledge, marking }: {
+  title: string; day: DriverDay; sending: boolean; onAcknowledge: Acknowledge; marking?: Marking;
+}) {
   return <section>
     <h2>{`${title} (${day.date})`}</h2>
     {day.routes.length
-      ? day.routes.map((route) => <RouteView key={route.routeId} route={route} sending={sending} onAcknowledge={onAcknowledge} />)
+      ? day.routes.map((route) => <RouteView key={route.routeId} route={route} sending={sending} onAcknowledge={onAcknowledge} marking={marking} />)
       : <p>No published Recorridos.</p>}
   </section>;
 }
@@ -103,6 +169,8 @@ export function DriverHome({ apiUrl, onSignedOut }: { apiUrl: string; onSignedOu
   // A failed load is shown until a later load succeeds, apart from the acknowledgement message.
   const [loadError, setLoadError] = useState("");
   const [sending, setSending] = useState(false);
+  const [unsent, setUnsent] = useState<Record<number, Mark>>({});
+  const [handover, setHandover] = useState<Marking["handover"]>(null);
   const latestLoad = useRef(0);
   const signedOut = useRef(onSignedOut);
   signedOut.current = onSignedOut;
@@ -149,6 +217,80 @@ export function DriverHome({ apiUrl, onSignedOut }: { apiUrl: string; onSignedOu
     }
   }
 
+  /** Sends a Marca; without signal it stays on screen with its UUID to be sent again. */
+  async function submitMark(routeId: number, mark: Mark) {
+    setSending(true);
+    try {
+      const response = await sendMark(apiUrl, routeId, mark);
+      if (response.status === 401) {
+        signedOut.current();
+        return;
+      }
+      const result = await response.json().catch(() => null) as { error?: string; conflict?: boolean } | null;
+      setUnsent(({ [mark.transferId]: _, ...rest }) => rest);
+      if (!response.ok) setMessage(result?.error ?? "Unable to save the Marca");
+      else setMessage(result?.conflict ? "The server already had this Marca with other content; it kept the first one" : "Marca confirmed by the server");
+      if (response.ok) setHandover(null);
+      await load();
+    } catch {
+      setUnsent((current) => ({ ...current, [mark.transferId]: mark }));
+      setMessage("Unable to reach the server: send the Marca again");
+    } finally {
+      setSending(false);
+    }
+  }
+
+  async function downloadHandover(route: DriverRoute, stop: DriverStop, searching: boolean) {
+    setHandover((current) => ({ transferId: stop.transferId, data: current?.transferId === stop.transferId ? current.data : null, blocked: null, searching }));
+    try {
+      const response = await fetchHandover(apiUrl, route.routeId, stop.transferId);
+      if (response.status === 401) {
+        signedOut.current();
+        return;
+      }
+      const data = response.ok ? await response.json() as Handover : null;
+      setHandover((current) => ({
+        transferId: stop.transferId, data: data ?? current?.data ?? null, blocked: data ? null : "Unable to load who may receive", searching: false,
+      }));
+    } catch {
+      setHandover((current) => ({ transferId: stop.transferId, data: current?.data ?? null, blocked: "Unable to reach the server", searching: false }));
+    }
+  }
+
+  const marking: Marking = {
+    sending,
+    unsent,
+    handover,
+    onStart: (route) => void (async () => {
+      setSending(true);
+      try {
+        const response = await startRoute(apiUrl, route.routeId);
+        if (response.status === 401) return signedOut.current();
+        setMessage(response.ok ? "Recorrido started" : "Unable to start the Recorrido");
+        await load();
+      } catch {
+        setMessage("Unable to reach the server");
+      } finally {
+        setSending(false);
+      }
+    })(),
+    onMark: (route, stop, kind, receiver) => void (async () => {
+      // The phone time is the tap, not when the GPS answers.
+      const tappedAt = new Date();
+      const location = await currentLocation(navigator.geolocation);
+      await submitMark(route.routeId, newMark({ transferId: stop.transferId, kind, location, version: route.version, ...(receiver ? { receiver } : {}) }, tappedAt));
+    })(),
+    onResend: (route, mark) => void submitMark(route.routeId, mark),
+    onOpenHandover: (route, stop) => void downloadHandover(route, stop, false),
+    onOtherAdult: (route, stop, typed) => {
+      if (!handover?.data) return;
+      const result = otherAdultReceiver(handover.data, typed);
+      if (result.ok) marking.onMark(route, stop, "entregado", result.receiver);
+      else setHandover({ ...handover, blocked: result.message });
+    },
+    onSearch: (route, stop) => void downloadHandover(route, stop, true),
+  };
+
   return <>
     {loadError && <p role="alert">{loadError}</p>}
     {message && <p role="status">{message}</p>}
@@ -159,6 +301,7 @@ export function DriverHome({ apiUrl, onSignedOut }: { apiUrl: string; onSignedOu
         day={day}
         sending={sending}
         onAcknowledge={(routeId, version) => void acknowledge(routeId, version)}
+        marking={marking}
       />)
       : <p>Loading your Recorridos...</p>}
   </>;

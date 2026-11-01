@@ -118,7 +118,9 @@ describe("Adultos autorizados and Consentimiento", () => {
       adults: [created, { id: other.id, passengerId, ...edited }],
     });
     await ok(request(`/authorized-adults/${other.id}`, "DELETE", undefined, office.cookie), 204);
-    expect((await stored("authorized_adults")).map((row) => row.id)).toEqual([created.id]);
+    // Removing is a logical delete: the row stays, so a Marca or an Autorización puntual can still name the adult.
+    expect((await stored("authorized_adults")).map((row) => [row.id, row.removed_at !== null])).toEqual([[created.id, false], [other.id, true]]);
+    expect(await ok(request(`/passengers/${passengerId}/authorized-adults`, "GET", undefined, office.cookie), 200)).toEqual({ adults: [created] });
     expect(await changes("authorized_adult")).toEqual([
       { actor_user_id: office.id, entity_id: String(created.id), action: "created", before_data: null, after_data: { passengerId, ...mother } },
       { actor_user_id: office.id, entity_id: String(other.id), action: "created", before_data: null, after_data: { passengerId, ...neighbour } },

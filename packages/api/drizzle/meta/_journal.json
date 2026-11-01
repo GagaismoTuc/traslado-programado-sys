@@ -85,6 +85,13 @@
       "when": 1793510567089,
       "tag": "0011_damp_anita_blake",
       "breakpoints": true
+    },
+    {
+      "idx": 12,
+      "version": "7",
+      "when": 1793561949285,
+      "tag": "0012_outgoing_scarlet_spider",
+      "breakpoints": true
     }
   ]
 }

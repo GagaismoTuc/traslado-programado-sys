@@ -1,9 +1,11 @@
 import { useEffect, useRef, useState, type FormEvent } from "react";
 import { readError, redirectUnauthorized, send } from "./api";
 import { OfficeNav } from "./OfficeNav";
+import { OneOffAuthorizationPanel } from "./OneOffAuthorizationPanel";
 
 type Transfer = {
   id: number;
+  passengerId: number;
   passengerName: string;
   direction: "entrada" | "salida";
   destinationName: string;
@@ -244,6 +246,8 @@ export function PlanPage() {
   const [warningsUnavailable, setWarningsUnavailable] = useState(false);
   const [summary, setSummary] = useState<DaySummary | null>(null);
   const [publishing, setPublishing] = useState(false);
+  // The salida whose Autorización puntual panel is open.
+  const [authorizing, setAuthorizing] = useState<number | null>(null);
   const selectedDate = useRef(date);
   selectedDate.current = date;
   const latestLoad = useRef(0);
@@ -494,6 +498,10 @@ export function PlanPage() {
             <button type="submit">Save exit time</button>
           </form>}
           <button type="button" onClick={() => void write(`/transfers/${transfer.id}/absence`, "POST", {}, "Absence registered")}>Register absence</button>
+        </>}
+        {transfer.direction === "salida" && (transfer.status === "planificado" || transfer.status === "subio") && <>
+          <button type="button" onClick={() => setAuthorizing(authorizing === transfer.id ? null : transfer.id)}>Autorización puntual</button>
+          {authorizing === transfer.id && <OneOffAuthorizationPanel transferId={transfer.id} passengerId={transfer.passengerId} />}
         </>}
       </li>)}</ul>
 

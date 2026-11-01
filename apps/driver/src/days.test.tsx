@@ -5,16 +5,16 @@ import { acknowledgeVersion, driverDays, RouteView, startRefetching, StopView, t
 // Synthetic data only.
 const passenger = { name: "Pasajero Sintético", wheelchair: true, medicalAlert: "Alergia sintética a la penicilina" };
 const pickup: DriverStop = {
-  position: 1, kind: "pickup", plannedTime: "07:51", transferId: 3, direction: "entrada",
-  place: { name: null, address: "Calle Inventada 101", accessNotes: "Timbre del fondo" }, passenger, companions: 1,
+  position: 1, kind: "pickup", plannedTime: "07:51", transferId: 3, direction: "entrada", transferStatus: "planificado",
+  place: { name: null, destinationId: null, address: "Calle Inventada 101", accessNotes: "Timbre del fondo" }, passenger, companions: 1,
 };
 const dropoff: DriverStop = {
-  position: 2, kind: "dropoff", plannedTime: "08:00", transferId: 3, direction: "entrada",
-  place: { name: "Escuela Sintética", address: "Avenida Sintetica 303", accessNotes: null },
+  position: 2, kind: "dropoff", plannedTime: "08:00", transferId: 3, direction: "entrada", transferStatus: "planificado",
+  place: { name: "Escuela Sintética", destinationId: 4, address: "Avenida Sintetica 303", accessNotes: null },
   passenger: { name: "Pasajero Sintético", wheelchair: false, medicalAlert: null }, companions: 0,
 };
 const route = (version: number, acknowledgedVersion: number | null): DriverRoute => ({
-  routeId: 9, version, startTime: "07:00", endTime: "09:00", vehiclePlate: "AAA001", acknowledgedVersion, stops: [pickup],
+  routeId: 9, version, startTime: "07:00", endTime: "09:00", vehiclePlate: "AAA001", status: "publicado", acknowledgedVersion, stops: [pickup],
 });
 
 afterEach(() => {

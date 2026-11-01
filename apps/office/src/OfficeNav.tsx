@@ -10,7 +10,8 @@ export function OfficeNav() {
       <a href="/drivers">Drivers</a>{" | "}
       <a href="/passengers">Passengers</a>{" | "}
       <a href="/plan">Plan diario</a>{" | "}
-      <a href="/expiries">Vencimientos</a>
+      <a href="/expiries">Vencimientos</a>{" | "}
+      <a href="/alerts">Alerts</a>
     </nav>
     <ExpiryBanner />
   </>;

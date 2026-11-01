@@ -169,6 +169,27 @@ describe("changing the Chofer of a Recorrido", () => {
     }
   });
 
+  it("lets only the Chofer of the latest published Versión del plan start the Recorrido", async () => {
+    const { call, chofer, route, transfer, changeDriver } = await setup("inicio");
+    const first = await chofer();
+    const second = await chofer();
+    const routeId = await route(first.driverId);
+    await transfer(routeId);
+    await call(`/routes/${routeId}/publish`, "POST", {});
+    await changeDriver(routeId, second.driverId);
+
+    // Until the next version is published, the Recorrido is still the first Chofer's.
+    expect(await answer(request(`/driver/routes/${routeId}/start`, "POST", undefined, second.cookie), 403))
+      .toEqual({ error: "This Recorrido belongs to another Chofer" });
+    expect((await storedRoute(routeId)).status).toBe("publicado");
+    await call(`/daily-plans/${DAY}/publish`, "POST", undefined, 200);
+    expect(await answer(request(`/driver/routes/${routeId}/start`, "POST", undefined, first.cookie), 403))
+      .toEqual({ error: "This Recorrido belongs to another Chofer" });
+    expect((await storedRoute(routeId)).status).toBe("publicado");
+    expect(await answer(request(`/driver/routes/${routeId}/start`, "POST", undefined, second.cookie), 200))
+      .toEqual({ route: { routeId, status: "en_curso" } });
+  });
+
   it("Rule 2: keeps the Recorrido's Vehículo when the Chofer changes", async () => {
     const { call, chofer, route, changeDriver } = await setup("regla2");
     const first = await chofer();
