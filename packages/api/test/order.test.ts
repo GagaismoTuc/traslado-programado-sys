@@ -449,6 +449,29 @@ describe("the engine orders a Recorrido", () => {
     expect(drives.slice(-2)).toEqual([[SCHOOL, HOME_OF_DRIVER], [HOME_OF_DRIVER, [-65.23, -26.81]]]);
   });
 
+  it("Rule 8: refuses to apply the engine's answer when the previous Recorrido changed while it was being ordered", async () => {
+    let changeWhileSolving = async () => undefined as unknown;
+    const engine = fakeEngine({ whileSolving: () => changeWhileSolving() });
+    const w = await world("regla8-concurrente", appWith(engine.solver));
+    const previous = await w.route({ startTime: "07:00", endTime: "08:00" });
+    await w.transfer(previous, { targetTime: "08:00" });
+    await w.order(previous);
+    const routeId = await w.route({ startTime: "08:30", endTime: "09:30" });
+    await w.transfer(routeId, { targetTime: "09:30" });
+    const before = (await w.view()).routes.find((route: { id: number }) => route.id === routeId).stops;
+    // While the engine solves from the previous Recorrido's last Parada, the Oficina sends that Chofer home after it.
+    changeWhileSolving = () => w.call(`/routes/${previous}`, "PATCH", { endKind: "home" }, 200);
+
+    expect(await w.order(routeId, 409)).toEqual({ error: "The Recorrido changed while it was being ordered: order it again" });
+    expect(engine.problems.at(-1)!.vehicles[0].start).toEqual(SCHOOL);
+    expect((await w.view()).routes.find((route: { id: number }) => route.id === routeId).stops).toEqual(before);
+    expect((await changes("route")).filter((row) => row.entity_id === String(routeId)).map((row) => row.action)).not.toContain("ordered");
+
+    changeWhileSolving = async () => undefined;
+    await w.order(routeId);
+    expect(engine.problems.at(-1)!.vehicles[0].start).toEqual(HOME_OF_DRIVER);
+  });
+
   it("Rule 9: sends seats and the Asiento delantero as capacity, with each Acompañante taking a seat", async () => {
     const engine = fakeEngine();
     const w = await world("regla9", appWith(engine.solver), 5);

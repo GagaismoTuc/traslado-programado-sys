@@ -965,6 +965,29 @@ function lngLat(lat: unknown, lng: unknown): LngLat {
   return [Number(lng), Number(lat)];
 }
 
+type Neighbours = { previous?: Record<string, unknown>; last?: Record<string, unknown>; next?: Record<string, unknown> };
+
+// The same Chofer's Recorridos right before and after this one and the previous one's last Parada, which decide
+// where this one starts and ends.
+async function loadNeighbours(client: Queryable, routeId: number, route: Record<string, unknown>): Promise<Neighbours> {
+  const values = [route.daily_plan_id, route.driver_id, routeId, String(route.start_time)];
+  const previousResult = await client.query(
+    `SELECT id, vehicle_id, end_kind, to_char(end_time, 'HH24:MI') AS end_time FROM routes
+      WHERE daily_plan_id = $1 AND driver_id = $2 AND id <> $3 AND (start_time < $4 OR (start_time = $4 AND id < $3))
+      ORDER BY start_time DESC, id DESC LIMIT 1`,
+    values,
+  ) as QueryResult;
+  const nextResult = await client.query(
+    `SELECT id FROM routes
+      WHERE daily_plan_id = $1 AND driver_id = $2 AND id <> $3 AND (start_time > $4 OR (start_time = $4 AND id > $3))
+      ORDER BY start_time, id LIMIT 1`,
+    values,
+  ) as QueryResult;
+  const previous = previousResult.rows[0];
+  const last = previous ? (await client.query(LAST_STOP_SQL, [previous.id]) as QueryResult).rows[0] : undefined;
+  return { previous, last, next: nextResult.rows[0] };
+}
+
 /**
  * Start and end of the Recorrido for the engine. Default start: the Chofer's home for their first Recorrido of the day
  * or after a gap longer than routeGapMinutes; otherwise the previous Recorrido's last Parada when it used the same
@@ -972,22 +995,9 @@ function lngLat(lat: unknown, lng: unknown): LngLat {
  * "Previous" is the same Chofer's Recorrido with the latest earlier start; its planned end bounds this one's departure.
  * When the Oficina set the previous one to end at home, the chain starts there instead of at its last Parada.
  */
-async function resolveRouteEnds(client: Queryable, routeId: number, route: Record<string, unknown>, routeGapMinutes: number) {
+function resolveRouteEnds(route: Record<string, unknown>, { previous, last, next }: Neighbours, routeGapMinutes: number) {
   const home = lngLat(route.home_latitude, route.home_longitude);
   const startTime = String(route.start_time);
-  const previousResult = await client.query(
-    `SELECT id, vehicle_id, end_kind, to_char(end_time, 'HH24:MI') AS end_time FROM routes
-      WHERE daily_plan_id = $1 AND driver_id = $2 AND id <> $3 AND (start_time < $4 OR (start_time = $4 AND id < $3))
-      ORDER BY start_time DESC, id DESC LIMIT 1`,
-    [route.daily_plan_id, route.driver_id, routeId, startTime],
-  ) as QueryResult;
-  const nextResult = await client.query(
-    `SELECT 1 FROM routes
-      WHERE daily_plan_id = $1 AND driver_id = $2 AND id <> $3 AND (start_time > $4 OR (start_time = $4 AND id > $3)) LIMIT 1`,
-    [route.daily_plan_id, route.driver_id, routeId, startTime],
-  ) as QueryResult;
-  const previous = previousResult.rows[0];
-  const last = previous ? (await client.query(LAST_STOP_SQL, [previous.id]) as QueryResult).rows[0] : undefined;
   let previousEnd: number | undefined;
   if (previous) {
     previousEnd = last?.planned_end === null || last?.planned_end === undefined
@@ -1007,7 +1017,7 @@ async function resolveRouteEnds(client: Queryable, routeId: number, route: Recor
   else if (chained && Number(previous!.vehicle_id) === Number(route.vehicle_id)) start = chained;
   else throw new PlanningError(409, "Set where this Recorrido starts: the previous Recorrido has another Vehículo or no Paradas");
 
-  const endKind = route.end_kind ?? (nextResult.rows.length ? "open" : "home");
+  const endKind = route.end_kind ?? (next ? "open" : "home");
   return { start, end: endKind === "home" ? home : null, previousEnd, previousStop, previousEndPoint: chained };
 }
 
@@ -1283,11 +1293,12 @@ function validatePublication(snapshot: PublicationSnapshot, planned: number[]) {
   });
 }
 
-// Everything the engine was given; the result is applied only while this is unchanged.
+// Everything the engine was given, the neighbouring Recorridos included; the result is applied only while this is unchanged.
 async function orderInputKey(client: Queryable, routeId: number) {
   const route = (await client.query(ORDER_ROUTE_SQL, [routeId]) as QueryResult).rows[0];
   const rows = route ? (await client.query(ORDER_TRANSFERS_SQL, [routeId]) as QueryResult).rows : [];
-  return { route, rows, key: JSON.stringify([route, rows]) };
+  const neighbours = route ? await loadNeighbours(client, routeId, route) : {};
+  return { route, rows, neighbours, key: JSON.stringify([route, rows, neighbours]) };
 }
 
 const PLAN_VERSION_SELECT_SQL = `
@@ -2700,7 +2711,8 @@ export function createApp({ db, routing, router, geocoder, solver, travelTime, c
     })
     // "Order": the engine orders the Borrador Recorrido's Paradas and plans their times. Traslados it cannot place leave
     // the Recorrido with their reason, so every Traslado is in the order or in `unassigned`. The engine runs outside the
-    // transaction; the result is applied only if the Recorrido did not change meanwhile.
+    // transaction; the result is applied only if neither the Recorrido nor the Chofer's Recorridos right before and after it
+    // changed meanwhile.
     .post("/routes/:id/order", async (context) => {
       const actor = await requireOffice(context);
       if (actor instanceof Response) return actor;
@@ -2708,7 +2720,7 @@ export function createApp({ db, routing, router, geocoder, solver, travelTime, c
       if (!id) return context.json({ error: "Invalid request" }, 400);
       if (!solver || !travelTime) return context.json({ error: "The routing engine is not configured" }, 503);
       try {
-        const { route, rows, key } = await orderInputKey(db, id);
+        const { route, rows, neighbours, key } = await orderInputKey(db, id);
         if (!route) throw new PlanningError(404, "Recorrido not found");
         if (route.status !== "borrador") throw new PlanningError(409, "Only a Borrador Recorrido can be ordered");
         // Entradas from another Destino stored before the exit time existed cannot be planned until the Oficina sets it.
@@ -2719,7 +2731,7 @@ export function createApp({ db, routing, router, geocoder, solver, travelTime, c
         }
         let plan: PlanResult = { stops: [], unassigned: [] };
         if (rows.length) {
-          const ends = await resolveRouteEnds(db, id, route, routeGapMinutes);
+          const ends = resolveRouteEnds(route, neighbours, routeGapMinutes);
           const startMinutes = minutesOf(String(route.start_time));
           try {
             // Not before the previous Recorrido's planned end plus the drive from its last Parada to where it ends
@@ -2745,6 +2757,9 @@ export function createApp({ db, routing, router, geocoder, solver, travelTime, c
           }
         }
         const stops = await inTransaction(db, async (client) => {
+          // The neighbouring Recorridos are locked too, in id order, so none of them changes before this commits.
+          const locked = [id, neighbours.previous?.id, neighbours.next?.id].filter((value) => value !== undefined).map(Number);
+          await client.query("SELECT id FROM routes WHERE id = ANY($1::int[]) ORDER BY id FOR UPDATE", [locked]);
           await lockRoute(client, id);
           if ((await orderInputKey(client, id)).key !== key) {
             throw new PlanningError(409, "The Recorrido changed while it was being ordered: order it again");
