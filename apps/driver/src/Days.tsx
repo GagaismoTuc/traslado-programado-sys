@@ -86,9 +86,10 @@ export function StopView({ stop }: { stop: DriverStop }) {
 
 function changeText(change: VersionChange) {
   if (change.kind === "vehicle") return `Vehicle: ${change.from} → ${change.to}`;
-  if (change.kind === "added") return `New: ${change.passengerName}`;
-  if (change.kind === "removed") return `Removed: ${change.passengerName}`;
-  return `${change.stopKind === "pickup" ? "Pick up" : "Drop off"} ${change.passengerName}: ${change.from} → ${change.to}`;
+  if (change.kind === "time") {
+    return `${change.stopKind === "pickup" ? "Pick up" : "Drop off"} ${change.passengerName}: ${change.from} → ${change.to}`;
+  }
+  return `${change.kind === "added" ? "New" : "Removed"}: ${change.passengerName}`;
 }
 
 /** What changed between versions, so the Chofer does not have to compare the lists. */
