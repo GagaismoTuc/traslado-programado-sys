@@ -135,10 +135,10 @@ export function StopActions({ route, stop, marking }: { route: DriverRoute; stop
   </>;
 }
 
-/** The refused list with each Traslado's state now, without those resolved since; one the app does not show stays as listed. */
+/** The refused list with each Traslado's state now, without those resolved since; one no longer in the Recorrido (reassigned) is resolved. */
 export function stillOpen(route: DriverRoute, transfers: OpenTransfer[]): OpenTransfer[] {
   return transfers.flatMap((transfer) => {
-    const status = route.stops.find((stop) => stop.transferId === transfer.transferId)?.transferStatus ?? transfer.status;
+    const status = route.stops.find((stop) => stop.transferId === transfer.transferId)?.transferStatus;
     return status === "planificado" || status === "subio" ? [{ ...transfer, status }] : [];
   });
 }

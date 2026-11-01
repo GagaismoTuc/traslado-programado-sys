@@ -145,7 +145,8 @@ describe("Marcas in the driver app", () => {
       { transferId: 3, passengerName: "Pasajero Sintético", direction: "salida", status: "subio" },
       { transferId: 4, passengerName: "Pasajera Sintética", direction: "entrada", status: "planificado" },
     ] } });
-    expect(renderToStaticMarkup(<RouteView route={started} sending={false} onAcknowledge={() => undefined} marking={refused} />)).toContain(
+    const listed = route("en_curso", [{ ...stop("dropoff", "subio", null), transferId: 3 }, { ...stop("pickup", "planificado", 4), transferId: 4 }]);
+    expect(renderToStaticMarkup(<RouteView route={listed} sending={false} onAcknowledge={() => undefined} marking={refused} />)).toContain(
       "<div role=\"alert\"><p>Resolve these Traslados before closing the Recorrido:</p><ul>"
       + "<li>Pasajero Sintético: on board, mark Entregado</li>"
       + "<li>Pasajera Sintética: not marked, mark Subió or Ausente, or call the Oficina to reassign or cancel it</li></ul></div>",
@@ -164,6 +165,18 @@ describe("Marcas in the driver app", () => {
     expect(fetchMock).toHaveBeenCalledWith("https://api.example/driver/routes/9/close", {
       method: "POST", credentials: "include", headers: { "Content-Type": "application/json" }, body: "{}",
     });
+  });
+
+  it("drops a listed Traslado from the refusal once the Oficina reassigns it out of the Recorrido", () => {
+    const refused = marking({ refusedClose: { routeId: 9, transfers: [
+      { transferId: 3, passengerName: "Pasajero Sintético", direction: "salida", status: "subio" },
+      { transferId: 4, passengerName: "Pasajera Sintética", direction: "entrada", status: "planificado" },
+    ] } });
+    // Transfer 4 was reassigned: its stops left this Recorrido, so the Chofer has nothing left to do about it.
+    const reassigned = renderToStaticMarkup(<RouteView route={route("en_curso", [{ ...stop("dropoff", "subio", null), transferId: 3 }])}
+      sending={false} onAcknowledge={() => undefined} marking={refused} />);
+    expect(reassigned).toContain("<ul><li>Pasajero Sintético: on board, mark Entregado</li></ul>");
+    expect(reassigned).not.toContain("Pasajera Sintética");
   });
 
   it("marks Subió or Ausente at a pickup and Entregado to the Destino once on board", () => {
