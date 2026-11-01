@@ -17,6 +17,7 @@ type Transfer = {
 type Stop = { id: number; kind: "pickup" | "dropoff"; passengerName: string; placeName: string | null; plannedTime: string | null };
 type Route = {
   id: number;
+  driverId: number;
   driverName: string;
   vehicleId: number;
   vehiclePlate: string;
@@ -117,6 +118,31 @@ function routeLabel(route: Route) {
 function routeName(routes: Pick<Route, "id" | "driverName" | "startTime" | "endTime">[], routeId: number) {
   const route = routes.find((item) => item.id === routeId);
   return route ? `${route.driverName} ${route.startTime}-${route.endTime}` : `Recorrido ${routeId}`;
+}
+
+// The front-seat warning informs and never blocks the change.
+export function driverChangedMessage(route: Pick<Route, "frontSeat">) {
+  return route.frontSeat
+    ? "Chofer changed. The Recorrido carries a Pasajero who needs the front seat: check it with the new Chofer."
+    : "Chofer changed";
+}
+
+// A Recorrido En curso or Cerrado keeps its Chofer; the server refuses a deactivated or busy Chofer with the reason.
+export function RouteDriverField({ route, drivers, onChange }: {
+  route: Pick<Route, "driverId" | "status">;
+  drivers: Option[];
+  onChange: (driverId: number) => void;
+}) {
+  return <label>
+    Chofer
+    <select
+      value={route.driverId}
+      disabled={route.status === "en_curso" || route.status === "cerrado"}
+      onChange={(e) => onChange(Number(e.target.value))}
+    >
+      {drivers.map((item) => <option key={item.id} value={item.id}>{item.name}</option>)}
+    </select>
+  </label>;
 }
 
 /** A Recorrido may be forced with a reason unless it leaves a Traslado unserved. */
@@ -505,6 +531,11 @@ export function PlanPage() {
             {vehicles.map((item) => <option key={item.id} value={item.id}>{item.plate}</option>)}
           </select>
         </label>
+        <RouteDriverField
+          route={route}
+          drivers={drivers}
+          onChange={(driverId) => void write(`/routes/${route.id}`, "PATCH", { driverId }, driverChangedMessage(route))}
+        />
         {route.status === "borrador" && <button type="button" onClick={() => void order(route)}>Order</button>}
         {orders[route.id]?.unassigned.length ? <>
           <p>Not placed by the engine (back among the unassigned Traslados):</p>

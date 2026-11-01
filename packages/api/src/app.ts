@@ -879,6 +879,32 @@ async function chooseVehicle(client: Queryable, driverId: number, requested: unk
   return vehicleId;
 }
 
+/**
+ * The new Chofer of an existing Recorrido, refused once the Recorrido is En curso or Cerrado, for a deactivated account,
+ * or when the Chofer already has another Recorrido of the day overlapping its time band. The Chofer is locked as when
+ * a Recorrido is created, so two changes cannot both pass the overlap check.
+ */
+async function assertCanChangeDriver(client: Queryable, route: Record<string, unknown>, driverId: number) {
+  if (route.status === "en_curso" || route.status === "cerrado") {
+    throw new PlanningError(409, "A Recorrido En curso or Cerrado cannot change Chofer");
+  }
+  const driver = await client.query(
+    "SELECT u.disabled_at FROM drivers d JOIN users u ON u.id = d.user_id WHERE d.id = $1 FOR UPDATE OF d",
+    [driverId],
+  ) as QueryResult;
+  if (!driver.rows[0]) throw new PlanningError(400, "Invalid request");
+  if (driver.rows[0].disabled_at !== null) throw new PlanningError(409, "This Chofer is deactivated: choose another one");
+  const overlap = await client.query(
+    `SELECT to_char(o.start_time, 'HH24:MI') AS start_time, to_char(o.end_time, 'HH24:MI') AS end_time
+       FROM routes r JOIN routes o ON o.daily_plan_id = r.daily_plan_id AND o.id <> r.id
+      WHERE r.id = $1 AND o.driver_id = $2 AND o.start_time < r.end_time AND r.start_time < o.end_time
+      ORDER BY o.start_time, o.id LIMIT 1`,
+    [route.id, driverId],
+  ) as QueryResult;
+  const busy = overlap.rows[0];
+  if (busy) throw new PlanningError(409, `This Chofer already has another Recorrido at that time: ${busy.start_time}-${busy.end_time}`);
+}
+
 async function insertRoute(client: Queryable, actorId: number, planId: number, fields: {
   driverId: number;
   vehicleId: number;
@@ -1378,19 +1404,21 @@ function driverDays(now: Date) {
 
 /**
  * The Chofer's Recorridos of one day, each as its latest Versión del plan: a Recorrido never published is not shown
- * (tomorrow appears once it is published). Every Parada carries where it is and what the Chofer needs about the Pasajero.
+ * (tomorrow appears once it is published). A Recorrido is the Chofer's when its latest version is, so a change of Chofer
+ * reaches the app with the next version. Every Parada carries where it is and what the Chofer needs about the Pasajero.
  */
 async function loadDriverDay(client: Queryable, driverId: number, date: string) {
   const versions = await client.query(
     `SELECT * FROM (
-       SELECT DISTINCT ON (pv.route_id) pv.id, pv.route_id, pv.version, to_char(pv.start_time, 'HH24:MI') AS start_time,
+       SELECT DISTINCT ON (pv.route_id) pv.id, pv.route_id, pv.version, pv.driver_id, to_char(pv.start_time, 'HH24:MI') AS start_time,
               to_char(pv.end_time, 'HH24:MI') AS end_time, v.plate,
               (SELECT max(seen.version) FROM version_acknowledgements va JOIN plan_versions seen ON seen.id = va.plan_version_id
                 WHERE seen.route_id = pv.route_id AND va.driver_id = $2) AS acknowledged
          FROM plan_versions pv JOIN routes r ON r.id = pv.route_id JOIN daily_plans dp ON dp.id = r.daily_plan_id
          JOIN vehicles v ON v.id = pv.vehicle_id
-        WHERE dp.plan_date = $1 AND r.driver_id = $2
+        WHERE dp.plan_date = $1
         ORDER BY pv.route_id, pv.version DESC) latest
+     WHERE driver_id = $2
      ORDER BY start_time, route_id`,
     [date, driverId],
   ) as QueryResult;
@@ -2758,16 +2786,22 @@ export function createApp({ db, routing, router, geocoder, solver, travelTime, c
       const id = parseId(context.req.param("id"));
       const body = await context.req.json().catch(() => null);
       const vehicleId = isObject(body) && body.vehicleId !== undefined ? positiveInt(body.vehicleId) : undefined;
+      const driverId = isObject(body) && body.driverId !== undefined ? positiveInt(body.driverId) : undefined;
       const ends = isObject(body) ? parseRouteEnds(body) : null;
-      if (!id || vehicleId === null || !ends || (vehicleId === undefined && !ends.start && ends.endKind === undefined)) {
+      if (!id || vehicleId === null || driverId === null || !ends
+        || (vehicleId === undefined && driverId === undefined && !ends.start && ends.endKind === undefined)) {
         return context.json({ error: "Invalid request" }, 400);
       }
       try {
         const route = await inTransaction(db, async (client) => {
           await lockRoute(client, id);
-          if (vehicleId !== undefined) await assertActiveUsualVehicle(client, vehicleId);
           const before: Record<string, unknown> = await getRouteById(client, id);
+          // The Chofer is locked before the Vehículo, as publishing does. The Vehículo and a start or end the Oficina set are
+          // kept; the default start and end follow the new Chofer, since "Order" derives them from the Recorrido's Chofer.
+          if (driverId !== undefined && driverId !== before.driverId) await assertCanChangeDriver(client, before, driverId);
+          if (vehicleId !== undefined) await assertActiveUsualVehicle(client, vehicleId);
           const after: Record<string, unknown> = {
+            driverId: driverId ?? before.driverId,
             vehicleId: vehicleId ?? before.vehicleId,
             startKind: ends.start ? ends.start.kind : before.startKind,
             startLat: ends.start ? ends.start.lat : before.startLat,
@@ -2777,8 +2811,9 @@ export function createApp({ db, routing, router, geocoder, solver, travelTime, c
           const changed = Object.keys(after).filter((key) => after[key] !== before[key]);
           if (changed.length) {
             await client.query(
-              "UPDATE routes SET vehicle_id = $1, start_kind = $2, start_latitude = $3, start_longitude = $4, end_kind = $5 WHERE id = $6",
-              [after.vehicleId, after.startKind, after.startLat, after.startLng, after.endKind, id],
+              `UPDATE routes SET driver_id = $1, vehicle_id = $2, start_kind = $3, start_latitude = $4, start_longitude = $5, end_kind = $6
+                WHERE id = $7`,
+              [after.driverId, after.vehicleId, after.startKind, after.startLat, after.startLng, after.endKind, id],
             );
             await appendChange(
               client, actor.id, "route", String(id), "updated",
@@ -3112,9 +3147,13 @@ export function createApp({ db, routing, router, geocoder, solver, travelTime, c
       const body = await context.req.json().catch(() => null);
       const version = isObject(body) ? positiveInt(body.version) : null;
       if (!id || !version) return context.json({ error: "Invalid request" }, 400);
+      // A version belongs to the Chofer it was published for, so after a change of Chofer each one acknowledges their own.
       const route = await db.query(
-        "SELECT r.driver_id, to_char(dp.plan_date, 'YYYY-MM-DD') AS date FROM routes r JOIN daily_plans dp ON dp.id = r.daily_plan_id WHERE r.id = $1",
-        [id],
+        `SELECT COALESCE(pv.driver_id, r.driver_id) AS driver_id, to_char(dp.plan_date, 'YYYY-MM-DD') AS date
+           FROM routes r JOIN daily_plans dp ON dp.id = r.daily_plan_id
+           LEFT JOIN plan_versions pv ON pv.route_id = r.id AND pv.version = $2
+          WHERE r.id = $1`,
+        [id, version],
       ) as QueryResult;
       const row = route.rows[0];
       if (!row) return context.json({ error: "Recorrido not found" }, 404);
