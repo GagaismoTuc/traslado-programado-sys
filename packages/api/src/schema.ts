@@ -419,7 +419,7 @@ export const alerts = pgTable("alerts", {
   uniqueIndex("alerts_dedupe_key_unique").on(table.dedupeKey),
   check(
     "alerts_kind_check",
-    sql`${table.kind} IN ('other_adult_handover', 'mark_flagged', 'mark_conflict', 'authorization_conflict', 'absent_on_entrada')`,
+    sql`${table.kind} IN ('other_adult_handover', 'mark_flagged', 'mark_conflict', 'authorization_conflict', 'absent_on_entrada', 'close_refused')`,
   ),
 ]);
 

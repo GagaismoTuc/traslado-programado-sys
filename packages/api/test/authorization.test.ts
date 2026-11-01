@@ -68,6 +68,7 @@ const authorizationEvidence = new Map([
   ["GET /driver/days/:date", "refuses unauthenticated callers and the Oficina on every driver endpoint"],
   ["POST /driver/routes/:id/acknowledgements", "refuses unauthenticated callers and the Oficina on every driver endpoint"],
   ["POST /driver/routes/:id/start", "refuses unauthenticated callers and the Oficina on every driver endpoint"],
+  ["POST /driver/routes/:id/close", "refuses unauthenticated callers and the Oficina on every driver endpoint"],
   ["POST /driver/routes/:id/marks", "refuses unauthenticated callers and the Oficina on every driver endpoint"],
   ["GET /driver/routes/:id/transfers/:transferId/handover", "refuses unauthenticated callers and the Oficina on every driver endpoint"],
   ["GET /transfers/:id/authorizations", "lets only the Oficina record, list and revoke Autorizaciones puntuales and read the alert inbox"],

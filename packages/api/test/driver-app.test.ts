@@ -189,6 +189,7 @@ describe("Driver app scope", () => {
       [`/driver/days/${TODAY}`, "GET", undefined],
       [`/driver/routes/${mine.routeId}/acknowledgements`, "POST", { version: 1 }],
       [`/driver/routes/${mine.routeId}/start`, "POST", {}],
+      [`/driver/routes/${mine.routeId}/close`, "POST", {}],
       [`/driver/routes/${mine.routeId}/marks`, "POST", {
         id: "00000000-0000-4000-8000-000000000001", transferId: mine.transferId, kind: "subio", phoneTime: "2026-10-23T12:00:00.000Z", location: null, version: 1,
       }],

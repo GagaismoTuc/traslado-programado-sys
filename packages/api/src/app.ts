@@ -3772,6 +3772,54 @@ export function createApp({ db, routing, router, geocoder, solver, travelTime, c
         return planningFailure(context, error);
       }
     })
+    // Closes an En curso Recorrido once no Traslado on it is Planificado or Subió without Entregado; closing it again changes
+    // nothing. A refusal lists those Traslados, logs the attempt and raises an alert for the Oficina.
+    .post("/driver/routes/:id/close", async (context) => {
+      const chofer = await requireDriver(context);
+      if (chofer instanceof Response) return chofer;
+      const id = parseId(context.req.param("id"));
+      if (!id) return context.json({ error: "Invalid request" }, 400);
+      const route = await ownRoute(context, chofer.driverId, id);
+      if (route instanceof Response) return route;
+      try {
+        const result = await inTransaction(db, async (client) => {
+          // The Traslados are locked before the Recorrido, the order a Marca, a move and an Ausencia use. Locking them again
+          // after the Recorrido takes one a move added in between; no move can add another while the Recorrido is locked.
+          const lockTransfers = async () => await client.query(
+            "SELECT id FROM transfers WHERE id IN (SELECT transfer_id FROM stops WHERE route_id = $1) ORDER BY id FOR UPDATE",
+            [id],
+          );
+          await lockTransfers();
+          const status = (await client.query("SELECT status FROM routes WHERE id = $1 FOR UPDATE", [id]) as QueryResult).rows[0].status;
+          if (status === "cerrado") return { status: 200 as const, body: { route: { routeId: id, status: "cerrado" } } };
+          if (status !== "en_curso") throw new PlanningError(409, "Only a Recorrido en curso can be closed");
+          await lockTransfers();
+          const open = await client.query(
+            `SELECT t.id, t.direction, t.status, p.name FROM transfers t JOIN passengers p ON p.id = t.passenger_id
+              WHERE t.id IN (SELECT transfer_id FROM stops WHERE route_id = $1) AND t.status IN ('planificado', 'subio')
+              ORDER BY t.target_time, t.id`,
+            [id],
+          ) as QueryResult;
+          if (open.rows.length) {
+            const transfers = open.rows.map((row) => ({
+              transferId: Number(row.id), passengerName: String(row.name), direction: String(row.direction), status: String(row.status),
+            }));
+            await insertAlert(client, { kind: "close_refused", routeId: id, details: { transfers } }, now());
+            await appendChange(client, chofer.user.id, "route", String(id), "close_refused", { status }, { transfers });
+            return {
+              status: 409 as const,
+              body: { error: "Resolve these Traslados before closing the Recorrido", transfers },
+            };
+          }
+          await client.query("UPDATE routes SET status = 'cerrado' WHERE id = $1", [id]);
+          await appendChange(client, chofer.user.id, "route", String(id), "closed", { status }, { status: "cerrado" });
+          return { status: 200 as const, body: { route: { routeId: id, status: "cerrado" } } };
+        });
+        return context.json(result.body, result.status);
+      } catch (error) {
+        return planningFailure(context, error);
+      }
+    })
     // A Marca Subió, Ausente or Entregado, idempotent by the phone's UUID; see recordMark.
     .post("/driver/routes/:id/marks", async (context) => {
       const chofer = await requireDriver(context);
