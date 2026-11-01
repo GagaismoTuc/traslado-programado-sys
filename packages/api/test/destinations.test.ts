@@ -145,7 +145,7 @@ describe("Destinos", () => {
     const created = await request("/destinations", "POST", validDestination, office);
     expect(created.status).toBe(201);
     const destination = (await created.json()).destination;
-    expect(destination).toEqual({ id: expect.any(Number), ...validDestination, createdAt: expect.any(String) });
+    expect(destination).toEqual({ id: expect.any(Number), ...validDestination, arrivalToleranceMinutes: 30, createdAt: expect.any(String) });
     const listed = await request("/destinations", "GET", undefined, office);
     expect(listed.status).toBe(200);
     expect(await listed.json()).toEqual({ destinations: [destination] });
@@ -163,7 +163,8 @@ describe("Destinos", () => {
       entity_id: String(destination.id),
       action: "created",
       before_data: null,
-      after_data: { name: "Escuela Sintetica 1", kind: "school", address: "Calle Inventada 101", accessNotes: "Entrada por el portón lateral", lat: -26.8241, lng: -65.2036 },
+      after_data: { name: "Escuela Sintetica 1", kind: "school", address: "Calle Inventada 101", accessNotes: "Entrada por el portón lateral", lat: -26.8241, lng: -65.2036,
+        arrivalToleranceMinutes: 30 },
     }]);
 
     await migrationPool.query("REVOKE INSERT ON change_log FROM traslado_app");

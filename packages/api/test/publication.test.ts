@@ -479,7 +479,7 @@ describe("Publication and Versiones del plan", () => {
     const { vehicle, driver, passenger, route, transfer, publish, destination } = await setup("regla10");
     const therapy = await destination({ lat: -26.79, lng: -65.2 }, "Centro Terapéutico Sintético");
     const recorrido = await route(await driver(await vehicle()), "14:00", "16:00");
-    const item = await transfer(await passenger(), "15:00", recorrido, { originDestinationId: therapy });
+    const item = await transfer(await passenger(), "15:00", recorrido, { originDestinationId: therapy, exitTime: "14:30" });
 
     const { version } = await ok(publish(recorrido));
     expect(version.transfers).toEqual([{ transferId: item, companions: 1, directDistanceMeters: 3000, plannedRideMeters: 3000 }]);

@@ -112,6 +112,7 @@ export interface LegDuration {
 export type RouteRuleViolationType =
   | "max_ride_time_exceeded"
   | "capacity_exceeded"
+  | "front_seat_shared"
   | "missing_adaptation"
   | "target_time_window_broken"
   | "unserved_transfer"
@@ -276,6 +277,8 @@ export function validateRoute(
 
   // 4. Vehicle capacity check (Acompañante takes a seat)
   let currentLoad: CapacityVector = { seats: 0 };
+  // Pasajeros aboard who need the Asiento delantero; the Vehículo has one, whatever its capacity vector says.
+  const frontAboard: string[] = [];
   for (let i = 0; i < stops.length; i++) {
     const stop = stops[i];
     const transfer = transferMap.get(stop.transferId);
@@ -287,6 +290,23 @@ export function validateRoute(
     const delta: CapacityVector = passenger?.frontSeat
       ? { ...demand, front: Math.max(demand.front ?? 0, 1) }
       : demand;
+
+    if (passenger?.frontSeat && passengerId) {
+      if (isPickup(stop.type)) {
+        frontAboard.push(passengerId);
+        if (frontAboard.length > 1) {
+          violations.push({
+            rule: "front_seat_shared",
+            passengerId,
+            transferId: stop.transferId,
+            message: `Pasajeros ${frontAboard.join(" and ")} both need the Asiento delantero and are aboard at the same time`,
+            details: { aboard: [...frontAboard], stopIndex: i },
+          });
+        }
+      } else if (isDropoff(stop.type) && frontAboard.includes(passengerId)) {
+        frontAboard.splice(frontAboard.indexOf(passengerId), 1);
+      }
+    }
 
     if (isPickup(stop.type)) {
       currentLoad = addCapacity(currentLoad, delta);

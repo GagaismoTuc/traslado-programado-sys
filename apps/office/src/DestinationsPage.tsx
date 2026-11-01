@@ -3,7 +3,16 @@ import { redirectUnauthorized, send, suggestAddressPin } from "./api";
 import { OfficeNav } from "./OfficeNav";
 import { PinPicker, type LatLng } from "./PinPicker";
 
-type Destination = { id: number; name: string; kind: string; address: string; accessNotes: string | null; lat: number; lng: number };
+type Destination = {
+  id: number;
+  name: string;
+  kind: string;
+  address: string;
+  accessNotes: string | null;
+  lat: number;
+  lng: number;
+  arrivalToleranceMinutes: number;
+};
 
 const KINDS = [
   ["school", "School"],
@@ -68,6 +77,8 @@ export function DestinationsPage() {
         kind: values.get("kind"),
         address: values.get("address"),
         accessNotes: values.get("accessNotes"),
+        // Left empty, the API takes it from the kind: 30 minutes for schools and day centres, 0 otherwise.
+        arrivalToleranceMinutes: values.get("arrivalToleranceMinutes") ? Number(values.get("arrivalToleranceMinutes")) : null,
         lat: pin.lat,
         lng: pin.lng,
       });
@@ -87,6 +98,19 @@ export function DestinationsPage() {
     }
   }
 
+  async function saveTolerance(event: FormEvent<HTMLFormElement>, destination: Destination) {
+    event.preventDefault();
+    const value = new FormData(event.currentTarget).get("arrivalToleranceMinutes");
+    try {
+      const response = await send(`/destinations/${destination.id}`, "PATCH", { arrivalToleranceMinutes: Number(value) });
+      if (await redirectUnauthorized(response)) return;
+      setMessage(response.ok ? `Arrival tolerance of ${destination.name} saved` : "Unable to save the arrival tolerance");
+      if (response.ok) await loadDestinations();
+    } catch {
+      setMessage("Unable to reach the server");
+    }
+  }
+
   return <main>
     <h1>Destinations</h1>
     <OfficeNav />
@@ -97,6 +121,10 @@ export function DestinationsPage() {
       <label>Kind<select name="kind">{KINDS.map(([value, label]) => <option key={value} value={value}>{label}</option>)}</select></label>
       <label>Address<input name="address" maxLength={500} required /></label>
       <label>Access notes<textarea name="accessNotes" maxLength={1000} /></label>
+      <label>
+        Arrival tolerance in minutes (empty: 30 for schools and day centres, 0 otherwise)
+        <input type="number" name="arrivalToleranceMinutes" min={0} max={240} step={1} />
+      </label>
       <button type="button" onClick={() => void suggestPin()} disabled={suggesting}>{suggesting ? "Searching..." : "Suggest pin"}</button>
       {geocodeMessage && <p role="alert">{geocodeMessage}</p>}
       <PinPicker value={pin} onChange={choosePin} suggestion={suggestion} />
@@ -105,6 +133,13 @@ export function DestinationsPage() {
     <h2>Destinations</h2>
     <ul>{destinations.map((destination) => <li key={destination.id}>
       <strong>{destination.name}</strong> - {kindLabel.get(destination.kind) ?? destination.kind} - {destination.address}
+      <form key={destination.arrivalToleranceMinutes} onSubmit={(event) => void saveTolerance(event, destination)}>
+        <label>
+          Arrival tolerance of {destination.name} (minutes)
+          <input type="number" name="arrivalToleranceMinutes" min={0} max={240} step={1} required defaultValue={destination.arrivalToleranceMinutes} />
+        </label>
+        <button type="submit">Save tolerance</button>
+      </form>
     </li>)}</ul>
   </main>;
 }

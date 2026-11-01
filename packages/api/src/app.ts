@@ -2,7 +2,7 @@ import { createHash, randomBytes } from "node:crypto";
 import { getCookie, deleteCookie, setCookie } from "hono/cookie";
 import { getConnInfo } from "@hono/node-server/conninfo";
 import { Hono, type Context } from "hono";
-import { validateRoute, type RouteViolation, type ServerEpoch } from "@traslado/shared";
+import { validateRoute, type RouteViolation, type ServerEpoch, type Stop as ValidatorStop } from "@traslado/shared";
 import { createSessionToken, hashPassword, hashSessionToken, normalizeUsername, verifyPassword } from "./auth.js";
 import {
   createAttemptLimiter,
@@ -15,6 +15,8 @@ import {
   type SessionRow,
 } from "./sessions.js";
 import type { GeocodeResult, Geocoder } from "./geocoding.js";
+import type { TravelTime } from "./routing.js";
+import { planRoute, speedFactorAt, type LngLat, type PlannerSettings, type PlanResult, type PlanTransfer, type VroomSolver } from "./planner.js";
 
 type QueryResult = { rows: Record<string, unknown>[]; rowCount: number | null };
 type Queryable = { query: (sql: string, values?: unknown[]) => Promise<unknown> };
@@ -41,6 +43,7 @@ export type AppConfig = {
   now?: () => Date;
   // A Chofer's day is cut into Recorridos where two consecutive target times are further apart than this.
   routeGapMinutes?: number;
+  planner?: PlannerSettings;
 };
 
 type UserRow = {
@@ -73,8 +76,10 @@ const dummyPasswordHash = hashPassword("not-a-real-user-password");
 const GEOCODE_INTERVAL_MS = 1000;
 const GEOCODE_CACHE_LIMIT = 500;
 const DESTINATION_KINDS = ["school", "clinic", "therapy", "day_centre", "other"];
-const DESTINATION_COLUMNS =
-  `id, name, kind, address, access_notes AS "accessNotes", latitude AS lat, longitude AS lng, created_at AS "createdAt"`;
+const DESTINATION_COLUMNS = `id, name, kind, address, access_notes AS "accessNotes", latitude AS lat, longitude AS lng,
+  arrival_tolerance_minutes AS "arrivalToleranceMinutes", created_at AS "createdAt"`;
+// Tolerancia de llegada by kind when the Oficina does not give one: schools and day centres half an hour, the rest none.
+const DEFAULT_ARRIVAL_TOLERANCE: Record<string, number> = { school: 30, day_centre: 30 };
 const VEHICLE_FEATURE_COLUMNS = `id, name, created_at AS "createdAt"`;
 
 function isObject(value: unknown): value is Record<string, unknown> {
@@ -193,7 +198,15 @@ function parseDestination(body: unknown) {
   const kind = typeof body.kind === "string" && DESTINATION_KINDS.includes(body.kind) ? body.kind : null;
   if (!name || !address || lat === null || lng === null || !kind) return null;
   if (accessNotes === undefined || (accessNotes && accessNotes.length > 1000)) return null;
-  return { name, kind, address, accessNotes, lat, lng };
+  const arrivalToleranceMinutes = body.arrivalToleranceMinutes === undefined || body.arrivalToleranceMinutes === null
+    ? DEFAULT_ARRIVAL_TOLERANCE[kind] ?? 0
+    : parseArrivalTolerance(body.arrivalToleranceMinutes);
+  if (arrivalToleranceMinutes === null) return null;
+  return { name, kind, address, accessNotes, lat, lng, arrivalToleranceMinutes };
+}
+
+function parseArrivalTolerance(value: unknown) {
+  return typeof value === "number" && Number.isInteger(value) && value >= 0 && value <= 240 ? value : null;
 }
 
 class InvalidReferenceError extends Error {}
@@ -695,6 +708,18 @@ function parseTransfer(body: unknown) {
   return { passengerId, direction, destinationId, originDestinationId, targetTime, companions };
 }
 
+const EXIT_TIME_REQUIRED = "exitTime is required for an entrada that starts at another Destino and must be before targetTime";
+const EXIT_TIME_NOT_ALLOWED = "exitTime is only for an entrada that starts at another Destino";
+
+// The time the Pasajero leaves the first Destino: required, and before T, only for an entrada that starts at a Destino.
+function parseExitTime(value: unknown, originDestinationId: unknown, targetTime: string): { exitTime: string | null } | { error: string } {
+  if (originDestinationId === null) {
+    return value === undefined || value === null ? { exitTime: null } : { error: EXIT_TIME_NOT_ALLOWED };
+  }
+  const exitTime = parseLocalTime(value);
+  return exitTime && exitTime < targetTime ? { exitTime } : { error: EXIT_TIME_REQUIRED };
+}
+
 const TRANSFER_SELECT_SQL = `
   SELECT
     t.id,
@@ -706,6 +731,7 @@ const TRANSFER_SELECT_SQL = `
     t.origin_destination_id AS "originDestinationId",
     o.name AS "originDestinationName",
     to_char(t.target_time, 'HH24:MI') AS "targetTime",
+    to_char(t.exit_time, 'HH24:MI') AS "exitTime",
     t.companions,
     t.status,
     s.route_id AS "routeId"
@@ -747,14 +773,32 @@ const ROUTE_SELECT_SQL = `
     v.plate AS "vehiclePlate",
     to_char(r.start_time, 'HH24:MI') AS "startTime",
     to_char(r.end_time, 'HH24:MI') AS "endTime",
-    r.status
+    r.status,
+    r.start_kind AS "startKind",
+    r.start_latitude AS "startLat",
+    r.start_longitude AS "startLng",
+    r.end_kind AS "endKind",
+    EXISTS (
+      SELECT 1 FROM stops fs JOIN transfers ft ON ft.id = fs.transfer_id JOIN passengers fp ON fp.id = ft.passenger_id
+       WHERE fs.route_id = r.id AND fp.front_seat
+    ) AS "frontSeat"
   FROM routes r
   JOIN drivers dr ON dr.id = r.driver_id
   JOIN vehicles v ON v.id = r.vehicle_id
 `;
 
+// startKind and endKind are null while the Recorrido keeps the default start and end; frontSeat says it carries
+// a Pasajero who needs the Asiento delantero.
 function formatRouteRow(row: Record<string, unknown>) {
-  return { ...row, id: Number(row.id), driverId: Number(row.driverId), vehicleId: Number(row.vehicleId) };
+  return {
+    ...row,
+    id: Number(row.id),
+    driverId: Number(row.driverId),
+    vehicleId: Number(row.vehicleId),
+    startLat: nullableNumber(row.startLat),
+    startLng: nullableNumber(row.startLng),
+    frontSeat: Boolean(row.frontSeat),
+  };
 }
 
 async function getRouteById(client: Queryable, routeId: number) {
@@ -771,6 +815,7 @@ const STOP_SELECT_SQL = `
     s.kind,
     s.position,
     s.leg_distance_meters AS "legDistanceMeters",
+    to_char(s.planned_time, 'HH24:MI') AS "plannedTime",
     p.name AS "passengerName",
     CASE
       WHEN s.kind = 'pickup' AND t.direction = 'entrada' THEN o.name
@@ -834,6 +879,7 @@ async function loadDailyPlan(client: Queryable, date: string) {
     position: Number(row.position),
     legDistanceMeters: nullableNumber(row.legDistanceMeters),
     placeName: (row.placeName as string | null) ?? null,
+    plannedTime: (row.plannedTime as string | null) ?? null,
   }));
   // km only from stored leg distances; null while any leg of the Recorrido has none, never a partial sum.
   const routeRows = routes.rows.map((row) => {
@@ -864,10 +910,11 @@ async function lockRoute(client: Queryable, routeId: number) {
   return { id: routeId, dailyPlanId: Number(result.rows[0].daily_plan_id) };
 }
 
-// Renumbers the Paradas 1..n in their current order and drops the stored leg distances, which belonged to the old order.
+// Renumbers the Paradas 1..n in their current order and drops the stored leg distances and planned times,
+// which belonged to the old order.
 async function settleStops(client: Queryable, routeId: number) {
   await client.query(
-    `UPDATE stops s SET position = n.rn, leg_distance_meters = NULL
+    `UPDATE stops s SET position = n.rn, leg_distance_meters = NULL, planned_time = NULL
        FROM (SELECT id, row_number() OVER (ORDER BY position, id) AS rn FROM stops WHERE route_id = $1) n
       WHERE s.id = n.id`,
     [routeId],
@@ -934,6 +981,193 @@ async function insertRoute(client: Queryable, actorId: number, planId: number, f
   const id = Number(inserted.rows[0].id);
   await appendChange(client, actorId, "route", String(id), "created", null, { dailyPlanId: planId, ...fields });
   return id;
+}
+
+const START_KINDS = ["home", "previous", "point"];
+const END_KINDS = ["home", "open"];
+
+// Start and end settings of PATCH /routes/:id; a null kind goes back to the default rule, undefined leaves it unchanged.
+function parseRouteEnds(body: Record<string, unknown>) {
+  const result: { start?: { kind: string | null; lat: number | null; lng: number | null }; endKind?: string | null } = {};
+  if (body.startKind !== undefined) {
+    const kind = body.startKind;
+    if (kind !== null && (typeof kind !== "string" || !START_KINDS.includes(kind))) return null;
+    if (kind === "point") {
+      const lat = coordinate(body.startLat, 90);
+      const lng = coordinate(body.startLng, 180);
+      if (lat === null || lng === null) return null;
+      result.start = { kind, lat, lng };
+    } else {
+      if ((body.startLat ?? null) !== null || (body.startLng ?? null) !== null) return null;
+      result.start = { kind, lat: null, lng: null };
+    }
+  } else if (body.startLat !== undefined || body.startLng !== undefined) {
+    return null;
+  }
+  if (body.endKind !== undefined) {
+    if (body.endKind !== null && (typeof body.endKind !== "string" || !END_KINDS.includes(body.endKind))) return null;
+    result.endKind = body.endKind;
+  }
+  return result;
+}
+
+const ORDER_ROUTE_SQL = `
+  SELECT r.daily_plan_id, r.driver_id, r.vehicle_id, r.status, to_char(r.start_time, 'HH24:MI') AS start_time,
+         r.start_kind, r.start_latitude, r.start_longitude, r.end_kind, v.seats,
+         ARRAY(SELECT feature_id FROM vehicle_feature_assignments WHERE vehicle_id = v.id ORDER BY feature_id) AS feature_ids,
+         dr.home_latitude, dr.home_longitude
+    FROM routes r JOIN vehicles v ON v.id = r.vehicle_id JOIN drivers dr ON dr.id = r.driver_id
+   WHERE r.id = $1`;
+
+// One row per Traslado of the Recorrido, in its current order, with what the engine and the validator need.
+const ORDER_TRANSFERS_SQL = `
+  SELECT t.id, t.passenger_id, t.direction, to_char(t.target_time, 'HH24:MI') AS target,
+         to_char(t.exit_time, 'HH24:MI') AS exit_time, t.companions, p.name,
+         p.home_latitude, p.home_longitude, p.front_seat, p.max_ride_time_minutes, p.pickup_duration_minutes,
+         p.dropoff_duration_minutes, d.latitude AS d_lat, d.longitude AS d_lng, d.arrival_tolerance_minutes,
+         o.latitude AS o_lat, o.longitude AS o_lng,
+         ARRAY(SELECT feature_id FROM passenger_required_features f WHERE f.passenger_id = p.id ORDER BY feature_id) AS feature_ids
+    FROM stops s
+    JOIN transfers t ON t.id = s.transfer_id
+    JOIN passengers p ON p.id = t.passenger_id
+    JOIN destinations d ON d.id = t.destination_id
+    LEFT JOIN destinations o ON o.id = t.origin_destination_id
+   WHERE s.route_id = $1 AND s.kind = 'pickup'
+   ORDER BY s.position`;
+
+// Where the last Parada of a Recorrido is and when its service ends (null while it has no planned time).
+const LAST_STOP_SQL = `
+  SELECT CASE WHEN (s.kind = 'pickup') = (t.direction = 'entrada') THEN COALESCE(o.latitude, p.home_latitude) ELSE d.latitude END AS lat,
+         CASE WHEN (s.kind = 'pickup') = (t.direction = 'entrada') THEN COALESCE(o.longitude, p.home_longitude) ELSE d.longitude END AS lng,
+         EXTRACT(EPOCH FROM s.planned_time) / 60
+           + CASE s.kind WHEN 'pickup' THEN p.pickup_duration_minutes ELSE p.dropoff_duration_minutes END AS planned_end
+    FROM stops s
+    JOIN transfers t ON t.id = s.transfer_id
+    JOIN passengers p ON p.id = t.passenger_id
+    JOIN destinations d ON d.id = t.destination_id
+    LEFT JOIN destinations o ON o.id = t.origin_destination_id
+   WHERE s.route_id = $1
+   ORDER BY s.position DESC
+   LIMIT 1`;
+
+function lngLat(lat: unknown, lng: unknown): LngLat {
+  return [Number(lng), Number(lat)];
+}
+
+type Neighbours = { previous?: Record<string, unknown>; last?: Record<string, unknown>; next?: Record<string, unknown> };
+
+// The same Chofer's Recorridos right before and after this one and the previous one's last Parada, which decide
+// where this one starts and ends.
+async function loadNeighbours(client: Queryable, routeId: number, route: Record<string, unknown>): Promise<Neighbours> {
+  const values = [route.daily_plan_id, route.driver_id, routeId, String(route.start_time)];
+  const previousResult = await client.query(
+    `SELECT id, vehicle_id, end_kind, to_char(end_time, 'HH24:MI') AS end_time FROM routes
+      WHERE daily_plan_id = $1 AND driver_id = $2 AND id <> $3 AND (start_time < $4 OR (start_time = $4 AND id < $3))
+      ORDER BY start_time DESC, id DESC LIMIT 1`,
+    values,
+  ) as QueryResult;
+  const nextResult = await client.query(
+    `SELECT id FROM routes
+      WHERE daily_plan_id = $1 AND driver_id = $2 AND id <> $3 AND (start_time > $4 OR (start_time = $4 AND id > $3))
+      ORDER BY start_time, id LIMIT 1`,
+    values,
+  ) as QueryResult;
+  const previous = previousResult.rows[0];
+  const last = previous ? (await client.query(LAST_STOP_SQL, [previous.id]) as QueryResult).rows[0] : undefined;
+  return { previous, last, next: nextResult.rows[0] };
+}
+
+/**
+ * Start and end of the Recorrido for the engine. Default start: the Chofer's home for their first Recorrido of the day
+ * or after a gap longer than routeGapMinutes; otherwise the previous Recorrido's last Parada when it used the same
+ * Vehículo, else the Oficina must set it. Default end: home for the Chofer's last Recorrido of the day, open otherwise.
+ * "Previous" is the same Chofer's Recorrido with the latest earlier start; its planned end bounds this one's departure.
+ * When the Oficina set the previous one to end at home, the chain starts there instead of at its last Parada.
+ */
+function resolveRouteEnds(route: Record<string, unknown>, { previous, last, next }: Neighbours, routeGapMinutes: number) {
+  const home = lngLat(route.home_latitude, route.home_longitude);
+  const startTime = String(route.start_time);
+  let previousEnd: number | undefined;
+  if (previous) {
+    previousEnd = last?.planned_end === null || last?.planned_end === undefined
+      ? minutesOf(String(previous.end_time))
+      : Math.ceil(Number(last.planned_end));
+  }
+  const previousStop = last ? lngLat(last.lat, last.lng) : null;
+  const chained = previousStop && previous!.end_kind === "home" ? home : previousStop;
+
+  let start: LngLat;
+  if (route.start_kind === "home") start = home;
+  else if (route.start_kind === "point") start = lngLat(route.start_latitude, route.start_longitude);
+  else if (route.start_kind === "previous") {
+    if (!chained) throw new PlanningError(409, "This Recorrido has no previous Recorrido with Paradas to start from");
+    start = chained;
+  } else if (previousEnd === undefined || minutesOf(startTime) - previousEnd > routeGapMinutes) start = home;
+  else if (chained && Number(previous!.vehicle_id) === Number(route.vehicle_id)) start = chained;
+  else throw new PlanningError(409, "Set where this Recorrido starts: the previous Recorrido has another Vehículo or no Paradas");
+
+  const endKind = route.end_kind ?? (next ? "open" : "home");
+  return { start, end: endKind === "home" ? home : null, previousEnd, previousStop, previousEndPoint: chained };
+}
+
+function stopLocation(row: Record<string, unknown>, kind: "pickup" | "dropoff"): LngLat {
+  const home = lngLat(row.home_latitude, row.home_longitude);
+  const destination = lngLat(row.d_lat, row.d_lng);
+  if (row.direction === "salida") return kind === "pickup" ? destination : home;
+  if (kind === "dropoff") return destination;
+  return row.o_lat === null ? home : lngLat(row.o_lat, row.o_lng);
+}
+
+function toPlanTransfer(row: Record<string, unknown>): PlanTransfer {
+  return {
+    id: Number(row.id),
+    direction: row.direction as "entrada" | "salida",
+    targetMinutes: minutesOf(String(row.target)),
+    ...(row.exit_time === null ? {} : { notBeforeMinutes: minutesOf(String(row.exit_time)) }),
+    pickup: stopLocation(row, "pickup"),
+    dropoff: stopLocation(row, "dropoff"),
+    seats: 1 + Number(row.companions),
+    frontSeat: Boolean(row.front_seat),
+    requiredFeatureIds: (row.feature_ids as number[]).map(Number),
+    maxRideMinutes: Number(row.max_ride_time_minutes),
+    pickupMinutes: Number(row.pickup_duration_minutes),
+    dropoffMinutes: Number(row.dropoff_duration_minutes),
+  };
+}
+
+// The applied order checked by the route validator; entradas accept arrival up to T + the Destino's Tolerancia de llegada.
+function validateOrder(
+  rows: Record<string, unknown>[],
+  stops: { transferId: number; kind: "pickup" | "dropoff"; plannedSeconds: number }[],
+  route: Record<string, unknown>,
+) {
+  const placed = new Set(stops.map((stop) => stop.transferId));
+  const served = rows.filter((row) => placed.has(Number(row.id)));
+  const validatorStops: ValidatorStop[] = stops.map((stop) => ({
+    id: `${stop.transferId}-${stop.kind}`,
+    transferId: String(stop.transferId),
+    type: stop.kind,
+    plannedTime: stop.plannedSeconds / 60,
+  }));
+  return validateRoute({
+    route: validatorStops,
+    passengers: served.map((row) => ({
+      id: String(row.passenger_id),
+      maxRideTimeMinutes: Number(row.max_ride_time_minutes),
+      frontSeat: Boolean(row.front_seat),
+      dropoffDurationMinutes: Number(row.dropoff_duration_minutes),
+      requiredFeatures: (row.feature_ids as number[]).map(String),
+    })),
+    vehicle: { id: "vehicle", capacity: { seats: Number(route.seats), front: 1 }, features: (route.feature_ids as number[]).map(String) },
+    transfers: served.map((row) => ({
+      id: String(row.id),
+      passengerId: String(row.passenger_id),
+      direction: row.direction as "entrada" | "salida",
+      targetTime: minutesOf(String(row.target)),
+      companions: Number(row.companions),
+      ...(row.direction === "entrada" ? { lateToleranceMinutes: Number(row.arrival_tolerance_minutes) } : {}),
+    })),
+  });
 }
 
 type Point = { lat: number; lng: number };
@@ -1148,6 +1382,14 @@ function validatePublication(snapshot: PublicationSnapshot, planned: number[]) {
   });
 }
 
+// Everything the engine was given, the neighbouring Recorridos included; the result is applied only while this is unchanged.
+async function orderInputKey(client: Queryable, routeId: number) {
+  const route = (await client.query(ORDER_ROUTE_SQL, [routeId]) as QueryResult).rows[0];
+  const rows = route ? (await client.query(ORDER_TRANSFERS_SQL, [routeId]) as QueryResult).rows : [];
+  const neighbours = route ? await loadNeighbours(client, routeId, route) : {};
+  return { route, rows, neighbours, key: JSON.stringify([route, rows, neighbours]) };
+}
+
 const PLAN_VERSION_SELECT_SQL = `
   SELECT pv.id, pv.route_id AS "routeId", pv.version, pv.vehicle_id AS "vehicleId", v.plate AS "vehiclePlate",
          pv.driver_id AS "driverId", to_char(pv.start_time, 'HH24:MI') AS "startTime", to_char(pv.end_time, 'HH24:MI') AS "endTime",
@@ -1287,16 +1529,20 @@ async function loadDriverDay(client: Queryable, driverId: number, date: string) 
   };
 }
 
-export function createApp({ db, routing, router, geocoder, config }: {
+export function createApp({ db, routing, router, geocoder, solver, travelTime, config }: {
   db: HealthDatabase;
   routing: RoutingHealth;
   router?: Router;
   geocoder?: Geocoder;
+  // Solve VROOM problems and measure driving time for "Order"; without them ordering answers 503.
+  solver?: VroomSolver;
+  travelTime?: TravelTime;
   config: AppConfig;
 }) {
   if (!config.serverEpoch.trim()) throw new Error("SERVER_EPOCH is required");
   const healthTimeoutMs = config.healthTimeoutMs ?? 1000;
   const routeGapMinutes = config.routeGapMinutes ?? 60;
+  const plannerSettings = config.planner ?? { rideTimeBufferMinutes: 5, speedFactors: [], earlyToleranceMinutes: 15 };
   const now = config.now ?? (() => new Date());
   // One geocoder request per second for the whole process; cached answers do not use the slot.
   const geocodeCache = new Map<string, GeocodeResult | null>();
@@ -1952,14 +2198,40 @@ export function createApp({ db, routing, router, geocoder, config }: {
       if (!destination) return context.json({ error: "Invalid request" }, 400);
       const created = await inTransaction(db, async (client) => {
         const result = await client.query(
-          `INSERT INTO destinations (name, kind, address, access_notes, latitude, longitude) VALUES ($1, $2, $3, $4, $5, $6) RETURNING ${DESTINATION_COLUMNS}`,
-          [destination.name, destination.kind, destination.address, destination.accessNotes, destination.lat, destination.lng],
+          `INSERT INTO destinations (name, kind, address, access_notes, latitude, longitude, arrival_tolerance_minutes)
+           VALUES ($1, $2, $3, $4, $5, $6, $7) RETURNING ${DESTINATION_COLUMNS}`,
+          [destination.name, destination.kind, destination.address, destination.accessNotes, destination.lat, destination.lng,
+            destination.arrivalToleranceMinutes],
         ) as QueryResult;
         const row = result.rows[0];
         await appendChange(client, actor.id, "destination", String(row.id), "created", null, destination);
         return row;
       });
       return context.json({ destination: created }, 201);
+    })
+    .patch("/destinations/:id", async (context) => {
+      const actor = await requireOffice(context);
+      if (actor instanceof Response) return actor;
+      const id = parseId(context.req.param("id"));
+      const body = await context.req.json().catch(() => null);
+      const tolerance = isObject(body) ? parseArrivalTolerance(body.arrivalToleranceMinutes) : null;
+      if (!id || tolerance === null) return context.json({ error: "Invalid request" }, 400);
+      const updated = await inTransaction(db, async (client) => {
+        const before = await client.query(
+          "SELECT arrival_tolerance_minutes FROM destinations WHERE id = $1 FOR UPDATE",
+          [id],
+        ) as QueryResult;
+        if (!before.rows[0]) return null;
+        const previous = Number(before.rows[0].arrival_tolerance_minutes);
+        if (previous !== tolerance) {
+          await client.query("UPDATE destinations SET arrival_tolerance_minutes = $1 WHERE id = $2", [tolerance, id]);
+          await appendChange(client, actor.id, "destination", String(id), "updated", { arrivalToleranceMinutes: previous }, {
+            arrivalToleranceMinutes: tolerance,
+          });
+        }
+        return (await client.query(`SELECT ${DESTINATION_COLUMNS} FROM destinations WHERE id = $1`, [id]) as QueryResult).rows[0];
+      });
+      return updated ? context.json({ destination: updated }) : context.json({ error: "Destino not found" }, 404);
     })
     .get("/vehicle-features", async (context) => {
       const actor = await requireOffice(context);
@@ -2545,8 +2817,11 @@ export function createApp({ db, routing, router, geocoder, config }: {
       const actor = await requireOffice(context);
       if (actor instanceof Response) return actor;
       const date = parsePlanDate(context.req.param("date"));
-      const fields = parseTransfer(await context.req.json().catch(() => null));
+      const body = await context.req.json().catch(() => null);
+      const fields = parseTransfer(body);
       if (!date || !fields) return context.json({ error: "Invalid request" }, 400);
+      const exit = parseExitTime((body as Record<string, unknown>).exitTime, fields.originDestinationId, fields.targetTime);
+      if ("error" in exit) return context.json({ error: exit.error }, 400);
       try {
         const transfer = await inTransaction(db, async (client) => {
           const planId = await findPlanId(client, date);
@@ -2561,11 +2836,12 @@ export function createApp({ db, routing, router, geocoder, config }: {
           const destinationIds = [fields.destinationId, ...(fields.originDestinationId ? [fields.originDestinationId] : [])];
           const destinations = await client.query("SELECT id FROM destinations WHERE id = ANY($1::int[])", [destinationIds]) as QueryResult;
           if (destinations.rows.length !== destinationIds.length) throw new PlanningError(400, "Invalid request");
-          const values = { ...fields, companions: fields.companions ?? Number(row.companions) };
+          const values = { ...fields, exitTime: exit.exitTime, companions: fields.companions ?? Number(row.companions) };
           const inserted = await client.query(
-            `INSERT INTO transfers (daily_plan_id, passenger_id, direction, destination_id, origin_destination_id, target_time, companions)
-             VALUES ($1, $2, $3, $4, $5, $6, $7) RETURNING id`,
-            [planId, values.passengerId, values.direction, values.destinationId, values.originDestinationId, values.targetTime, values.companions],
+            `INSERT INTO transfers (daily_plan_id, passenger_id, direction, destination_id, origin_destination_id, target_time, exit_time, companions)
+             VALUES ($1, $2, $3, $4, $5, $6, $7, $8) RETURNING id`,
+            [planId, values.passengerId, values.direction, values.destinationId, values.originDestinationId, values.targetTime, values.exitTime,
+              values.companions],
           ) as QueryResult;
           const id = Number(inserted.rows[0].id);
           await appendChange(client, actor.id, "transfer", String(id), "created", null, { dailyPlanId: planId, ...values });
@@ -2576,13 +2852,13 @@ export function createApp({ db, routing, router, geocoder, config }: {
         return planningFailure(context, error);
       }
     })
-    // Changes the Acompañantes and assigns, moves (routeId) or unassigns (routeId: null) the Traslado.
+    // Changes the Acompañantes or the exit time, and assigns, moves (routeId) or unassigns (routeId: null) the Traslado.
     .patch("/transfers/:id", async (context) => {
       const actor = await requireOffice(context);
       if (actor instanceof Response) return actor;
       const id = parseId(context.req.param("id"));
       const body = await context.req.json().catch(() => null);
-      if (!id || !isObject(body) || (body.companions === undefined && body.routeId === undefined)) {
+      if (!id || !isObject(body) || (body.companions === undefined && body.routeId === undefined && body.exitTime === undefined)) {
         return context.json({ error: "Invalid request" }, 400);
       }
       const companions = body.companions === undefined ? undefined : parseCompanions(body.companions);
@@ -2591,13 +2867,16 @@ export function createApp({ db, routing, router, geocoder, config }: {
       try {
         const transfer = await inTransaction(db, async (client) => {
           const locked = await client.query(
-            `SELECT t.daily_plan_id, t.status, t.companions, s.route_id
+            `SELECT t.daily_plan_id, t.status, t.companions, s.route_id, t.origin_destination_id,
+                    to_char(t.target_time, 'HH24:MI') AS target_time, to_char(t.exit_time, 'HH24:MI') AS exit_time
                FROM transfers t LEFT JOIN stops s ON s.transfer_id = t.id AND s.kind = 'pickup'
               WHERE t.id = $1 FOR UPDATE OF t`,
             [id],
           ) as QueryResult;
           const row = locked.rows[0];
           if (!row) throw new PlanningError(404, "Traslado not found");
+          const exit = body.exitTime === undefined ? null : parseExitTime(body.exitTime, row.origin_destination_id, String(row.target_time));
+          if (exit && "error" in exit) throw new PlanningError(400, exit.error);
           const currentRouteId = nullableNumber(row.route_id);
           if (targetRouteId !== undefined && targetRouteId !== currentRouteId) {
             if (row.status !== "planificado") throw new PlanningError(409, "Only a Planificado Traslado can change Recorrido");
@@ -2620,6 +2899,10 @@ export function createApp({ db, routing, router, geocoder, config }: {
           if (companions !== undefined && companions !== Number(row.companions)) {
             await client.query("UPDATE transfers SET companions = $1 WHERE id = $2", [companions, id]);
             await appendChange(client, actor.id, "transfer", String(id), "updated", { companions: Number(row.companions) }, { companions });
+          }
+          if (exit && "exitTime" in exit && exit.exitTime !== row.exit_time) {
+            await client.query("UPDATE transfers SET exit_time = $1 WHERE id = $2", [exit.exitTime, id]);
+            await appendChange(client, actor.id, "transfer", String(id), "updated", { exitTime: row.exit_time }, { exitTime: exit.exitTime });
           }
           return await getTransferById(client, id);
         });
@@ -2685,20 +2968,138 @@ export function createApp({ db, routing, router, geocoder, config }: {
       if (actor instanceof Response) return actor;
       const id = parseId(context.req.param("id"));
       const body = await context.req.json().catch(() => null);
-      const vehicleId = isObject(body) ? positiveInt(body.vehicleId) : null;
-      if (!id || !vehicleId) return context.json({ error: "Invalid request" }, 400);
+      const vehicleId = isObject(body) && body.vehicleId !== undefined ? positiveInt(body.vehicleId) : undefined;
+      const ends = isObject(body) ? parseRouteEnds(body) : null;
+      if (!id || vehicleId === null || !ends || (vehicleId === undefined && !ends.start && ends.endKind === undefined)) {
+        return context.json({ error: "Invalid request" }, 400);
+      }
       try {
         const route = await inTransaction(db, async (client) => {
           await lockRoute(client, id);
-          await assertActiveUsualVehicle(client, vehicleId);
-          const before = await getRouteById(client, id);
-          if (before.vehicleId !== vehicleId) {
-            await client.query("UPDATE routes SET vehicle_id = $1 WHERE id = $2", [vehicleId, id]);
-            await appendChange(client, actor.id, "route", String(id), "updated", { vehicleId: before.vehicleId }, { vehicleId });
+          if (vehicleId !== undefined) await assertActiveUsualVehicle(client, vehicleId);
+          const before: Record<string, unknown> = await getRouteById(client, id);
+          const after: Record<string, unknown> = {
+            vehicleId: vehicleId ?? before.vehicleId,
+            startKind: ends.start ? ends.start.kind : before.startKind,
+            startLat: ends.start ? ends.start.lat : before.startLat,
+            startLng: ends.start ? ends.start.lng : before.startLng,
+            endKind: ends.endKind !== undefined ? ends.endKind : before.endKind,
+          };
+          const changed = Object.keys(after).filter((key) => after[key] !== before[key]);
+          if (changed.length) {
+            await client.query(
+              "UPDATE routes SET vehicle_id = $1, start_kind = $2, start_latitude = $3, start_longitude = $4, end_kind = $5 WHERE id = $6",
+              [after.vehicleId, after.startKind, after.startLat, after.startLng, after.endKind, id],
+            );
+            await appendChange(
+              client, actor.id, "route", String(id), "updated",
+              Object.fromEntries(changed.map((key) => [key, before[key]])),
+              Object.fromEntries(changed.map((key) => [key, after[key]])),
+            );
           }
           return await getRouteById(client, id);
         });
         return context.json({ route, ...await warningsAfterCommit(db, [id]) });
+      } catch (error) {
+        return planningFailure(context, error);
+      }
+    })
+    // "Order": the engine orders the Borrador Recorrido's Paradas and plans their times. Traslados it cannot place leave
+    // the Recorrido with their reason, so every Traslado is in the order or in `unassigned`. The engine runs outside the
+    // transaction; the result is applied only if neither the Recorrido nor the Chofer's Recorridos right before and after it
+    // changed meanwhile.
+    .post("/routes/:id/order", async (context) => {
+      const actor = await requireOffice(context);
+      if (actor instanceof Response) return actor;
+      const id = parseId(context.req.param("id"));
+      if (!id) return context.json({ error: "Invalid request" }, 400);
+      if (!solver || !travelTime) return context.json({ error: "The routing engine is not configured" }, 503);
+      try {
+        const { route, rows, neighbours, key } = await orderInputKey(db, id);
+        if (!route) throw new PlanningError(404, "Recorrido not found");
+        if (route.status !== "borrador") throw new PlanningError(409, "Only a Borrador Recorrido can be ordered");
+        // Entradas from another Destino stored before the exit time existed cannot be planned until the Oficina sets it.
+        const withoutExit = rows.filter((row) => row.o_lat !== null && row.exit_time === null);
+        if (withoutExit.length) {
+          const names = withoutExit.map((row) => `${row.name} (Traslado ${row.id})`).join(", ");
+          throw new PlanningError(409, `Set the exit time from the first Destino of: ${names}`);
+        }
+        let plan: PlanResult = { stops: [], unassigned: [] };
+        if (rows.length) {
+          const ends = resolveRouteEnds(route, neighbours, routeGapMinutes);
+          const startMinutes = minutesOf(String(route.start_time));
+          try {
+            // Not before the previous Recorrido's planned end plus the drive from its last Parada to where it ends
+            // and from there to this start.
+            let notBeforeMinutes = ends.previousEnd;
+            if (notBeforeMinutes !== undefined && ends.previousStop && ends.previousEndPoint) {
+              for (const [from, to] of [[ends.previousStop, ends.previousEndPoint], [ends.previousEndPoint, ends.start]]) {
+                if (from[0] === to[0] && from[1] === to[1]) continue;
+                const drive = await travelTime(from, to);
+                notBeforeMinutes += Math.ceil(drive / 60 / speedFactorAt(plannerSettings.speedFactors, startMinutes));
+              }
+            }
+            plan = await planRoute({
+              transfers: rows.map(toPlanTransfer),
+              vehicle: { seats: Number(route.seats), featureIds: (route.feature_ids as number[]).map(Number) },
+              start: ends.start,
+              end: ends.end,
+              notBeforeMinutes,
+              startMinutes,
+            }, plannerSettings, solver);
+          } catch {
+            return context.json({ error: "The routing engine is unavailable: the order was not changed" }, 502);
+          }
+        }
+        const stops = await inTransaction(db, async (client) => {
+          // The neighbouring Recorridos are locked too, in id order, so none of them changes before this commits.
+          const locked = [id, neighbours.previous?.id, neighbours.next?.id].filter((value) => value !== undefined).map(Number);
+          await client.query("SELECT id FROM routes WHERE id = ANY($1::int[]) ORDER BY id FOR UPDATE", [locked]);
+          await lockRoute(client, id);
+          if ((await orderInputKey(client, id)).key !== key) {
+            throw new PlanningError(409, "The Recorrido changed while it was being ordered: order it again");
+          }
+          const stopIds = async () => (await client.query("SELECT id FROM stops WHERE route_id = $1 ORDER BY position", [id]) as QueryResult)
+            .rows.map((row) => Number(row.id));
+          const before = await stopIds();
+          for (const item of plan.unassigned) {
+            await removeStops(client, item.transferId);
+            await appendChange(client, actor.id, "transfer", String(item.transferId), "unassigned", { routeId: id }, {
+              routeId: null,
+              reason: item.reason,
+            });
+          }
+          if (plan.stops.length) {
+            await client.query(
+              `UPDATE stops SET position = o.ord, planned_time = time '00:00' + o.seconds * interval '1 second', leg_distance_meters = o.meters
+                 FROM unnest($2::int[], $3::text[], $4::int[], $5::int[]) WITH ORDINALITY AS o(transfer_id, kind, seconds, meters, ord)
+                WHERE stops.route_id = $1 AND stops.transfer_id = o.transfer_id AND stops.kind = o.kind`,
+              [id, plan.stops.map((stop) => stop.transferId), plan.stops.map((stop) => stop.kind),
+                plan.stops.map((stop) => Math.round(stop.plannedSeconds)), plan.stops.map((stop) => stop.legDistanceMeters)],
+            );
+          }
+          await appendChange(client, actor.id, "route", String(id), "ordered", { stopIds: before }, {
+            stopIds: await stopIds(),
+            unassigned: plan.unassigned,
+          });
+          return (await client.query(`${STOP_SELECT_SQL} WHERE s.route_id = $1 ORDER BY s.position`, [id]) as QueryResult).rows;
+        });
+        const names = new Map(rows.map((row) => [Number(row.id), String(row.name)]));
+        return context.json({
+          route: await getRouteById(db, id),
+          stops: stops.map((row) => ({
+            id: Number(row.id),
+            transferId: Number(row.transferId),
+            kind: row.kind,
+            position: Number(row.position),
+            plannedTime: row.plannedTime ?? null,
+            legDistanceMeters: nullableNumber(row.legDistanceMeters),
+            passengerName: row.passengerName,
+            placeName: row.placeName ?? null,
+          })),
+          unassigned: plan.unassigned.map((item) => ({ ...item, passengerName: names.get(item.transferId) })),
+          violations: validateOrder(rows, plan.stops, route),
+        });
       } catch (error) {
         return planningFailure(context, error);
       }

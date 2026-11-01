@@ -1,5 +1,5 @@
 {
-  "id": "02dcd35d-1303-41f6-8fcf-b905a256a54e",
+  "id": "52da16f5-ce89-4de8-9294-7c3ee411eaed",
   "prevId": "51b71f81-45c6-449a-b6ac-c4daa864c304",
   "version": "7",
   "dialect": "postgresql",
@@ -486,6 +486,13 @@
           "primaryKey": false,
           "notNull": true
         },
+        "arrival_tolerance_minutes": {
+          "name": "arrival_tolerance_minutes",
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": true,
+          "default": 0
+        },
         "created_at": {
           "name": "created_at",
           "type": "timestamp with time zone",
@@ -500,6 +507,10 @@
       "uniqueConstraints": {},
       "policies": {},
       "checkConstraints": {
+        "destinations_arrival_tolerance_check": {
+          "name": "destinations_arrival_tolerance_check",
+          "value": "\"destinations\".\"arrival_tolerance_minutes\" BETWEEN 0 AND 240"
+        },
         "destinations_kind_check": {
           "name": "destinations_kind_check",
           "value": "\"destinations\".\"kind\" IN ('school', 'clinic', 'therapy', 'day_centre', 'other')"
@@ -511,148 +522,6 @@
         "destinations_longitude_check": {
           "name": "destinations_longitude_check",
           "value": "\"destinations\".\"longitude\" BETWEEN -180 AND 180"
-        }
-      },
-      "isRLSEnabled": false
-    },
-    "public.documents": {
-      "name": "documents",
-      "schema": "",
-      "columns": {
-        "id": {
-          "name": "id",
-          "type": "integer",
-          "primaryKey": true,
-          "notNull": true,
-          "identity": {
-            "type": "always",
-            "name": "documents_id_seq",
-            "schema": "public",
-            "increment": "1",
-            "startWith": "1",
-            "minValue": "1",
-            "maxValue": "2147483647",
-            "cache": "1",
-            "cycle": false
-          }
-        },
-        "vehicle_id": {
-          "name": "vehicle_id",
-          "type": "integer",
-          "primaryKey": false,
-          "notNull": false
-        },
-        "driver_id": {
-          "name": "driver_id",
-          "type": "integer",
-          "primaryKey": false,
-          "notNull": false
-        },
-        "name": {
-          "name": "name",
-          "type": "text",
-          "primaryKey": false,
-          "notNull": true
-        },
-        "expires_on": {
-          "name": "expires_on",
-          "type": "date",
-          "primaryKey": false,
-          "notNull": false
-        },
-        "created_at": {
-          "name": "created_at",
-          "type": "timestamp with time zone",
-          "primaryKey": false,
-          "notNull": true,
-          "default": "now()"
-        }
-      },
-      "indexes": {
-        "documents_vehicle_name_unique": {
-          "name": "documents_vehicle_name_unique",
-          "columns": [
-            {
-              "expression": "vehicle_id",
-              "isExpression": false,
-              "asc": true,
-              "nulls": "last"
-            },
-            {
-              "expression": "lower(\"name\")",
-              "asc": true,
-              "isExpression": true,
-              "nulls": "last"
-            }
-          ],
-          "isUnique": true,
-          "where": "\"documents\".\"vehicle_id\" IS NOT NULL",
-          "concurrently": false,
-          "method": "btree",
-          "with": {}
-        },
-        "documents_driver_name_unique": {
-          "name": "documents_driver_name_unique",
-          "columns": [
-            {
-              "expression": "driver_id",
-              "isExpression": false,
-              "asc": true,
-              "nulls": "last"
-            },
-            {
-              "expression": "lower(\"name\")",
-              "asc": true,
-              "isExpression": true,
-              "nulls": "last"
-            }
-          ],
-          "isUnique": true,
-          "where": "\"documents\".\"driver_id\" IS NOT NULL",
-          "concurrently": false,
-          "method": "btree",
-          "with": {}
-        }
-      },
-      "foreignKeys": {
-        "documents_vehicle_id_vehicles_id_fk": {
-          "name": "documents_vehicle_id_vehicles_id_fk",
-          "tableFrom": "documents",
-          "tableTo": "vehicles",
-          "columnsFrom": [
-            "vehicle_id"
-          ],
-          "columnsTo": [
-            "id"
-          ],
-          "onDelete": "restrict",
-          "onUpdate": "no action"
-        },
-        "documents_driver_id_drivers_id_fk": {
-          "name": "documents_driver_id_drivers_id_fk",
-          "tableFrom": "documents",
-          "tableTo": "drivers",
-          "columnsFrom": [
-            "driver_id"
-          ],
-          "columnsTo": [
-            "id"
-          ],
-          "onDelete": "restrict",
-          "onUpdate": "no action"
-        }
-      },
-      "compositePrimaryKeys": {},
-      "uniqueConstraints": {},
-      "policies": {},
-      "checkConstraints": {
-        "documents_one_owner_check": {
-          "name": "documents_one_owner_check",
-          "value": "(\"documents\".\"vehicle_id\" IS NULL) <> (\"documents\".\"driver_id\" IS NULL)"
-        },
-        "documents_name_check": {
-          "name": "documents_name_check",
-          "value": "btrim(\"documents\".\"name\") <> ''"
         }
       },
       "isRLSEnabled": false
@@ -1538,6 +1407,30 @@
           "notNull": true,
           "default": "'borrador'"
         },
+        "start_kind": {
+          "name": "start_kind",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "start_latitude": {
+          "name": "start_latitude",
+          "type": "double precision",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "start_longitude": {
+          "name": "start_longitude",
+          "type": "double precision",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "end_kind": {
+          "name": "end_kind",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false
+        },
         "created_at": {
           "name": "created_at",
           "type": "timestamp with time zone",
@@ -1599,6 +1492,18 @@
         "routes_time_band_check": {
           "name": "routes_time_band_check",
           "value": "\"routes\".\"end_time\" >= \"routes\".\"start_time\""
+        },
+        "routes_start_kind_check": {
+          "name": "routes_start_kind_check",
+          "value": "\"routes\".\"start_kind\" IN ('home', 'previous', 'point')"
+        },
+        "routes_start_point_check": {
+          "name": "routes_start_point_check",
+          "value": "(\"routes\".\"start_kind\" = 'point' AND \"routes\".\"start_latitude\" BETWEEN -90 AND 90 AND \"routes\".\"start_longitude\" BETWEEN -180 AND 180)\n      OR (\"routes\".\"start_kind\" IS DISTINCT FROM 'point' AND \"routes\".\"start_latitude\" IS NULL AND \"routes\".\"start_longitude\" IS NULL)"
+        },
+        "routes_end_kind_check": {
+          "name": "routes_end_kind_check",
+          "value": "\"routes\".\"end_kind\" IN ('home', 'open')"
         }
       },
       "isRLSEnabled": false
@@ -1755,6 +1660,12 @@
           "type": "integer",
           "primaryKey": false,
           "notNull": false
+        },
+        "planned_time": {
+          "name": "planned_time",
+          "type": "time",
+          "primaryKey": false,
+          "notNull": false
         }
       },
       "indexes": {
@@ -1880,6 +1791,12 @@
           "primaryKey": false,
           "notNull": true
         },
+        "exit_time": {
+          "name": "exit_time",
+          "type": "time",
+          "primaryKey": false,
+          "notNull": false
+        },
         "companions": {
           "name": "companions",
           "type": "integer",
@@ -1975,6 +1892,10 @@
         "transfers_origin_check": {
           "name": "transfers_origin_check",
           "value": "\"transfers\".\"origin_destination_id\" IS NULL OR (\"transfers\".\"direction\" = 'entrada' AND \"transfers\".\"origin_destination_id\" <> \"transfers\".\"destination_id\")"
+        },
+        "transfers_exit_time_check": {
+          "name": "transfers_exit_time_check",
+          "value": "\"transfers\".\"exit_time\" IS NULL OR (\"transfers\".\"origin_destination_id\" IS NOT NULL AND \"transfers\".\"exit_time\" < \"transfers\".\"target_time\")"
         }
       },
       "isRLSEnabled": false
