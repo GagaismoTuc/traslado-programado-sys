@@ -19,6 +19,7 @@ type Transfer = {
 type Stop = { id: number; kind: "pickup" | "dropoff"; passengerName: string; placeName: string | null; plannedTime: string | null };
 type Route = {
   id: number;
+  driverId: number;
   driverName: string;
   vehicleId: number;
   vehiclePlate: string;
@@ -51,6 +52,9 @@ export type PassengerViolations = {
   violations: { rule: string; transferId: number | null; message: string }[];
 };
 export type CascadeWarning = { routeId: number; version: number; fromRouteId: number; ok: boolean; problem: string | null };
+/** An expired document of a Recorrido's Vehículo or Chofer, reported when assigning or publishing; it never blocks. */
+export type DocumentWarning = { routeId: number; message: string };
+type WarningsResult = { warnings?: DocumentWarning[]; warningsUnavailable?: boolean };
 export type DaySummary = {
   published: { routeId: number; version: number }[];
   unchanged: number[];
@@ -121,6 +125,31 @@ function routeName(routes: Pick<Route, "id" | "driverName" | "startTime" | "endT
   return route ? `${route.driverName} ${route.startTime}-${route.endTime}` : `Recorrido ${routeId}`;
 }
 
+// The front-seat warning informs and never blocks the change.
+export function driverChangedMessage(route: Pick<Route, "frontSeat">) {
+  return route.frontSeat
+    ? "Chofer changed. The Recorrido carries a Pasajero who needs the front seat: check it with the new Chofer."
+    : "Chofer changed";
+}
+
+// A Recorrido En curso or Cerrado keeps its Chofer; the server refuses a deactivated or busy Chofer with the reason.
+export function RouteDriverField({ route, drivers, onChange }: {
+  route: Pick<Route, "driverId" | "status">;
+  drivers: Option[];
+  onChange: (driverId: number) => void;
+}) {
+  return <label>
+    Chofer
+    <select
+      value={route.driverId}
+      disabled={route.status === "en_curso" || route.status === "cerrado"}
+      onChange={(e) => onChange(Number(e.target.value))}
+    >
+      {drivers.map((item) => <option key={item.id} value={item.id}>{item.name}</option>)}
+    </select>
+  </label>;
+}
+
 /** A Recorrido may be forced with a reason unless it leaves a Traslado unserved. */
 export function canForce(violations: PassengerViolations[]) {
   return violations.every((group) => group.violations.every((violation) => violation.rule !== "unserved_transfer"));
@@ -143,6 +172,15 @@ export function CascadeWarnings({ cascade, routes }: { cascade: CascadeWarning[]
     {warning.ok
       ? `Revalidated ${routeName(routes, warning.routeId)} (version ${warning.version}): the Chofer still reaches it in time.`
       : `Check ${routeName(routes, warning.routeId)} (version ${warning.version}): ${warning.problem}. It was not republished.`}
+  </li>)}</ul>;
+}
+
+/** The expired documents of the saved Recorridos; unavailable when the API saved the change but could not read them. */
+export function DocumentWarnings({ warnings, routes, unavailable = false }: { warnings: DocumentWarning[]; routes: RouteNames; unavailable?: boolean }) {
+  if (unavailable) return <p role="alert">Saved, but expired documents could not be checked. Reload the plan to check them.</p>;
+  if (!warnings.length) return null;
+  return <ul role="alert">{warnings.map((warning, index) => <li key={index}>
+    {`${routeName(routes, warning.routeId)}: ${warning.message}. It was not blocked.`}
   </li>)}</ul>;
 }
 
@@ -204,6 +242,8 @@ export function PlanPage() {
   const [orders, setOrders] = useState<Record<number, OrderResult>>({});
   const [refusal, setRefusal] = useState<Refusal | null>(null);
   const [cascade, setCascade] = useState<CascadeWarning[]>([]);
+  const [warnings, setWarnings] = useState<DocumentWarning[]>([]);
+  const [warningsUnavailable, setWarningsUnavailable] = useState(false);
   const [summary, setSummary] = useState<DaySummary | null>(null);
   const [publishing, setPublishing] = useState(false);
   // The salida whose Autorización puntual panel is open.
@@ -255,6 +295,8 @@ export function PlanPage() {
     // Publication results belong to the day they were made for.
     setRefusal(null);
     setCascade([]);
+    setWarnings([]);
+    setWarningsUnavailable(false);
     setSummary(null);
     void load(date);
   }, [date]);
@@ -263,6 +305,10 @@ export function PlanPage() {
     try {
       const response = await send(path, method, body);
       if (await redirectUnauthorized(response)) return false;
+      // Assigning a Vehículo or Chofer answers with the expired documents of the Recorrido, if any.
+      const result = response.ok ? await response.clone().json().catch(() => null) as WarningsResult | null : null;
+      setWarnings(result?.warnings ?? []);
+      setWarningsUnavailable(result?.warningsUnavailable === true);
       setMessage(response.ok ? done : await readError(response, "Unable to save the plan"));
       if (response.ok) await load(selectedDate.current);
       return response.ok;
@@ -281,17 +327,21 @@ export function PlanPage() {
       const response = await send(`/routes/${routeId}/publish`, "POST", overrideReason === undefined ? {} : { overrideReason });
       if (await redirectUnauthorized(response)) return false;
       const result = await response.json().catch(() => null) as
-        { version?: { version: number }; cascade?: CascadeWarning[]; error?: string; violations?: PassengerViolations[] } | null;
+        WarningsResult & { version?: { version: number }; cascade?: CascadeWarning[]; error?: string; violations?: PassengerViolations[] } | null;
       if (forDate !== selectedDate.current) return false;
       setSummary(null);
       if (response.ok && result?.version) {
         setRefusal(null);
         setCascade(result.cascade ?? []);
+        setWarnings(result.warnings ?? []);
+        setWarningsUnavailable(result.warningsUnavailable === true);
         setMessage(`Published as version ${result.version.version}`);
         await load(forDate);
         return true;
       }
       setCascade([]);
+      setWarnings([]);
+      setWarningsUnavailable(false);
       const error = result?.error ?? "Unable to publish the Recorrido";
       setRefusal(result?.violations ? { routeId, error, violations: result.violations } : null);
       setMessage(error);
@@ -309,7 +359,7 @@ export function PlanPage() {
     try {
       const response = await send(`/daily-plans/${forDate}/publish`, "POST");
       if (await redirectUnauthorized(response)) return;
-      const result = response.ok ? await response.json() as DaySummary : null;
+      const result = response.ok ? await response.json() as DaySummary & WarningsResult : null;
       const error = result ? "" : await readError(response, "Unable to publish the plan");
       if (forDate !== selectedDate.current) return;
       if (!result) {
@@ -318,6 +368,8 @@ export function PlanPage() {
       }
       setRefusal(null);
       setCascade([]);
+      setWarnings(result.warnings ?? []);
+      setWarningsUnavailable(result.warningsUnavailable === true);
       setSummary(result);
       setMessage("Plan diario published");
       await load(forDate);
@@ -413,6 +465,7 @@ export function PlanPage() {
     <label>Day<input type="date" name="date" value={date} required onChange={(e) => { if (e.target.value) setDate(e.target.value); }} /></label>
     {message && <p role="status">{message}</p>}
     <CascadeWarnings cascade={cascade} routes={view?.day?.routes ?? []} />
+    <DocumentWarnings warnings={warnings} unavailable={warningsUnavailable} routes={view?.day?.routes ?? []} />
     {missing && <button type="button" onClick={() => void write("/daily-plans", "POST", { date }, "Plan diario created")}>Create plan</button>}
     {day && <>
       <p>Times are local to {day.plan.timeZone}. Day total: {kmLabel(day.km)}</p>
@@ -513,6 +566,11 @@ export function PlanPage() {
             {vehicles.map((item) => <option key={item.id} value={item.id}>{item.plate}</option>)}
           </select>
         </label>
+        <RouteDriverField
+          route={route}
+          drivers={drivers}
+          onChange={(driverId) => void write(`/routes/${route.id}`, "PATCH", { driverId }, driverChangedMessage(route))}
+        />
         {route.status === "borrador" && <button type="button" onClick={() => void order(route)}>Order</button>}
         {orders[route.id]?.unassigned.length ? <>
           <p>Not placed by the engine (back among the unassigned Traslados):</p>

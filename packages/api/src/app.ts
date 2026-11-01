@@ -363,6 +363,95 @@ async function getDriverById(client: Queryable, driverId: number) {
 
 }
 
+// Documents every new Vehículo or Chofer starts with, without a date; the Oficina may rename or remove them.
+const VEHICLE_DOCUMENT_NAMES = ["VTV", "Service"];
+const DRIVER_DOCUMENT_NAMES = ["Carnet de manejo", "Certificado de sanidad", "Certificado de buena conducta"];
+// The Vencimientos panel lists a document from this many days before its date.
+const EXPIRY_ALERT_DAYS = 30;
+const LOCAL_TIME_ZONE = "America/Argentina/Tucuman";
+
+type DocumentOwner = { kind: "vehicle" | "driver"; id: number };
+
+/** Today's date in Tucumán, "YYYY-MM-DD": a document is valid through its date and expired from the next local day. */
+function localDate(at: Date) {
+  return new Intl.DateTimeFormat("en-CA", { timeZone: LOCAL_TIME_ZONE }).format(at);
+}
+
+// Only the name and the date are kept: any other field (a file, a scan, a photo) is refused.
+function parseDocument(body: unknown): { name: string; expiresOn: string | null } | { error: string } {
+  if (!isObject(body)) return { error: "Invalid request" };
+  if (Object.keys(body).some((key) => key !== "name" && key !== "expiresOn")) {
+    return { error: "Only a document's name and expiry date are stored" };
+  }
+  const name = boundedText(body.name, 200);
+  if (!name) return { error: "Invalid name: write the document's name" };
+  const raw = body.expiresOn ?? null;
+  const expiresOn = raw === null ? null : parsePlanDate(raw);
+  if (raw !== null && !expiresOn) return { error: "Invalid expiry date (expiresOn): use YYYY-MM-DD" };
+  return { name, expiresOn };
+}
+
+const DOCUMENT_SELECT_SQL = `
+  SELECT d.id, d.vehicle_id AS "vehicleId", d.driver_id AS "driverId", d.name, to_char(d.expires_on, 'YYYY-MM-DD') AS "expiresOn"
+    FROM documents d`;
+
+function formatDocument(row: Record<string, unknown>) {
+  return {
+    id: Number(row.id),
+    vehicleId: nullableNumber(row.vehicleId),
+    driverId: nullableNumber(row.driverId),
+    name: String(row.name),
+    expiresOn: (row.expiresOn as string | null) ?? null,
+  };
+}
+
+async function seedDocuments(client: Queryable, actorId: number, owner: DocumentOwner) {
+  const names = owner.kind === "vehicle" ? VEHICLE_DOCUMENT_NAMES : DRIVER_DOCUMENT_NAMES;
+  const inserted = await client.query(
+    `INSERT INTO documents (vehicle_id, driver_id, name) SELECT $1, $2, n.name FROM unnest($3::text[]) WITH ORDINALITY AS n(name, i)
+     ORDER BY n.i RETURNING id, vehicle_id AS "vehicleId", driver_id AS "driverId", name, NULL AS "expiresOn"`,
+    [owner.kind === "vehicle" ? owner.id : null, owner.kind === "driver" ? owner.id : null, names],
+  ) as QueryResult;
+  for (const row of inserted.rows) {
+    const { id, ...after } = formatDocument(row);
+    await appendChange(client, actorId, "document", String(id), "created", null, after);
+  }
+}
+
+/** The expired documents of each Recorrido's Vehículo and Chofer on the Recorrido's day: a warning, never a refusal. */
+async function expiredDocumentWarnings(client: Queryable, routeIds: number[]) {
+  const result = await client.query(
+    `SELECT r.id AS "routeId", d.name, to_char(d.expires_on, 'YYYY-MM-DD') AS "expiresOn",
+            CASE WHEN d.vehicle_id IS NULL THEN 'driver' ELSE 'vehicle' END AS owner, COALESCE(v.plate, dr.name) AS "ownerLabel"
+       FROM routes r JOIN daily_plans p ON p.id = r.daily_plan_id
+       JOIN documents d ON d.vehicle_id = r.vehicle_id OR d.driver_id = r.driver_id
+       LEFT JOIN vehicles v ON v.id = d.vehicle_id LEFT JOIN drivers dr ON dr.id = d.driver_id
+      WHERE r.id = ANY($1::int[]) AND d.expires_on < p.plan_date
+      ORDER BY r.id, d.vehicle_id IS NULL, d.expires_on, d.id`,
+    [routeIds],
+  ) as QueryResult;
+  return result.rows.map((row) => {
+    const owner = row.owner === "vehicle" ? "vehicle" as const : "driver" as const;
+    return {
+      routeId: Number(row.routeId),
+      owner,
+      ownerLabel: String(row.ownerLabel),
+      document: String(row.name),
+      expiresOn: String(row.expiresOn),
+      message: `${owner === "vehicle" ? "Vehículo" : "Chofer"} ${row.ownerLabel}: ${row.name} expired on ${row.expiresOn}`,
+    };
+  });
+}
+
+/** The expiry warnings read after the write committed: a failed read degrades to warningsUnavailable, never a failed write. */
+async function warningsAfterCommit(client: Queryable, routeIds: number[]) {
+  try {
+    return { warnings: await expiredDocumentWarnings(client, routeIds) };
+  } catch {
+    return { warnings: [], warningsUnavailable: true };
+  }
+}
+
 const MEDICAL_ALERT_MAX_LENGTH = 140;
 
 function parseFeatureIds(value: unknown) {
@@ -881,6 +970,32 @@ async function chooseVehicle(client: Queryable, driverId: number, requested: unk
   return vehicleId;
 }
 
+/**
+ * The new Chofer of an existing Recorrido, refused once the Recorrido is En curso or Cerrado, for a deactivated account,
+ * or when the Chofer already has another Recorrido of the day overlapping its time band. The Chofer is locked as when
+ * a Recorrido is created, so two changes cannot both pass the overlap check.
+ */
+async function assertCanChangeDriver(client: Queryable, route: Record<string, unknown>, driverId: number) {
+  if (route.status === "en_curso" || route.status === "cerrado") {
+    throw new PlanningError(409, "A Recorrido En curso or Cerrado cannot change Chofer");
+  }
+  const driver = await client.query(
+    "SELECT u.disabled_at FROM drivers d JOIN users u ON u.id = d.user_id WHERE d.id = $1 FOR UPDATE OF d",
+    [driverId],
+  ) as QueryResult;
+  if (!driver.rows[0]) throw new PlanningError(400, "Invalid request");
+  if (driver.rows[0].disabled_at !== null) throw new PlanningError(409, "This Chofer is deactivated: choose another one");
+  const overlap = await client.query(
+    `SELECT to_char(o.start_time, 'HH24:MI') AS start_time, to_char(o.end_time, 'HH24:MI') AS end_time
+       FROM routes r JOIN routes o ON o.daily_plan_id = r.daily_plan_id AND o.id <> r.id
+      WHERE r.id = $1 AND o.driver_id = $2 AND o.start_time < r.end_time AND r.start_time < o.end_time
+      ORDER BY o.start_time, o.id LIMIT 1`,
+    [route.id, driverId],
+  ) as QueryResult;
+  const busy = overlap.rows[0];
+  if (busy) throw new PlanningError(409, `This Chofer already has another Recorrido at that time: ${busy.start_time}-${busy.end_time}`);
+}
+
 async function insertRoute(client: Queryable, actorId: number, planId: number, fields: {
   driverId: number;
   vehicleId: number;
@@ -948,9 +1063,10 @@ const ORDER_TRANSFERS_SQL = `
    WHERE s.route_id = $1 AND s.kind = 'pickup'
    ORDER BY s.position`;
 
-// Where the last Parada of a Recorrido is and when its service ends (null while it has no planned time).
+// Where the last Parada of a Recorrido is, its Traslado and when its service ends (null while it has no planned time).
 const LAST_STOP_SQL = `
-  SELECT CASE WHEN (s.kind = 'pickup') = (t.direction = 'entrada') THEN COALESCE(o.latitude, p.home_latitude) ELSE d.latitude END AS lat,
+  SELECT s.transfer_id,
+         CASE WHEN (s.kind = 'pickup') = (t.direction = 'entrada') THEN COALESCE(o.latitude, p.home_latitude) ELSE d.latitude END AS lat,
          CASE WHEN (s.kind = 'pickup') = (t.direction = 'entrada') THEN COALESCE(o.longitude, p.home_longitude) ELSE d.longitude END AS lng,
          EXTRACT(EPOCH FROM s.planned_time) / 60
            + CASE s.kind WHEN 'pickup' THEN p.pickup_duration_minutes ELSE p.dropoff_duration_minutes END AS planned_end
@@ -1303,6 +1419,34 @@ async function orderInputKey(client: Queryable, routeId: number) {
   return { route, rows, neighbours, key: JSON.stringify([route, rows, neighbours]) };
 }
 
+/**
+ * Locks every row Order read until it commits, so nothing changes between its last check and the commit: its Traslados
+ * and the previous Recorrido's last one, the Recorrido and its neighbours, the Chofer, the Vehículo, and the Pasajeros
+ * and Destinos of those Traslados. Every writer of these rows locks them first, so it waits. The order follows the other
+ * writers: Traslados before Recorridos as in PATCH /transfers, the Chofer before the Vehículo as in publishing. Deactivating
+ * a Vehículo goes the other way; if it meets Order, Postgres aborts one of the two and nothing is saved half-way.
+ */
+async function lockOrderInputs(client: Queryable, routeId: number, rows: Record<string, unknown>[], neighbours: Neighbours) {
+  const transferIds = [...rows.map((row) => Number(row.id)), ...(neighbours.last ? [Number(neighbours.last.transfer_id)] : [])];
+  await client.query("SELECT id FROM transfers WHERE id = ANY($1::int[]) ORDER BY id FOR SHARE", [transferIds]);
+  const routeIds = [routeId, neighbours.previous?.id, neighbours.next?.id].filter((value) => value !== undefined).map(Number);
+  await client.query("SELECT id FROM routes WHERE id = ANY($1::int[]) ORDER BY id FOR UPDATE", [routeIds]);
+  await lockRoute(client, routeId);
+  await client.query("SELECT d.id FROM drivers d JOIN routes r ON r.driver_id = d.id WHERE r.id = $1 FOR SHARE OF d", [routeId]);
+  await client.query("SELECT v.id FROM vehicles v JOIN routes r ON r.vehicle_id = v.id WHERE r.id = $1 FOR SHARE OF v", [routeId]);
+  await client.query(
+    "SELECT id FROM passengers WHERE id IN (SELECT passenger_id FROM transfers WHERE id = ANY($1::int[])) ORDER BY id FOR SHARE",
+    [transferIds],
+  );
+  await client.query(
+    `SELECT id FROM destinations
+      WHERE id IN (SELECT destination_id FROM transfers WHERE id = ANY($1::int[])
+                   UNION SELECT origin_destination_id FROM transfers WHERE id = ANY($1::int[]))
+      ORDER BY id FOR SHARE`,
+    [transferIds],
+  );
+}
+
 const PLAN_VERSION_SELECT_SQL = `
   SELECT pv.id, pv.route_id AS "routeId", pv.version, pv.vehicle_id AS "vehicleId", v.plate AS "vehiclePlate",
          pv.driver_id AS "driverId", to_char(pv.start_time, 'HH24:MI') AS "startTime", to_char(pv.end_time, 'HH24:MI') AS "endTime",
@@ -1380,19 +1524,21 @@ function driverDays(now: Date) {
 
 /**
  * The Chofer's Recorridos of one day, each as its latest Versión del plan: a Recorrido never published is not shown
- * (tomorrow appears once it is published). Every Parada carries where it is and what the Chofer needs about the Pasajero.
+ * (tomorrow appears once it is published). A Recorrido is the Chofer's when its latest version is, so a change of Chofer
+ * reaches the app with the next version. Every Parada carries where it is and what the Chofer needs about the Pasajero.
  */
 async function loadDriverDay(client: Queryable, driverId: number, date: string) {
   const versions = await client.query(
     `SELECT * FROM (
-       SELECT DISTINCT ON (pv.route_id) pv.id, pv.route_id, pv.version, to_char(pv.start_time, 'HH24:MI') AS start_time,
+       SELECT DISTINCT ON (pv.route_id) pv.id, pv.route_id, pv.version, pv.driver_id, to_char(pv.start_time, 'HH24:MI') AS start_time,
               to_char(pv.end_time, 'HH24:MI') AS end_time, v.plate, r.status,
               (SELECT max(seen.version) FROM version_acknowledgements va JOIN plan_versions seen ON seen.id = va.plan_version_id
                 WHERE seen.route_id = pv.route_id AND va.driver_id = $2) AS acknowledged
          FROM plan_versions pv JOIN routes r ON r.id = pv.route_id JOIN daily_plans dp ON dp.id = r.daily_plan_id
          JOIN vehicles v ON v.id = pv.vehicle_id
-        WHERE dp.plan_date = $1 AND r.driver_id = $2
+        WHERE dp.plan_date = $1
         ORDER BY pv.route_id, pv.version DESC) latest
+     WHERE driver_id = $2
      ORDER BY start_time, route_id`,
     [date, driverId],
   ) as QueryResult;
@@ -1712,10 +1858,16 @@ export function createApp({ db, routing, router, geocoder, solver, travelTime, c
     return existing.rows.length ? context.body(null, 204) : context.json({ error: "Passenger not found" }, 404);
   }
 
-  /** The Chofer's own Recorrido, or the refusal; `anyDay` drops the today-and-tomorrow scope for what already happened. */
+  /**
+   * The Chofer's own Recorrido, or the refusal; `anyDay` drops the today-and-tomorrow scope for what already happened.
+   * Like the Chofer app, a Recorrido is the Chofer's when its latest Versión del plan is, so a change of Chofer moves it
+   * with the next version.
+   */
   async function ownRoute(context: Context, driverId: number, routeId: number, anyDay = false) {
     const route = await db.query(
-      "SELECT r.driver_id, to_char(dp.plan_date, 'YYYY-MM-DD') AS date FROM routes r JOIN daily_plans dp ON dp.id = r.daily_plan_id WHERE r.id = $1",
+      `SELECT COALESCE((SELECT pv.driver_id FROM plan_versions pv WHERE pv.route_id = r.id ORDER BY pv.version DESC LIMIT 1), r.driver_id)
+                AS driver_id, to_char(dp.plan_date, 'YYYY-MM-DD') AS date
+         FROM routes r JOIN daily_plans dp ON dp.id = r.daily_plan_id WHERE r.id = $1`,
       [routeId],
     ) as QueryResult;
     const row = route.rows[0];
@@ -1852,6 +2004,44 @@ export function createApp({ db, routing, router, geocoder, solver, travelTime, c
       }, serverTime);
     }
     return { status: 201 as const, mark: formatMark((await stored())!) };
+  }
+
+  async function listDocuments(context: Context, kind: DocumentOwner["kind"]) {
+    const actor = await requireOffice(context);
+    if (actor instanceof Response) return actor;
+    const id = parseId(context.req.param("id") ?? "");
+    if (!id) return context.json({ error: "Invalid request" }, 400);
+    const owner = await db.query(`SELECT id FROM ${kind === "vehicle" ? "vehicles" : "drivers"} WHERE id = $1`, [id]) as QueryResult;
+    if (!owner.rows[0]) return context.json({ error: kind === "vehicle" ? "Vehicle not found" : "Driver not found" }, 404);
+    const result = await db.query(`${DOCUMENT_SELECT_SQL} WHERE d.${kind}_id = $1 ORDER BY d.id`, [id]) as QueryResult;
+    return context.json({ documents: result.rows.map(formatDocument) });
+  }
+
+  async function addDocument(context: Context, kind: DocumentOwner["kind"]) {
+    const actor = await requireOffice(context);
+    if (actor instanceof Response) return actor;
+    const id = parseId(context.req.param("id") ?? "");
+    const fields = parseDocument(await context.req.json().catch(() => null));
+    if (!id) return context.json({ error: "Invalid request" }, 400);
+    if ("error" in fields) return context.json({ error: fields.error }, 400);
+    try {
+      const document = await inTransaction(db, async (client) => {
+        const owner = await client.query(`SELECT id FROM ${kind === "vehicle" ? "vehicles" : "drivers"} WHERE id = $1 FOR SHARE`, [id]) as QueryResult;
+        if (!owner.rows[0]) throw new PlanningError(404, kind === "vehicle" ? "Vehicle not found" : "Driver not found");
+        const inserted = await client.query(
+          `INSERT INTO documents (${kind}_id, name, expires_on) VALUES ($1, $2, $3)
+           RETURNING id, vehicle_id AS "vehicleId", driver_id AS "driverId", name, to_char(expires_on, 'YYYY-MM-DD') AS "expiresOn"`,
+          [id, fields.name, fields.expiresOn],
+        ) as QueryResult;
+        const { id: documentId, ...after } = formatDocument(inserted.rows[0]);
+        await appendChange(client, actor.id, "document", String(documentId), "created", null, after);
+        return { id: documentId, ...after };
+      });
+      return context.json({ document }, 201);
+    } catch (error) {
+      if (isPostgresUniqueViolation(error)) return context.json({ error: "A document with this name already exists" }, 409);
+      return planningFailure(context, error);
+    }
   }
 
   async function listSessions(userId: number) {
@@ -2512,6 +2702,7 @@ export function createApp({ db, routing, router, geocoder, solver, travelTime, c
             front: loaded.front,
             featureIds: loaded.featureIds,
           });
+          await seedDocuments(client, actor.id, { kind: "vehicle", id });
           return loaded;
         });
         return context.json({ vehicle: created }, 201);
@@ -2641,6 +2832,7 @@ export function createApp({ db, routing, router, geocoder, solver, travelTime, c
           const id = Number(inserted.rows[0].id);
           const loaded = (await getDriverById(client, id))!;
           await appendChange(client, actor.id, "driver", String(id), "created", null, { userId, ...fields });
+          await seedDocuments(client, actor.id, { kind: "driver", id });
           return loaded;
         });
         return context.json({ driver: created }, 201);
@@ -2691,6 +2883,88 @@ export function createApp({ db, routing, router, geocoder, solver, travelTime, c
         if (error instanceof InvalidReferenceError) return context.json({ error: "Invalid request" }, 400);
         throw error;
       }
+    })
+    .get("/vehicles/:id/documents", (context) => listDocuments(context, "vehicle"))
+    .post("/vehicles/:id/documents", (context) => addDocument(context, "vehicle"))
+    .get("/drivers/:id/documents", (context) => listDocuments(context, "driver"))
+    .post("/drivers/:id/documents", (context) => addDocument(context, "driver"))
+    // Replaces the document's name and date; the same values again change nothing and add no log entry.
+    .patch("/documents/:id", async (context) => {
+      const actor = await requireOffice(context);
+      if (actor instanceof Response) return actor;
+      const id = parseId(context.req.param("id"));
+      const body = await context.req.json().catch(() => null);
+      const fields = parseDocument(body);
+      if (!id) return context.json({ error: "Invalid request" }, 400);
+      if ("error" in fields) return context.json({ error: fields.error }, 400);
+      // Both fields are replaced, so a missing date is refused rather than taken as "no date".
+      if (!isObject(body) || !("expiresOn" in body)) {
+        return context.json({ error: "Send expiresOn: a date as YYYY-MM-DD, or null for no date" }, 400);
+      }
+      try {
+        const document = await inTransaction(db, async (client) => {
+          const locked = await client.query(`${DOCUMENT_SELECT_SQL} WHERE d.id = $1 FOR UPDATE`, [id]) as QueryResult;
+          if (!locked.rows[0]) throw new PlanningError(404, "Document not found");
+          const { id: _, ...before } = formatDocument(locked.rows[0]);
+          const after = { ...before, ...fields };
+          if (before.name !== after.name || before.expiresOn !== after.expiresOn) {
+            await client.query("UPDATE documents SET name = $1, expires_on = $2 WHERE id = $3", [fields.name, fields.expiresOn, id]);
+            await appendChange(client, actor.id, "document", String(id), "updated", before, after);
+          }
+          return { id, ...after };
+        });
+        return context.json({ document });
+      } catch (error) {
+        if (isPostgresUniqueViolation(error)) return context.json({ error: "A document with this name already exists" }, 409);
+        return planningFailure(context, error);
+      }
+    })
+    .delete("/documents/:id", async (context) => {
+      const actor = await requireOffice(context);
+      if (actor instanceof Response) return actor;
+      const id = parseId(context.req.param("id"));
+      if (!id) return context.json({ error: "Invalid request" }, 400);
+      try {
+        await inTransaction(db, async (client) => {
+          const locked = await client.query(`${DOCUMENT_SELECT_SQL} WHERE d.id = $1 FOR UPDATE`, [id]) as QueryResult;
+          if (!locked.rows[0]) throw new PlanningError(404, "Document not found");
+          await client.query("DELETE FROM documents WHERE id = $1", [id]);
+          const { id: _, ...before } = formatDocument(locked.rows[0]);
+          await appendChange(client, actor.id, "document", String(id), "removed", before, null);
+        });
+        return context.body(null, 204);
+      } catch (error) {
+        return planningFailure(context, error);
+      }
+    })
+    // The Vencimientos panel: documents expired or expiring within EXPIRY_ALERT_DAYS of today in Tucumán, by date, and
+    // apart the documents with no date, which are neither expired nor counted.
+    .get("/expiries", async (context) => {
+      const actor = await requireOffice(context);
+      if (actor instanceof Response) return actor;
+      const today = localDate(now());
+      const result = await db.query(
+        `SELECT d.id, d.name, to_char(d.expires_on, 'YYYY-MM-DD') AS "expiresOn", d.expires_on - $1::date AS "daysLeft",
+                d.vehicle_id AS "vehicleId", d.driver_id AS "driverId", COALESCE(v.plate, dr.name) AS "ownerLabel"
+           FROM documents d LEFT JOIN vehicles v ON v.id = d.vehicle_id LEFT JOIN drivers dr ON dr.id = d.driver_id
+          WHERE d.expires_on IS NULL OR d.expires_on <= $1::date + $2::int
+          ORDER BY d.expires_on NULLS LAST, "ownerLabel", d.id`,
+        [today, EXPIRY_ALERT_DAYS],
+      ) as QueryResult;
+      const items = result.rows.map((row) => ({
+        id: Number(row.id),
+        name: String(row.name),
+        expiresOn: (row.expiresOn as string | null) ?? null,
+        daysLeft: nullableNumber(row.daysLeft),
+        owner: row.vehicleId === null
+          ? { kind: "driver" as const, id: Number(row.driverId), label: String(row.ownerLabel) }
+          : { kind: "vehicle" as const, id: Number(row.vehicleId), label: String(row.ownerLabel) },
+      }));
+      return context.json({
+        today,
+        documents: items.filter((item) => item.expiresOn !== null),
+        undated: items.filter((item) => item.expiresOn === null),
+      });
     })
     .get("/passengers", async (context) => {
       const actor = await requireOffice(context);
@@ -3073,7 +3347,7 @@ export function createApp({ db, routing, router, geocoder, solver, travelTime, c
           const id = await insertRoute(client, actor.id, planId, { driverId, vehicleId, startTime, endTime });
           return await getRouteById(client, id);
         });
-        return context.json({ route }, 201);
+        return context.json({ route, ...await warningsAfterCommit(db, [route.id]) }, 201);
       } catch (error) {
         return planningFailure(context, error);
       }
@@ -3084,16 +3358,22 @@ export function createApp({ db, routing, router, geocoder, solver, travelTime, c
       const id = parseId(context.req.param("id"));
       const body = await context.req.json().catch(() => null);
       const vehicleId = isObject(body) && body.vehicleId !== undefined ? positiveInt(body.vehicleId) : undefined;
+      const driverId = isObject(body) && body.driverId !== undefined ? positiveInt(body.driverId) : undefined;
       const ends = isObject(body) ? parseRouteEnds(body) : null;
-      if (!id || vehicleId === null || !ends || (vehicleId === undefined && !ends.start && ends.endKind === undefined)) {
+      if (!id || vehicleId === null || driverId === null || !ends
+        || (vehicleId === undefined && driverId === undefined && !ends.start && ends.endKind === undefined)) {
         return context.json({ error: "Invalid request" }, 400);
       }
       try {
         const route = await inTransaction(db, async (client) => {
           await lockRoute(client, id);
-          if (vehicleId !== undefined) await assertActiveUsualVehicle(client, vehicleId);
           const before: Record<string, unknown> = await getRouteById(client, id);
+          // The Chofer is locked before the Vehículo, as publishing does. The Vehículo and a start or end the Oficina set are
+          // kept; the default start and end follow the new Chofer, since "Order" derives them from the Recorrido's Chofer.
+          if (driverId !== undefined && driverId !== before.driverId) await assertCanChangeDriver(client, before, driverId);
+          if (vehicleId !== undefined) await assertActiveUsualVehicle(client, vehicleId);
           const after: Record<string, unknown> = {
+            driverId: driverId ?? before.driverId,
             vehicleId: vehicleId ?? before.vehicleId,
             startKind: ends.start ? ends.start.kind : before.startKind,
             startLat: ends.start ? ends.start.lat : before.startLat,
@@ -3103,8 +3383,9 @@ export function createApp({ db, routing, router, geocoder, solver, travelTime, c
           const changed = Object.keys(after).filter((key) => after[key] !== before[key]);
           if (changed.length) {
             await client.query(
-              "UPDATE routes SET vehicle_id = $1, start_kind = $2, start_latitude = $3, start_longitude = $4, end_kind = $5 WHERE id = $6",
-              [after.vehicleId, after.startKind, after.startLat, after.startLng, after.endKind, id],
+              `UPDATE routes SET driver_id = $1, vehicle_id = $2, start_kind = $3, start_latitude = $4, start_longitude = $5, end_kind = $6
+                WHERE id = $7`,
+              [after.driverId, after.vehicleId, after.startKind, after.startLat, after.startLng, after.endKind, id],
             );
             await appendChange(
               client, actor.id, "route", String(id), "updated",
@@ -3114,15 +3395,14 @@ export function createApp({ db, routing, router, geocoder, solver, travelTime, c
           }
           return await getRouteById(client, id);
         });
-        return context.json({ route });
+        return context.json({ route, ...await warningsAfterCommit(db, [id]) });
       } catch (error) {
         return planningFailure(context, error);
       }
     })
     // "Order": the engine orders the Borrador Recorrido's Paradas and plans their times. Traslados it cannot place leave
     // the Recorrido with their reason, so every Traslado is in the order or in `unassigned`. The engine runs outside the
-    // transaction; the result is applied only if neither the Recorrido nor the Chofer's Recorridos right before and after it
-    // changed meanwhile.
+    // transaction; the result is applied only if nothing the engine was given changed meanwhile.
     .post("/routes/:id/order", async (context) => {
       const actor = await requireOffice(context);
       if (actor instanceof Response) return actor;
@@ -3167,10 +3447,7 @@ export function createApp({ db, routing, router, geocoder, solver, travelTime, c
           }
         }
         const stops = await inTransaction(db, async (client) => {
-          // The neighbouring Recorridos are locked too, in id order, so none of them changes before this commits.
-          const locked = [id, neighbours.previous?.id, neighbours.next?.id].filter((value) => value !== undefined).map(Number);
-          await client.query("SELECT id FROM routes WHERE id = ANY($1::int[]) ORDER BY id FOR UPDATE", [locked]);
-          await lockRoute(client, id);
+          await lockOrderInputs(client, id, rows, neighbours);
           if ((await orderInputKey(client, id)).key !== key) {
             throw new PlanningError(409, "The Recorrido changed while it was being ordered: order it again");
           }
@@ -3320,7 +3597,7 @@ export function createApp({ db, routing, router, geocoder, solver, travelTime, c
           }
           return routes;
         });
-        return context.json({ routes: created }, 201);
+        return context.json({ routes: created, ...await warningsAfterCommit(db, created.map((route) => route.id)) }, 201);
       } catch (error) {
         return planningFailure(context, error);
       }
@@ -3338,7 +3615,7 @@ export function createApp({ db, routing, router, geocoder, solver, travelTime, c
       }
       try {
         const result = await publishRoute(actor.id, id, reason?.trim() || null);
-        return context.json({ version: result.version, cascade: await revalidateChained(actor.id, id) }, 201);
+        return context.json({ version: result.version, cascade: await revalidateChained(actor.id, id), ...await warningsAfterCommit(db, [id]) }, 201);
       } catch (error) {
         return planningFailure(context, error);
       }
@@ -3380,7 +3657,8 @@ export function createApp({ db, routing, router, geocoder, solver, travelTime, c
         }
         // Only after every publication, so a chained next Recorrido published later in this call is already there.
         for (const { routeId } of summary.published) summary.cascade.push(...await revalidateChained(actor.id, routeId));
-        return context.json(summary);
+        const published = [...summary.published.map((item) => item.routeId), ...summary.unchanged];
+        return context.json({ ...summary, ...await warningsAfterCommit(db, published) });
       } catch (error) {
         return planningFailure(context, error);
       }
@@ -3438,9 +3716,13 @@ export function createApp({ db, routing, router, geocoder, solver, travelTime, c
       const body = await context.req.json().catch(() => null);
       const version = isObject(body) ? positiveInt(body.version) : null;
       if (!id || !version) return context.json({ error: "Invalid request" }, 400);
+      // A version belongs to the Chofer it was published for, so after a change of Chofer each one acknowledges their own.
       const route = await db.query(
-        "SELECT r.driver_id, to_char(dp.plan_date, 'YYYY-MM-DD') AS date FROM routes r JOIN daily_plans dp ON dp.id = r.daily_plan_id WHERE r.id = $1",
-        [id],
+        `SELECT COALESCE(pv.driver_id, r.driver_id) AS driver_id, to_char(dp.plan_date, 'YYYY-MM-DD') AS date
+           FROM routes r JOIN daily_plans dp ON dp.id = r.daily_plan_id
+           LEFT JOIN plan_versions pv ON pv.route_id = r.id AND pv.version = $2
+          WHERE r.id = $1`,
+        [id, version],
       ) as QueryResult;
       const row = route.rows[0];
       if (!row) return context.json({ error: "Recorrido not found" }, 404);

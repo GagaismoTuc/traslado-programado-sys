@@ -46,7 +46,7 @@ async function cleanUp() {
       await pool.query(`DELETE FROM ${table}`);
     }
     await pool.query("DELETE FROM destinations WHERE name = 'Escuela Plan E2E'");
-    await pool.query("DELETE FROM users WHERE username = 'chofer-plan-e2e'");
+    await pool.query("DELETE FROM users WHERE username IN ('chofer-plan-e2e', 'chofer-plan-e2e-2')");
   } finally {
     await pool.end();
   }
@@ -179,6 +179,32 @@ test("orders a Recorrido with the engine, shows the planned times and what did n
   await expect(page.getByText("08:00 Drop off Pasajero Plan E2E at Escuela Plan E2E")).toBeVisible();
   await expect(page.getByText("Pasajero Corto E2E: cannot make its time window")).toBeVisible();
   await expect(page.locator("strong", { hasText: "08:00 Pasajero Corto E2E" }).locator("..").locator("select")).toHaveValue("");
+  await expectNoSideScroll(page);
+});
+
+test("changes the Chofer of a Recorrido from its editor and warns about the front seat without blocking", async ({ page }) => {
+  await seedRecorrido();
+  const pool = database();
+  try {
+    const user = await pool.query("INSERT INTO users (username, password_hash, role) VALUES ('chofer-plan-e2e-2', 'unused', 'driver') RETURNING id");
+    await pool.query(
+      `INSERT INTO drivers (user_id, name, home_address, home_latitude, home_longitude)
+       VALUES ($1, 'Chofera Plan E2E', 'Pasaje de Prueba 204', -26.86, -65.24)`,
+      [user.rows[0].id],
+    );
+  } finally {
+    await pool.end();
+  }
+  await page.setViewportSize(PHONE);
+  await page.goto(`${process.env.E2E_BASE_URL}/plan`);
+  await page.getByLabel("Day").fill(DAY);
+  const recorrido = page.locator("li").filter({ has: page.getByLabel("Vehicle") });
+  const vehicle = await recorrido.getByLabel("Vehicle").inputValue();
+  await recorrido.getByRole("combobox", { name: /^Chofer/ }).selectOption({ label: "Chofera Plan E2E" });
+  await expect(page.getByRole("status"))
+    .toHaveText("Chofer changed. The Recorrido carries a Pasajero who needs the front seat: check it with the new Chofer.");
+  await expect(recorrido.locator("strong")).toHaveText("Chofera Plan E2E 07:00-09:00");
+  await expect(recorrido.getByLabel("Vehicle")).toHaveValue(vehicle);
   await expectNoSideScroll(page);
 });
 

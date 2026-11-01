@@ -89,6 +89,52 @@ function appWith(solver?: VroomSolver, config: Partial<AppConfig> = {}) {
 
 type App = ReturnType<typeof appWith>;
 
+/**
+ * App whose transaction clients run the work set with `afterCheck` once, right after Order re-reads its Traslados inside
+ * the save transaction: after it has locked and read the rows the work changes, before its commit.
+ */
+function appAfterCheck(solver: VroomSolver) {
+  let pending: (() => Promise<unknown>) | undefined;
+  const db = {
+    query: (sql: string, values?: unknown[]) => appPool.query(sql, values),
+    connect: async () => {
+      const client = await appPool.connect();
+      return {
+        query: async (sql: string, values?: unknown[]) => {
+          const result = await client.query(sql, values);
+          if (pending && sql.includes("WHERE s.route_id = $1 AND s.kind = 'pickup'")) {
+            const work = pending;
+            pending = undefined;
+            await work();
+          }
+          return result;
+        },
+        release: () => client.release(),
+      };
+    },
+  };
+  const app = createApp({ db: db as never, routing: routingUp, solver, travelTime, config: { serverEpoch: "order-test" } });
+  return { app, afterCheck: (work: () => Promise<unknown>) => { pending = work; } };
+}
+
+/** Starts `sql` on its own connection and returns once it has committed or is waiting on a lock; `done` settles at its end. */
+async function startWriter(sql: string) {
+  const client = await migrationPool.connect();
+  const pid = (await client.query("SELECT pg_backend_pid() AS pid")).rows[0].pid;
+  let finished = false;
+  const done = client.query(sql).finally(() => {
+    finished = true;
+    client.release();
+  });
+  done.catch(() => undefined);
+  for (let attempt = 0; attempt < 150 && !finished; attempt += 1) {
+    const activity = await migrationPool.query("SELECT wait_event_type FROM pg_stat_activity WHERE pid = $1", [pid]);
+    if (activity.rows[0]?.wait_event_type === "Lock") return { waited: true, done };
+    await new Promise((resolve) => setTimeout(resolve, 20));
+  }
+  return { waited: false, done };
+}
+
 async function request(target: App, path: string, method: string, body?: unknown, cookie?: string) {
   return await target.request(path, {
     method,
@@ -168,6 +214,8 @@ async function world(name: string, target: App, vehicleSeats = 8) {
   return { office, call, school, therapy, vehicle, vehicleId, driverId, passenger, route, transfer, order, view };
 }
 
+type Ids = { route: number; transfer: number; passenger: number; vehicle: number; school: number; therapy: number; feature: number };
+
 const seconds = (time: string) => Number(time.slice(0, 2)) * 3600 + Number(time.slice(3)) * 60;
 
 describe("the engine orders a Recorrido", () => {
@@ -232,6 +280,81 @@ describe("the engine orders a Recorrido", () => {
     expect(await w.order(routeId, 409)).toEqual({ error: "The Recorrido changed while it was being ordered: order it again" });
     expect((await w.view()).routes[0].stops).toEqual(before);
     expect((await changes("route")).map((row) => row.action)).not.toContain("ordered");
+  });
+
+  // #71, Rule 1 (codex's regression test in #65 as the base).
+  it("Rule 1: answers 409 without planned times when the exit time changes while the engine resolves, and keeps the exit time it checked until it commits", async () => {
+    let changeWhileSolving = async () => undefined as unknown;
+    const engine = fakeEngine({ whileSolving: () => changeWhileSolving() });
+    const { app, afterCheck } = appAfterCheck(engine.solver);
+    const w = await world("carrera-salida", app);
+    const routeId = await w.route({ startTime: "08:00", endTime: "09:00" });
+    const leg = await w.transfer(routeId, { originDestinationId: w.therapy, destinationId: w.school, exitTime: "08:15", targetTime: "09:00" });
+    const pickup = async () => (await migrationPool.query(
+      "SELECT to_char(planned_time, 'HH24:MI') AS planned FROM stops WHERE transfer_id = $1 AND kind = 'pickup'",
+      [leg],
+    )).rows[0].planned;
+
+    // The ticket's example: the exit time moves from 08:15 to 08:50 while the engine resolves.
+    changeWhileSolving = () => w.call(`/transfers/${leg}`, "PATCH", { exitTime: "08:50" }, 200);
+    expect(await w.order(routeId, 409)).toEqual({ error: "The Recorrido changed while it was being ordered: order it again" });
+    expect(await pickup()).toBeNull();
+    expect((await changes("route")).map((row) => row.action)).not.toContain("ordered");
+    changeWhileSolving = async () => undefined;
+
+    // Codex's case: the change arrives after Order's last check and before its commit. It waits for the commit, so the
+    // saved pickup is the one planned from the 08:50 that Order checked.
+    let writer: Awaited<ReturnType<typeof startWriter>> | undefined;
+    afterCheck(async () => { writer = await startWriter(`UPDATE transfers SET exit_time = '08:40' WHERE id = ${leg}`); });
+    const result = await w.order(routeId);
+    await writer!.done;
+    expect({ waited: writer!.waited, saved: result.stops[0].plannedTime, stored: await pickup() })
+      .toEqual({ waited: true, saved: "08:50", stored: "08:50" });
+  });
+
+  // #71, Rule 2: every other input of Order, the same way.
+  it.each([
+    ["the Recorrido", (ids: Ids) => `UPDATE routes SET end_kind = 'home' WHERE id = ${ids.route}`],
+    ["the Traslado's target time", (ids: Ids) => `UPDATE transfers SET target_time = '08:55' WHERE id = ${ids.transfer}`],
+    ["the Traslado's Acompañantes", (ids: Ids) => `UPDATE transfers SET companions = 1 WHERE id = ${ids.transfer}`],
+    ["the Traslado's origin and Destino", (ids: Ids) =>
+      `UPDATE transfers SET destination_id = ${ids.therapy}, origin_destination_id = ${ids.school} WHERE id = ${ids.transfer}`],
+    ["the Pasajero's home", (ids: Ids) => `UPDATE passengers SET home_latitude = -26.85 WHERE id = ${ids.passenger}`],
+    ["the Pasajero's Tiempo máximo a bordo", (ids: Ids) => `UPDATE passengers SET max_ride_time_minutes = 90 WHERE id = ${ids.passenger}`],
+    ["the Pasajero's pickup and drop-off minutes", (ids: Ids) =>
+      `UPDATE passengers SET pickup_duration_minutes = 7, dropoff_duration_minutes = 7 WHERE id = ${ids.passenger}`],
+    ["the Pasajero's Asiento delantero", (ids: Ids) => `UPDATE passengers SET front_seat = true WHERE id = ${ids.passenger}`],
+    // Feature sets change the way the app changes them: the owner is locked first.
+    ["the Pasajero's Adaptaciones", (ids: Ids) => `BEGIN; SELECT id FROM passengers WHERE id = ${ids.passenger} FOR UPDATE;
+      INSERT INTO passenger_required_features (passenger_id, feature_id) VALUES (${ids.passenger}, ${ids.feature}) ON CONFLICT DO NOTHING; COMMIT;`],
+    ["the Vehículo's seats", (ids: Ids) => `UPDATE vehicles SET seats = 6 WHERE id = ${ids.vehicle}`],
+    ["the Vehículo's features", (ids: Ids) => `BEGIN; SELECT id FROM vehicles WHERE id = ${ids.vehicle} FOR UPDATE;
+      INSERT INTO vehicle_feature_assignments (vehicle_id, feature_id) VALUES (${ids.vehicle}, ${ids.feature}) ON CONFLICT DO NOTHING; COMMIT;`],
+    ["the Destino's location", (ids: Ids) => `UPDATE destinations SET latitude = -26.8 WHERE id = ${ids.school}`],
+    ["the Destino's Tolerancia de llegada", (ids: Ids) => `UPDATE destinations SET arrival_tolerance_minutes = 20 WHERE id = ${ids.school}`],
+  ])("Rule 2: answers 409 when %s changes while the engine resolves, and keeps it as checked until it commits", async (_, change) => {
+    let changeWhileSolving = async () => undefined as unknown;
+    const engine = fakeEngine({ whileSolving: () => changeWhileSolving() });
+    const { app, afterCheck } = appAfterCheck(engine.solver);
+    const w = await world("carrera-datos", app);
+    const routeId = await w.route({ startTime: "08:00", endTime: "09:00" });
+    const passenger = await w.passenger();
+    const transfer = await w.transfer(routeId, {
+      passengerId: passenger, originDestinationId: w.therapy, destinationId: w.school, exitTime: "08:15", targetTime: "09:00",
+    });
+    const feature = Number((await migrationPool.query("INSERT INTO vehicle_features (name) VALUES ('Rampa sintética') RETURNING id")).rows[0].id);
+    const sql = change({ route: routeId, transfer, passenger, vehicle: w.vehicleId, school: w.school, therapy: w.therapy, feature });
+
+    changeWhileSolving = () => migrationPool.query(sql);
+    expect(await w.order(routeId, 409)).toEqual({ error: "The Recorrido changed while it was being ordered: order it again" });
+    expect((await w.view()).routes[0].stops.map((stop: { plannedTime: string | null }) => stop.plannedTime)).toEqual([null, null]);
+    changeWhileSolving = async () => undefined;
+
+    let writer: Awaited<ReturnType<typeof startWriter>> | undefined;
+    afterCheck(async () => { writer = await startWriter(sql); });
+    await w.order(routeId);
+    await writer!.done;
+    expect(writer!.waited).toBe(true);
   });
 
   it("Rule 2: reads the ride-time buffer and the speed factors per time band from configuration", async () => {

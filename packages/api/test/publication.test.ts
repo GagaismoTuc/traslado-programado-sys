@@ -148,6 +148,7 @@ describe("Publication and Versiones del plan", () => {
         transfers: [{ transferId: item, companions: 1, directDistanceMeters: 2000, plannedRideMeters: 2000 }],
       },
       cascade: [],
+      warnings: [],
     });
     expect(Number.isNaN(Date.parse(published.version.publishedAt))).toBe(false);
     expect(routerCalls).toEqual([[key(H), key(D)], [key(H), key(D)]]);
@@ -246,14 +247,14 @@ describe("Publication and Versiones del plan", () => {
     const publishDay = () => ok(request(`/daily-plans/${DAY}/publish`, "POST", undefined, office), 200);
 
     expect(await publishDay()).toEqual({
-      published: [{ routeId: morning, version: 1 }, { routeId: afternoon, version: 1 }], unchanged: [], failed: [], cascade: [],
+      published: [{ routeId: morning, version: 1 }, { routeId: afternoon, version: 1 }], unchanged: [], failed: [], cascade: [], warnings: [],
     });
     // Morning adjustment: a Traslado joins the morning Recorrido.
     await transfer(await passenger({}, H2), "08:30", morning);
-    expect(await publishDay()).toEqual({ published: [{ routeId: morning, version: 2 }], unchanged: [afternoon], failed: [], cascade: [] });
+    expect(await publishDay()).toEqual({ published: [{ routeId: morning, version: 2 }], unchanged: [afternoon], failed: [], cascade: [], warnings: [] });
     // 15:00 rebuild for an afternoon entry.
     await transfer(await passenger({}, H2), "17:30", afternoon);
-    expect(await publishDay()).toEqual({ published: [{ routeId: afternoon, version: 2 }], unchanged: [morning], failed: [], cascade: [] });
+    expect(await publishDay()).toEqual({ published: [{ routeId: afternoon, version: 2 }], unchanged: [morning], failed: [], cascade: [], warnings: [] });
     expect(await stored("SELECT route_id, version FROM plan_versions ORDER BY id")).toEqual([
       { route_id: morning, version: 1 }, { route_id: afternoon, version: 1 }, { route_id: morning, version: 2 }, { route_id: afternoon, version: 2 },
     ]);
@@ -275,7 +276,7 @@ describe("Publication and Versiones del plan", () => {
 
     // A new home moves the Paradas: new legs and a new Distancia directa.
     await editPassenger({ homeLat: H2.lat, homeLng: H2.lng });
-    expect(await publishDay()).toEqual({ published: [{ routeId, version: 2 }], unchanged: [], failed: [], cascade: [] });
+    expect(await publishDay()).toEqual({ published: [{ routeId, version: 2 }], unchanged: [], failed: [], cascade: [], warnings: [] });
     const [moved, first] = await versions(routeId);
     expect(moved.transfers[0].directDistanceMeters).not.toBe(first.transfers[0].directDistanceMeters);
     // A longer pickup changes the planned times; a shorter ride limit changes what the validator checks.
@@ -284,7 +285,7 @@ describe("Publication and Versiones del plan", () => {
     await editPassenger({ homeLat: H2.lat, homeLng: H2.lng, pickupDurationMinutes: 9, maxRideTimeMinutes: 50 });
     expect((await publishDay()).published).toEqual([{ routeId, version: 4 }]);
     // Nothing changed since: it keeps version 4.
-    expect(await publishDay()).toEqual({ published: [], unchanged: [routeId], failed: [], cascade: [] });
+    expect(await publishDay()).toEqual({ published: [], unchanged: [routeId], failed: [], cascade: [], warnings: [] });
   });
 
   it("publishes each Recorrido of the day in its own transaction and summarizes the ones that failed the validator", async () => {
@@ -307,6 +308,7 @@ describe("Publication and Versiones del plan", () => {
         ] }],
       }],
       cascade: [],
+      warnings: [],
     });
     expect(await stored("SELECT route_id FROM plan_versions")).toEqual([{ route_id: fine }]);
     expect(await stored("SELECT id, status FROM routes ORDER BY id")).toEqual([{ id: fine, status: "publicado" }, { id: failing, status: "borrador" }]);
@@ -424,6 +426,7 @@ describe("Publication and Versiones del plan", () => {
         routeId: next, version: 1, fromRouteId: first, ok: false,
         problem: "The Chofer reaches the first Parada at 08:11, after its planned 08:08",
       }],
+      warnings: [],
     });
   });
 

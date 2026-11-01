@@ -1,5 +1,6 @@
 import { useEffect, useRef, useState, type FormEvent } from "react";
 import { redirectUnauthorized, send, suggestAddressPin } from "./api";
+import { DocumentsPanel } from "./DocumentsPanel";
 import { OfficeNav } from "./OfficeNav";
 import { PinPicker, type LatLng } from "./PinPicker";
 import type { VehicleItem } from "./VehiclesPage";
@@ -34,6 +35,7 @@ export function DriversPage() {
   const savingNow = useRef(false);
   const [geocodeMessage, setGeocodeMessage] = useState("");
   const [message, setMessage] = useState("");
+  const [documentsOf, setDocumentsOf] = useState<DriverItem | null>(null);
 
   async function loadData() {
     const [driversRes, usersRes, vehiclesRes] = await Promise.all([
@@ -176,6 +178,9 @@ export function DriversPage() {
       {driver.usualVehiclePlate ? `Usual vehicle: ${driver.usualVehiclePlate}` : "No usual vehicle"}
       {" "}
       <button type="button" onClick={() => startEdit(driver)}>Edit</button>
+      {" "}
+      <button type="button" onClick={() => setDocumentsOf(documentsOf?.id === driver.id ? null : driver)}>Documents</button>
+      {documentsOf?.id === driver.id && <DocumentsPanel owner={{ kind: "driver", id: driver.id }} />}
     </li>)}</ul>
   </main>;
 }

@@ -116,6 +116,21 @@ export const drivers = pgTable("drivers", {
   check("drivers_home_longitude_check", sql`${table.homeLongitude} BETWEEN -180 AND 180`),
 ]);
 
+// A document of exactly one Vehículo or one Chofer: only its name and its Vencimiento (null: no date yet), never a file.
+export const documents = pgTable("documents", {
+  id: integer().generatedAlwaysAsIdentity().primaryKey(),
+  vehicleId: integer("vehicle_id").references(() => vehicles.id, { onDelete: "restrict" }),
+  driverId: integer("driver_id").references(() => drivers.id, { onDelete: "restrict" }),
+  name: text().notNull(),
+  expiresOn: date("expires_on", { mode: "string" }),
+  createdAt: timestamp("created_at", { withTimezone: true, mode: "string" }).defaultNow().notNull(),
+}, (table) => [
+  check("documents_one_owner_check", sql`(${table.vehicleId} IS NULL) <> (${table.driverId} IS NULL)`),
+  check("documents_name_check", sql`btrim(${table.name}) <> ''`),
+  uniqueIndex("documents_vehicle_name_unique").on(table.vehicleId, sql`lower(${table.name})`).where(sql`${table.vehicleId} IS NOT NULL`),
+  uniqueIndex("documents_driver_name_unique").on(table.driverId, sql`lower(${table.name})`).where(sql`${table.driverId} IS NOT NULL`),
+]);
+
 // Only what drivers and the planner need: no diagnosis, sex or gender, and no reason for the front-seat requirement.
 export const passengers = pgTable("passengers", {
   id: integer().generatedAlwaysAsIdentity().primaryKey(),

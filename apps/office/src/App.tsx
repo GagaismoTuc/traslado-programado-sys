@@ -5,11 +5,13 @@ import { apiUrl, readError, redirectUnauthorized, send } from "./api";
 import { AlertsPage } from "./AlertsPage";
 import { DestinationsPage } from "./DestinationsPage";
 import { DriversPage } from "./DriversPage";
+import { ExpiriesPage } from "./Expiries";
 import { OfficeNav } from "./OfficeNav";
 import { PassengersPage } from "./PassengersPage";
 import { PlanPage } from "./PlanPage";
 import { SecondFactorPage } from "./SecondFactor";
 import { DeviceSessions, PersistentSessionToggle } from "./UserAccess";
+import { VehicleDetailPage } from "./VehicleDetailPage";
 import { VehicleFeaturesPage } from "./VehicleFeaturesPage";
 import { VehiclesPage } from "./VehiclesPage";
 
@@ -145,6 +147,9 @@ export function App() {
   if (path === "/destinations") return <DestinationsPage />;
   if (path === "/vehicle-features") return <VehicleFeaturesPage />;
   if (path === "/vehicles") return <VehiclesPage />;
+  const vehicleId = /^\/vehicles\/(\d+)$/.exec(path)?.[1];
+  if (vehicleId) return <VehicleDetailPage id={Number(vehicleId)} />;
+  if (path === "/expiries") return <ExpiriesPage />;
   if (path === "/drivers") return <DriversPage />;
   if (path === "/passengers") return <PassengersPage />;
   if (path === "/plan") return <PlanPage />;
