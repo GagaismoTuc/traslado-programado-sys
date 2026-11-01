@@ -50,6 +50,13 @@
       "when": 1793482927046,
       "tag": "0006_chilly_nebula",
       "breakpoints": true
+    },
+    {
+      "idx": 7,
+      "version": "7",
+      "when": 1793491470405,
+      "tag": "0007_purple_solo",
+      "breakpoints": true
     }
   ]
 }
