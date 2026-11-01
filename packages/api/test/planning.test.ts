@@ -309,7 +309,7 @@ describe("Plan diario by hand", () => {
   it("lets an entrada start at another Destino, stored as part of the Traslado", async () => {
     const { office, passengerId, destinationId, driverId, entrada } = await setup("regla8");
     const therapy = await destination(office, "Centro Terapéutico Sintético");
-    const fromTherapy = await entrada("15:00", { originDestinationId: therapy });
+    const fromTherapy = await entrada("15:00", { originDestinationId: therapy, exitTime: "14:30" });
     expect(fromTherapy).toMatchObject({
       direction: "entrada",
       originDestinationId: therapy,

@@ -9,6 +9,7 @@ type Transfer = {
   destinationName: string;
   originDestinationName: string | null;
   targetTime: string;
+  exitTime: string | null;
   companions: number;
   status: string;
   routeId: number | null;
@@ -64,7 +65,8 @@ function kmLabel(km: number | null) {
 function transferLabel(transfer: Transfer) {
   const from = transfer.direction === "entrada" ? transfer.originDestinationName ?? "home" : transfer.destinationName;
   const to = transfer.direction === "entrada" ? transfer.destinationName : "home";
-  return `${transfer.targetTime} ${transfer.passengerName}: ${transfer.direction}, ${from} → ${to}`;
+  const leaves = transfer.exitTime ? ` (leaves at ${transfer.exitTime})` : "";
+  return `${transfer.targetTime} ${transfer.passengerName}: ${transfer.direction}, ${from}${leaves} → ${to}`;
 }
 
 function stopLabel(stop: Stop) {
@@ -91,6 +93,7 @@ export function PlanPage() {
   const [drivers, setDrivers] = useState<DriverOption[]>([]);
   const [vehicles, setVehicles] = useState<VehicleOption[]>([]);
   const [direction, setDirection] = useState("entrada");
+  const [origin, setOrigin] = useState("");
   const [companions, setCompanions] = useState("0");
   const [routeVehicle, setRouteVehicle] = useState("");
   const [message, setMessage] = useState("");
@@ -162,8 +165,9 @@ export function PlanPage() {
     passengerId: Number(values.get("passengerId")),
     direction,
     destinationId: Number(values.get("destinationId")),
-    originDestinationId: direction === "entrada" && values.get("originDestinationId") ? Number(values.get("originDestinationId")) : null,
+    originDestinationId: direction === "entrada" && origin ? Number(origin) : null,
     targetTime: values.get("targetTime"),
+    ...(direction === "entrada" && origin ? { exitTime: values.get("exitTime") } : {}),
     companions: Number(companions),
   }, "Traslado added"));
 
@@ -252,6 +256,15 @@ export function PlanPage() {
               {routes.map((route) => <option key={route.id} value={route.id}>{routeLabel(route)}</option>)}
             </select>
           </label>
+          {transfer.originDestinationName && <form key={transfer.exitTime ?? ""} onSubmit={submit((values) => write(`/transfers/${transfer.id}`, "PATCH", {
+            exitTime: values.get("exitTime"),
+          }, "Exit time saved"))}>
+            <label>
+              {`Leaves ${transfer.originDestinationName} at`}
+              <input type="time" name="exitTime" required defaultValue={transfer.exitTime ?? ""} />
+            </label>
+            <button type="submit">Save exit time</button>
+          </form>}
           <button type="button" onClick={() => void write(`/transfers/${transfer.id}/absence`, "POST", {}, "Absence registered")}>Register absence</button>
         </>}
       </li>)}</ul>
@@ -276,11 +289,12 @@ export function PlanPage() {
         </label>
         {direction === "entrada" && <label>
           Starts at
-          <select name="originDestinationId" defaultValue="">
+          <select name="originDestinationId" value={origin} onChange={(e) => setOrigin(e.target.value)}>
             <option value="">Home</option>
             {destinations.map((item) => <option key={item.id} value={item.id}>{item.name}</option>)}
           </select>
         </label>}
+        {direction === "entrada" && origin && <label>Leaves the first Destino at<input type="time" name="exitTime" required /></label>}
         <label>
           Destino
           <select name="destinationId" required defaultValue="">

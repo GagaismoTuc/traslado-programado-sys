@@ -18,6 +18,8 @@ export type PlanTransfer = {
   id: number;
   direction: "entrada" | "salida";
   targetMinutes: number;
+  // An entrada from another Destino is picked up there not before the Pasajero's exit time.
+  notBeforeMinutes?: number;
   pickup: LngLat;
   dropoff: LngLat;
   // 1 + Acompañantes of this Traslado.
@@ -82,7 +84,8 @@ export function speedFactorAt(bands: SpeedBand[], minutes: number) {
 
 /**
  * One window per step. With R' = Tiempo máximo a bordo − buffer:
- * entrada with target arrival T: pickup from T − R' + drop-off service, drop-off between T − early tolerance and T;
+ * entrada with target arrival T: pickup from T − R' + drop-off service (and not before the exit time from another Destino),
+ * drop-off between T − early tolerance and T;
  * salida with pickup P: pickup from P and drop-off finished by P + R'.
  * Either way the ride (pickup start to end of drop-off service) stays within R'. Null when R' cannot hold the drop-off.
  */
@@ -92,8 +95,10 @@ export function stepWindows(transfer: PlanTransfer, settings: PlannerSettings): 
   const target = transfer.targetMinutes * 60;
   if (ride < dropoffService + transfer.pickupMinutes * 60) return null;
   if (transfer.direction === "entrada") {
+    const earliestPickup = Math.max(0, target - ride + dropoffService, (transfer.notBeforeMinutes ?? 0) * 60);
+    if (earliestPickup + transfer.pickupMinutes * 60 > target) return null;
     return {
-      pickup: [Math.max(0, target - ride + dropoffService), target],
+      pickup: [earliestPickup, target],
       dropoff: [Math.max(0, target - settings.earlyToleranceMinutes * 60), target],
     };
   }

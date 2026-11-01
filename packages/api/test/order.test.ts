@@ -445,18 +445,51 @@ describe("the engine orders a Recorrido", () => {
     expect(changed.route.frontSeat).toBe(true);
   });
 
-  it("Rule 11: makes an entrada that starts at another Destino a pickup there and a drop-off at the second Destino by its entry time", async () => {
+  it("Rule 11: makes an entrada that starts at another Destino a pickup there not before its exit time and a drop-off at the second Destino by its entry time", async () => {
     const engine = fakeEngine();
-    const w = await world("regla11", appWith(engine.solver));
-    const routeId = await w.route({ startTime: "14:00", endTime: "15:00" });
-    const leg = await w.transfer(routeId, { originDestinationId: w.therapy, destinationId: w.school, targetTime: "15:00" });
+    const app = appWith(engine.solver);
+    const w = await world("regla11", app);
+    const routeId = await w.route({ startTime: "13:00", endTime: "14:00" });
+    // The client's example: from a therapy centre at 13:30 to a school by 14:00.
+    const leg = await w.transfer(routeId, { originDestinationId: w.therapy, destinationId: w.school, exitTime: "13:30", targetTime: "14:00" });
     const result = await w.order(routeId);
     const [shipment] = engine.problems[0].shipments;
-    expect(shipment.pickup).toMatchObject({ location: THERAPY, time_windows: [[seconds("14:10"), seconds("15:00")]] });
-    expect(shipment.delivery).toMatchObject({ location: SCHOOL, time_windows: [[seconds("14:45"), seconds("15:00")]] });
-    expect(result.stops.map((stop: { transferId: number; kind: string; placeName: string }) => [stop.transferId, stop.kind, stop.placeName])).toEqual([
-      [leg, "pickup", "Terapia regla11"], [leg, "dropoff", "Escuela regla11"],
+    expect(shipment.pickup).toMatchObject({ location: THERAPY, time_windows: [[seconds("13:30"), seconds("14:00")]] });
+    expect(shipment.delivery).toMatchObject({ location: SCHOOL, time_windows: [[seconds("13:45"), seconds("14:00")]] });
+    expect(result.stops.map((stop: { transferId: number; kind: string; placeName: string; plannedTime: string }) =>
+      [stop.transferId, stop.kind, stop.placeName, stop.plannedTime])).toEqual([
+      [leg, "pickup", "Terapia regla11", "13:30"], [leg, "dropoff", "Escuela regla11", "14:00"],
     ]);
+    expect((await w.view()).transfers[0]).toMatchObject({ id: leg, exitTime: "13:30" });
+
+    // The exit time is required for these entradas only, and must come before T; the message names the field.
+    const passengerId = await w.passenger();
+    const fromTherapy = { passengerId, direction: "entrada", originDestinationId: w.therapy, destinationId: w.school, targetTime: "14:00" };
+    const exitError = { error: "exitTime is required for an entrada that starts at another Destino and must be before targetTime" };
+    for (const body of [fromTherapy, { ...fromTherapy, exitTime: "14:00" }, { ...fromTherapy, exitTime: "1:30" }]) {
+      expect(await json(request(app, `/daily-plans/${DAY}/transfers`, "POST", body, w.office), 400), JSON.stringify(body)).toEqual(exitError);
+    }
+    const notFromDestino = { error: "exitTime is only for an entrada that starts at another Destino" };
+    for (const body of [
+      { passengerId, direction: "entrada", destinationId: w.school, targetTime: "08:00", exitTime: "07:30" },
+      { passengerId, direction: "salida", destinationId: w.school, targetTime: "17:00", exitTime: "16:30" },
+    ]) expect(await json(request(app, `/daily-plans/${DAY}/transfers`, "POST", body, w.office), 400), JSON.stringify(body)).toEqual(notFromDestino);
+
+    // Editing: the Oficina fixes the exit time, with the same checks.
+    const edited = await w.call(`/transfers/${leg}`, "PATCH", { exitTime: "13:20" }, 200);
+    expect(edited.transfer.exitTime).toBe("13:20");
+    expect((await changes("transfer")).at(-1)).toMatchObject({
+      entity_id: String(leg), action: "updated", before_data: { exitTime: "13:30" }, after_data: { exitTime: "13:20" },
+    });
+    expect(await json(request(app, `/transfers/${leg}`, "PATCH", { exitTime: "14:05" }, w.office), 400)).toEqual(exitError);
+    const fromHome = await w.transfer(routeId);
+    expect(await json(request(app, `/transfers/${fromHome}`, "PATCH", { exitTime: "07:00" }, w.office), 400)).toEqual(notFromDestino);
+
+    // A Traslado stored before the field existed: Order refuses and names it.
+    await migrationPool.query("UPDATE transfers SET exit_time = NULL WHERE id = $1", [leg]);
+    const problems = engine.problems.length;
+    expect(await w.order(routeId, 409)).toEqual({ error: "Set the exit time from the first Destino of: Pasajero Sintético (Traslado " + leg + ")" });
+    expect(engine.problems).toHaveLength(problems);
   });
 
   it("Rule 12: starts a Recorrido after a gap of 2 hours or more at the Chofer's home", async () => {

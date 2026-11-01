@@ -29,7 +29,7 @@ async function migrationsUpTo(lastTag: string) {
   return work;
 }
 
-it("backfills the Tolerancia de llegada of existing Destinos from their kind", async () => {
+it("backfills the Tolerancia de llegada of existing Destinos from their kind and leaves stored exit times empty", async () => {
   await admin.query(`DROP DATABASE IF EXISTS ${databaseName} WITH (FORCE)`);
   await admin.query(`CREATE DATABASE ${databaseName}`);
   const url = new URL(inject("adminConnectionString"));
@@ -43,6 +43,17 @@ it("backfills the Tolerancia de llegada of existing Destinos from their kind", a
         [`Destino ${kind}`, kind],
       );
     }
+    // An entrada stored before the exit time existed, from the therapy centre to the school (synthetic data).
+    await pool.query("INSERT INTO daily_plans (plan_date) VALUES ('2026-11-02')");
+    await pool.query(
+      `INSERT INTO passengers (name, home_address, home_latitude, home_longitude, companions, front_seat, wheelchair,
+         max_ride_time_minutes, pickup_duration_minutes, dropoff_duration_minutes)
+       VALUES ('Pasajero Sintético', 'Calle Inventada 101', -26.83, -65.21, 0, false, false, 60, 5, 5)`,
+    );
+    await pool.query(
+      `INSERT INTO transfers (daily_plan_id, passenger_id, direction, origin_destination_id, destination_id, target_time, companions)
+       VALUES (1, 1, 'entrada', 1, 3, '14:00', 0)`,
+    );
 
     await migrate(createDrizzle(pool), { migrationsFolder });
 
@@ -54,6 +65,7 @@ it("backfills the Tolerancia de llegada of existing Destinos from their kind", a
       { kind: "day_centre", tolerance: 30 },
       { kind: "other", tolerance: 0 },
     ]);
+    expect((await pool.query("SELECT exit_time FROM transfers")).rows).toEqual([{ exit_time: null }]);
   } finally {
     await pool.end();
   }
