@@ -1305,8 +1305,9 @@ async function orderInputKey(client: Queryable, routeId: number) {
 /**
  * Locks every row Order read until it commits, so nothing changes between its last check and the commit: its Traslados
  * and the previous Recorrido's last one, the Recorrido and its neighbours, the Chofer, the Vehículo, and the Pasajeros
- * and Destinos of those Traslados. Every writer of these rows locks them first, so it waits. The order avoids deadlocks:
- * Traslados before Recorridos as in PATCH /transfers, the Chofer before the Vehículo as in publishing.
+ * and Destinos of those Traslados. Every writer of these rows locks them first, so it waits. The order follows the other
+ * writers: Traslados before Recorridos as in PATCH /transfers, the Chofer before the Vehículo as in publishing. Deactivating
+ * a Vehículo goes the other way; if it meets Order, Postgres aborts one of the two and nothing is saved half-way.
  */
 async function lockOrderInputs(client: Queryable, routeId: number, rows: Record<string, unknown>[], neighbours: Neighbours) {
   const transferIds = [...rows.map((row) => Number(row.id)), ...(neighbours.last ? [Number(neighbours.last.transfer_id)] : [])];

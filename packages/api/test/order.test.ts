@@ -90,8 +90,8 @@ function appWith(solver?: VroomSolver, config: Partial<AppConfig> = {}) {
 type App = ReturnType<typeof appWith>;
 
 /**
- * App whose transaction clients run the work set with `afterCheck` once, right after Order reads its Traslados inside the
- * save transaction: between its last check and its commit.
+ * App whose transaction clients run the work set with `afterCheck` once, right after Order re-reads its Traslados inside
+ * the save transaction: after it has locked and read the rows the work changes, before its commit.
  */
 function appAfterCheck(solver: VroomSolver) {
   let pending: (() => Promise<unknown>) | undefined;
