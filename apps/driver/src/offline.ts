@@ -12,8 +12,8 @@ export type QueuedMark = {
   confirmedAt: string | null;
   note: string | null;
 };
-/** Today's and tomorrow's plan as last downloaded, with the handover data of every home drop-off. */
-export type CachedPlan = { days: DriverDay[]; handovers: Record<number, Handover>; fetchedAt: string };
+/** Today's and tomorrow's plan as last downloaded by the Chofer `userId`, with the handover data of every home drop-off. */
+export type CachedPlan = { userId: number; days: DriverDay[]; handovers: Record<number, Handover>; fetchedAt: string };
 
 export type LocalStore = {
   marks(): Promise<QueuedMark[]>;
@@ -37,7 +37,13 @@ export function indexedDbStore(factory: IDBFactory = indexedDB): LocalStore {
       request.result.createObjectStore("marks", { keyPath: "id" });
       request.result.createObjectStore("plan");
     };
-    request.onsuccess = () => resolve(request.result);
+    request.onsuccess = () => {
+      // The browser may close the connection (WebKit does after a while in the background): the next call reopens it.
+      request.result.onclose = () => {
+        opened = null;
+      };
+      resolve(request.result);
+    };
     request.onerror = () => {
       opened = null;
       reject(request.error);
@@ -77,6 +83,18 @@ export async function isRevoked(response: Response) {
   return body?.code === REVOKED_CODE;
 }
 
+/** On a 401, wipes the phone only when the device was revoked, and says whether it did; an expired session keeps everything. */
+export async function wipeIfRevoked(response: Response, store: LocalStore) {
+  if (!await isRevoked(response)) return false;
+  await store.clear();
+  return true;
+}
+
+/** The saved plan, only for the Chofer who downloaded it: another Chofer signing in on the phone never sees it. */
+export function savedPlanFor(saved: CachedPlan | null, userId: number) {
+  return saved?.userId === userId ? saved : null;
+}
+
 export type FlushResult = "done" | "offline" | "signed_out" | "revoked";
 export type FlushOutcome = { result: FlushResult; confirmed: number };
 type Send = (routeId: number, mark: Mark) => Promise<Response>;
@@ -97,11 +115,7 @@ async function flushOnce(store: LocalStore, send: Send): Promise<FlushOutcome> {
     } catch {
       return { result: "offline", confirmed };
     }
-    if (response.status === 401) {
-      if (!await isRevoked(response)) return { result: "signed_out", confirmed };
-      await store.clear();
-      return { result: "revoked", confirmed };
-    }
+    if (response.status === 401) return { result: await wipeIfRevoked(response, store) ? "revoked" : "signed_out", confirmed };
     const body = await response.json().catch(() => null) as { mark?: { id?: string }; conflict?: boolean; error?: string } | null;
     if (response.ok && body?.mark?.id === item.id) {
       await store.putMark({ ...item, state: "confirmed", confirmedAt: new Date().toISOString(), note: body.conflict ? CONFLICT_NOTE : null });
@@ -123,11 +137,16 @@ export function markQueue(store: LocalStore, send: Send) {
   async function loop() {
     let confirmed = 0;
     let outcome: FlushOutcome;
-    do {
-      again = false;
-      outcome = await flushOnce(store, send);
-      confirmed += outcome.confirmed;
-    } while (again && outcome.result === "done");
+    try {
+      do {
+        again = false;
+        outcome = await flushOnce(store, send);
+        confirmed += outcome.confirmed;
+      } while (again && outcome.result === "done");
+    } finally {
+      // Cleared in the same step as the last check of `again`, so a flush asked for later starts a new round.
+      running = null;
+    }
     return { result: outcome.result, confirmed };
   }
   return {
@@ -139,9 +158,7 @@ export function markQueue(store: LocalStore, send: Send) {
         again = true;
         return running;
       }
-      running = loop().finally(() => {
-        running = null;
-      });
+      running = loop();
       return running;
     },
   };

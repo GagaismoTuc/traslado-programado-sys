@@ -1,6 +1,9 @@
 import { describe, expect, it, vi } from "vitest";
 import { newMark, type Mark } from "./Marks";
-import { CONFLICT_NOTE, latestMarks, markQueue, requestPersistentStorage, startFlushing, type CachedPlan, type LocalStore, type QueuedMark } from "./offline";
+import {
+  CONFLICT_NOTE, latestMarks, markQueue, requestPersistentStorage, savedPlanFor, startFlushing, wipeIfRevoked,
+  type CachedPlan, type LocalStore, type QueuedMark,
+} from "./offline";
 
 /** The store contract in memory; the IndexedDB one is exercised by the C3 test in apps/office/e2e/driver-offline.e2e.ts. */
 function memoryStore() {
@@ -23,6 +26,7 @@ const mark = (n: number, kind: Mark["kind"] = "subio") => newMark(
   { transferId: n, kind, location: null, version: 1 }, new Date(`2026-10-23T12:0${n}:00.000Z`), `00000000-0000-4000-8000-00000000000${n}`,
 );
 const json = (body: unknown, status: number) => new Response(JSON.stringify(body), { status, headers: { "Content-Type": "application/json" } });
+const savedPlan = (userId: number): CachedPlan => ({ userId, days: [], handovers: {}, fetchedAt: "2026-10-23T11:00:00.000Z" });
 const stored = (sent: Mark) => json({ mark: { ...sent, routeId: 9, serverTime: "2026-10-23T12:10:00.000Z", flags: [] } }, 201);
 
 describe("Marca queue on the phone", () => {
@@ -52,7 +56,7 @@ describe("Marca queue on the phone", () => {
     await markQueue(store, async () => json({ error: "This Recorrido is closed" }, 409)).flush();
     expect(marks.get(mark(1).id)?.note).toBe("This Recorrido is closed");
 
-    await store.putPlan({ days: [], handovers: {}, fetchedAt: "2026-10-23T11:00:00.000Z" });
+    await store.putPlan(savedPlan(7));
     await queue.add(9, mark(2));
     const send = vi.fn(async () => json({ error: "Authentication required", code: "session_revoked" }, 401));
     expect(await markQueue(store, send).flush()).toEqual({ result: "revoked", confirmed: 0 });
@@ -89,6 +93,26 @@ describe("Marca queue on the phone", () => {
     await markQueue(store, async () => json({ mark: { id: mark(1).id }, conflict: true }, 200)).flush();
     expect(marks.get(mark(1).id)).toMatchObject({ state: "confirmed", note: CONFLICT_NOTE });
     expect(latestMarks([...marks.values()])[1].mark).toEqual(mark(1));
+  });
+
+  it("rule 1: a 401 when the app opens or loads the plan keeps the queue on an expired session and wipes it only on a revoked device", async () => {
+    const { store, marks, getPlan } = memoryStore();
+    await markQueue(store, async () => json({}, 500)).add(9, mark(1));
+    await store.putPlan(savedPlan(7));
+    expect(await wipeIfRevoked(json({ error: "Authentication required", code: "session_expired" }, 401), store)).toBe(false);
+    expect(await wipeIfRevoked(json({ error: "Authentication required" }, 401), store)).toBe(false);
+    expect(await wipeIfRevoked(json({ error: "This Recorrido belongs to another Chofer" }, 403), store)).toBe(false);
+    expect(marks.get(mark(1).id)).toMatchObject({ state: "pending", mark: mark(1) });
+    expect(getPlan()).toEqual(savedPlan(7));
+    expect(await wipeIfRevoked(json({ error: "Authentication required", code: "session_revoked" }, 401), store)).toBe(true);
+    expect(marks.size).toBe(0);
+    expect(getPlan()).toBeNull();
+  });
+
+  it("shows the plan saved on the phone only to the Chofer who downloaded it", () => {
+    expect(savedPlanFor(savedPlan(7), 7)).toEqual(savedPlan(7));
+    expect(savedPlanFor(savedPlan(7), 8)).toBeNull();
+    expect(savedPlanFor(null, 7)).toBeNull();
   });
 
   it("flushes when the app opens, when the connection returns and when the app becomes visible", () => {

@@ -4,7 +4,8 @@ import {
   type Handover, type MarkKind, type Receiver,
 } from "./Marks";
 import {
-  indexedDbStore, isRevoked, latestMarks, markQueue, requestPersistentStorage, startFlushing, type CachedPlan, type QueuedMark,
+  indexedDbStore, latestMarks, markQueue, requestPersistentStorage, savedPlanFor, startFlushing, wipeIfRevoked, type CachedPlan,
+  type QueuedMark,
 } from "./offline";
 
 export type DriverStop = {
@@ -207,7 +208,7 @@ async function downloadHandovers(apiUrl: string, days: DriverDay[]) {
  * without signal. Marcas go to the queue first and are sent on open, when the connection returns and when the app
  * becomes visible. A 401 sends the Chofer back to sign-in; a revoked device also wipes the phone.
  */
-export function DriverHome({ apiUrl, onSignedOut }: { apiUrl: string; onSignedOut: () => void }) {
+export function DriverHome({ apiUrl, userId, onSignedOut }: { apiUrl: string; userId: number; onSignedOut: () => void }) {
   const [plan, setPlan] = useState<CachedPlan | null>(null);
   const [message, setMessage] = useState("");
   // A failed load is shown until a later load succeeds, apart from the acknowledgement message.
@@ -224,8 +225,7 @@ export function DriverHome({ apiUrl, onSignedOut }: { apiUrl: string; onSignedOu
   const refreshLocal = useCallback(async () => setLocal(await store.marks().catch(() => [])), [store]);
 
   const endSession = useCallback(async (response: Response) => {
-    if (await isRevoked(response)) {
-      await store.clear().catch(() => undefined);
+    if (await wipeIfRevoked(response, store).catch(() => true)) {
       setPlan(null);
       setLocal([]);
     }
@@ -247,7 +247,7 @@ export function DriverHome({ apiUrl, onSignedOut }: { apiUrl: string; onSignedOu
       }
       const days = await Promise.all(responses.map(async (response) => await response.json() as DriverDay));
       const fresh = await downloadHandovers(apiUrl, days);
-      const previous = await store.plan().catch(() => null);
+      const previous = savedPlanFor(await store.plan().catch(() => null), userId);
       if (loadId !== latestLoad.current) return;
       const handovers: Record<number, Handover> = {};
       for (const route of days.flatMap((day) => day.routes)) {
@@ -256,14 +256,14 @@ export function DriverHome({ apiUrl, onSignedOut }: { apiUrl: string; onSignedOu
           if (data) handovers[stop.transferId] = data;
         }
       }
-      const next = { days, handovers, fetchedAt: requestedAt };
+      const next = { userId, days, handovers, fetchedAt: requestedAt };
       setPlan(next);
       setLoadError("");
       await store.putPlan(next).catch(() => undefined);
     } catch {
       if (loadId === latestLoad.current) setLoadError("Unable to reach the server");
     }
-  }, [apiUrl, store, endSession]);
+  }, [apiUrl, userId, store, endSession]);
 
   const flush = useCallback(async () => {
     const outcome = await queue.flush().catch(() => ({ result: "offline" as const, confirmed: 0 }));
@@ -285,11 +285,12 @@ export function DriverHome({ apiUrl, onSignedOut }: { apiUrl: string; onSignedOu
   useEffect(() => {
     // The saved plan shows until the first load answers.
     void store.plan().then((saved) => {
-      if (saved) setPlan((current) => current ?? saved);
+      const own = savedPlanFor(saved, userId);
+      if (own) setPlan((current) => current ?? own);
     }).catch(() => undefined);
     void refreshLocal();
     void requestPersistentStorage(navigator.storage);
-  }, [store, refreshLocal]);
+  }, [store, userId, refreshLocal]);
   useEffect(() => startRefetching(window, document, () => void load()), [load]);
   useEffect(() => startFlushing(window, document, () => void flush()), [flush]);
 
