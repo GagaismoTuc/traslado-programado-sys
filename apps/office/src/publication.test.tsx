@@ -19,7 +19,7 @@ const unserved: PassengerViolations = {
 };
 const transfer = (id: number, targetTime: string, status = "planificado") => ({
   id, passengerName: "Pasajero Sintético", direction: "entrada" as const, destinationName: "Escuela Sintética",
-  originDestinationName: null, targetTime, companions: 0, status, routeId: null,
+  originDestinationName: null, targetTime, exitTime: null, companions: 0, status, routeId: null,
 });
 
 describe("Plan diario publication", () => {

@@ -316,6 +316,33 @@ describe("Route validator and capacity vector", () => {
     expect(load({ id: "p", frontSeat: false, customCapacity: { seats: 1 } }, { id: "v", capacity: { seats: 1, front: 0 } })).toEqual([]);
   });
 
+  // #21 Regla 9: only one Asiento delantero, so two Pasajeros who need it cannot be aboard at the same time.
+  it("flags two Asiento delantero Pasajeros aboard at the same time", () => {
+    const passengers: Passenger[] = [{ id: "p1", frontSeat: true }, { id: "p2", frontSeat: true }];
+    const transfers: Transfer[] = [{ id: "t1", passengerId: "p1" }, { id: "t2", passengerId: "p2" }];
+    const vehicle: Vehicle = { id: "v1", capacity: { seats: 5 } };
+    const shared = (route: Stop[]) => validateRoute({ route, passengers, vehicle, transfers }).filter((v) => v.rule === "front_seat_shared");
+
+    expect(shared([
+      { id: "s1", transferId: "t1", type: "pickup", plannedTime: "08:00" },
+      { id: "s2", transferId: "t2", type: "pickup", plannedTime: "08:05" },
+      { id: "s3", transferId: "t1", type: "dropoff", plannedTime: "08:10" },
+      { id: "s4", transferId: "t2", type: "dropoff", plannedTime: "08:15" },
+    ])).toEqual([{
+      rule: "front_seat_shared",
+      passengerId: "p2",
+      transferId: "t2",
+      message: "Pasajeros p1 and p2 both need the Asiento delantero and are aboard at the same time",
+      details: { aboard: ["p1", "p2"], stopIndex: 1 },
+    }]);
+    expect(shared([
+      { id: "s1", transferId: "t1", type: "pickup", plannedTime: "08:00" },
+      { id: "s3", transferId: "t1", type: "dropoff", plannedTime: "08:10" },
+      { id: "s2", transferId: "t2", type: "pickup", plannedTime: "08:15" },
+      { id: "s4", transferId: "t2", type: "dropoff", plannedTime: "08:20" },
+    ])).toEqual([]);
+  });
+
   // Regla 3: An empty violation list is the only "valid" result.
   it("returns an empty violation list as the only valid result when all rules pass", () => {
     const passenger: Passenger = { id: "p1", maxRideTimeMinutes: 45, companions: 0, requiredFeatures: ["rampa_silla_de_ruedas"] };

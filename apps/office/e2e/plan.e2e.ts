@@ -101,6 +101,87 @@ test("plans a day by hand at phone width without scrolling sideways", async ({ p
   await expectNoSideScroll(page);
 });
 
+test("asks for the exit time when an entrada starts at another Destino", async ({ page }) => {
+  const pool = database();
+  try {
+    await pool.query(
+      `INSERT INTO destinations (name, kind, address, latitude, longitude)
+       VALUES ('Terapia Plan E2E', 'therapy', 'Avenida Sintetica 303', -26.81, -65.19)`,
+    );
+    await pool.query("INSERT INTO daily_plans (plan_date) VALUES ($1)", [DAY]);
+    await page.goto(`${process.env.E2E_BASE_URL}/plan`);
+    await page.getByLabel("Day").fill(DAY);
+    await page.locator("select[name=passengerId]").selectOption({ label: "Pasajero Plan E2E" });
+    await expect(page.getByLabel("Leaves the first Destino at")).toHaveCount(0);
+    await page.locator("select[name=originDestinationId]").selectOption({ label: "Terapia Plan E2E" });
+    await page.locator("select[name=destinationId]").selectOption({ label: "Escuela Plan E2E" });
+    await page.getByLabel("Leaves the first Destino at").fill("13:30");
+    await page.getByLabel("Arrival time").fill("14:00");
+    await page.getByRole("button", { name: "Add Traslado" }).click();
+    await expect(page.locator("strong", { hasText: "14:00 Pasajero Plan E2E: entrada, Terapia Plan E2E (leaves at 13:30) → Escuela Plan E2E" }))
+      .toBeVisible();
+    expect((await pool.query("SELECT to_char(exit_time, 'HH24:MI') AS exit FROM transfers")).rows).toEqual([{ exit: "13:30" }]);
+  } finally {
+    await pool.query("DELETE FROM transfers");
+    await pool.query("DELETE FROM destinations WHERE name = 'Terapia Plan E2E'");
+    await pool.end();
+  }
+});
+
+// Synthetic data only: a Borrador Recorrido with a front-seat Pasajero and one whose Tiempo máximo a bordo is too short.
+async function seedRecorrido() {
+  const pool = database();
+  try {
+    await pool.query("UPDATE passengers SET front_seat = true WHERE name = 'Pasajero Plan E2E'");
+    await pool.query(
+      `INSERT INTO passengers (name, home_address, home_latitude, home_longitude, companions, front_seat, wheelchair,
+         max_ride_time_minutes, pickup_duration_minutes, dropoff_duration_minutes)
+       VALUES ('Pasajero Corto E2E', 'Calle Inventada 101', -26.83, -65.21, 0, false, false, 8, 5, 5)`,
+    );
+    const plan = await pool.query("INSERT INTO daily_plans (plan_date) VALUES ($1) RETURNING id", [DAY]);
+    const route = await pool.query(
+      `INSERT INTO routes (daily_plan_id, driver_id, vehicle_id, start_time, end_time)
+       SELECT $1, d.id, d.usual_vehicle_id, '07:00', '09:00' FROM drivers d WHERE d.name = 'Chofer Plan E2E' RETURNING id`,
+      [plan.rows[0].id],
+    );
+    let position = 0;
+    for (const name of ["Pasajero Plan E2E", "Pasajero Corto E2E"]) {
+      const transfer = await pool.query(
+        `INSERT INTO transfers (daily_plan_id, passenger_id, direction, destination_id, target_time, companions)
+         SELECT $1, p.id, 'entrada', d.id, '08:00', p.companions FROM passengers p, destinations d
+          WHERE p.name = $2 AND d.name = 'Escuela Plan E2E' RETURNING id`,
+        [plan.rows[0].id, name],
+      );
+      for (const kind of ["pickup", "dropoff"]) {
+        await pool.query("INSERT INTO stops (route_id, transfer_id, kind, position) VALUES ($1, $2, $3, $4)", [
+          route.rows[0].id, transfer.rows[0].id, kind, ++position,
+        ]);
+      }
+    }
+  } finally {
+    await pool.end();
+  }
+}
+
+test("orders a Recorrido with the engine, shows the planned times and what did not fit, and flags the front seat", async ({ page }) => {
+  await seedRecorrido();
+  await page.setViewportSize(PHONE);
+  await page.goto(`${process.env.E2E_BASE_URL}/plan`);
+  await page.getByLabel("Day").fill(DAY);
+  await expect(page.getByText("Carries a Pasajero who needs the front seat: check it when changing the Chofer or the Vehicle.")).toBeVisible();
+  await expect(page.locator("li", { hasText: "08:00 Pasajero Plan E2E" }).locator("select").locator("option", { hasText: "(front seat taken)" }))
+    .toHaveText("Chofer Plan E2E 07:00-09:00 (front seat taken)");
+
+  await page.getByRole("button", { name: "Order", exact: true }).click();
+  await expect(page.getByRole("status")).toHaveText("Order applied: some Traslados did not fit");
+  // R' = 60 − 5 min of buffer: picked up at 08:00 − 55 + 5 min of drop-off, dropped off by 08:00.
+  await expect(page.getByText("07:10 Pick up Pasajero Plan E2E at home")).toBeVisible();
+  await expect(page.getByText("08:00 Drop off Pasajero Plan E2E at Escuela Plan E2E")).toBeVisible();
+  await expect(page.getByText("Pasajero Corto E2E: cannot make its time window")).toBeVisible();
+  await expect(page.locator("strong", { hasText: "08:00 Pasajero Corto E2E" }).locator("..").locator("select")).toHaveValue("");
+  await expectNoSideScroll(page);
+});
+
 // Synthetic data only: one Traslado on each of two real Planes diarios.
 async function seedTwoPlans(firstDay: string, secondDay: string) {
   const pool = database();

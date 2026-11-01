@@ -43,6 +43,13 @@ describe("office screens", () => {
     expect(pinPickerSource).toContain('import("maplibre-gl")');
   });
 
+  it("offers the Tolerancia de llegada on a new Destino, left empty for the kind's default", () => {
+    vi.stubGlobal("window", { location: { pathname: "/destinations" } });
+    const markup = renderToStaticMarkup(<App />);
+    expect(markup).toContain("Arrival tolerance in minutes (empty: 30 for schools and day centres, 0 otherwise)");
+    expect(markup).toContain('<input type="number" min="0" max="240" step="1" name="arrivalToleranceMinutes"/>');
+  });
+
   it("keeps the pin picker free of Destino code with value, onChange and suggestion props", () => {
     const imports = [...pinPickerSource.matchAll(/from\s+["']([^"']+)["']|import\(["']([^"']+)["']\)/g)].map((match) => match[1] ?? match[2]);
     expect(new Set(imports)).toEqual(new Set(["react", "maplibre-gl", "maplibre-gl/dist/maplibre-gl-worker.mjs?url", "maplibre-gl/dist/maplibre-gl.css"]));

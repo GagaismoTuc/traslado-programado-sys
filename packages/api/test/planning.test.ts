@@ -265,7 +265,7 @@ describe("Plan diario by hand", () => {
     const byDefault = await route(office, { driverId });
     expect(byDefault).toEqual({
       id: expect.any(Number), driverId, driverName: "Chofer chofer-regla6", vehicleId, vehiclePlate: "AA006BB",
-      startTime: "07:00", endTime: "09:00", status: "borrador",
+      startTime: "07:00", endTime: "09:00", status: "borrador", startKind: null, startLat: null, startLng: null, endKind: null, frontSeat: false,
     });
     expect((await route(office, { driverId, vehicleId: replacement })).vehicleId).toBe(replacement);
 
@@ -310,7 +310,7 @@ describe("Plan diario by hand", () => {
   it("lets an entrada start at another Destino, stored as part of the Traslado", async () => {
     const { office, passengerId, destinationId, driverId, entrada } = await setup("regla8");
     const therapy = await destination(office, "Centro Terapéutico Sintético");
-    const fromTherapy = await entrada("15:00", { originDestinationId: therapy });
+    const fromTherapy = await entrada("15:00", { originDestinationId: therapy, exitTime: "14:30" });
     expect(fromTherapy).toMatchObject({
       direction: "entrada",
       originDestinationId: therapy,

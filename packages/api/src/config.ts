@@ -1,4 +1,5 @@
 import { z } from "zod";
+import { parseSpeedFactors, type PlannerSettings } from "./planner.js";
 
 const configSchema = z.object({
   SERVER_EPOCH: z.string().trim().min(1, "SERVER_EPOCH is required"),
@@ -10,6 +11,11 @@ const configSchema = z.object({
     .int("ROUTE_GAP_MINUTES must be a whole number of minutes from 1")
     .min(1, "ROUTE_GAP_MINUTES must be a whole number of minutes from 1")
     .default(60),
+  RIDE_TIME_BUFFER_MINUTES: z.coerce.number({ error: "RIDE_TIME_BUFFER_MINUTES must be a whole number of minutes from 0" })
+    .int("RIDE_TIME_BUFFER_MINUTES must be a whole number of minutes from 0")
+    .min(0, "RIDE_TIME_BUFFER_MINUTES must be a whole number of minutes from 0")
+    .default(5),
+  SPEED_FACTORS: z.string().default("00:00=1"),
   GEOCODER: z.enum(["off", "nominatim"], { error: "GEOCODER must be off or nominatim" }).default("off"),
   NOMINATIM_URL: z.string().url("NOMINATIM_URL must be a valid URL").default("https://nominatim.openstreetmap.org"),
   NOMINATIM_USER_AGENT: z.string().trim().min(1).default("traslado-programado (+https://github.com/GagaismoTuc/traslado-programado-sys)"),
@@ -22,6 +28,7 @@ export type ServerConfig = {
   vroomUrl: string;
   port: number;
   routeGapMinutes: number;
+  planner: PlannerSettings;
   trustedOrigins: string[];
   geocoder: "off" | "nominatim";
   nominatimUrl: string;
@@ -56,6 +63,8 @@ export function readConfig(environment: NodeJS.ProcessEnv = process.env): Server
     const issues = result.error.issues.map((issue) => issue.message).join("; ");
     throw new Error(issues);
   }
+  const speedFactors = parseSpeedFactors(result.data.SPEED_FACTORS);
+  if (!speedFactors) throw new Error("SPEED_FACTORS must be a comma-separated list of HH:MM=factor with factors above 0 and up to 5");
 
   return {
     serverEpoch: result.data.SERVER_EPOCH,
@@ -64,6 +73,8 @@ export function readConfig(environment: NodeJS.ProcessEnv = process.env): Server
     vroomUrl: result.data.VROOM_URL,
     port: result.data.PORT,
     routeGapMinutes: result.data.ROUTE_GAP_MINUTES,
+    // The early tolerance mirrors the route validator's default (15, inferido); calibrated later with real plans.
+    planner: { rideTimeBufferMinutes: result.data.RIDE_TIME_BUFFER_MINUTES, speedFactors, earlyToleranceMinutes: 15 },
     trustedOrigins: readTrustedOrigins(environment.AUTH_ALLOWED_ORIGINS),
     geocoder: result.data.GEOCODER,
     nominatimUrl: result.data.NOMINATIM_URL,
