@@ -1,8 +1,31 @@
 import { describe, expect, it } from "vitest";
 import { createExecutionHarness } from "./helpers/execution.js";
 
+/** Holds the answer of the next lookup of the Recorrido's Chofer before the transaction (see ownRoute) until it is released. */
+const ownerLookup = { routeId: 0, reached: () => {}, gate: Promise.resolve() };
+function pauseOwnerLookup(routeId: number) {
+  let release!: () => void;
+  const reached = new Promise<void>((resolve) => { ownerLookup.reached = resolve; });
+  ownerLookup.gate = new Promise<void>((resolve) => { release = resolve; });
+  ownerLookup.routeId = routeId;
+  return { reached, release };
+}
+
 const { request, answer, rows, setup, markBody, mark } = createExecutionHarness("close-test", {
   baseAddress: "Base Sintética, Calle Inventada 999",
+}, {
+  wrapDb: (db) => ({
+    query: async (sql, values) => {
+      const result = await db.query(sql, values);
+      if (ownerLookup.routeId && sql.includes("AS driver_id, to_char(dp.plan_date") && values?.[0] === ownerLookup.routeId) {
+        ownerLookup.routeId = 0;
+        ownerLookup.reached();
+        await ownerLookup.gate;
+      }
+      return result;
+    },
+    connect: db.connect && (() => db.connect!()),
+  }),
 });
 
 async function routeStatus(routeId: number) {
@@ -145,6 +168,53 @@ describe("Closing a Recorrido", () => {
       .toEqual({ error: "This Recorrido belongs to another Chofer" });
     expect(await closeLog()).toHaveLength(1);
     expect(await rows("SELECT id FROM alerts WHERE kind = 'close_refused'")).toEqual([]);
+  });
+
+  it("does not let the previous Chofer close after the published owner changes", async () => {
+    // A's close is authorized while the Recorrido is Publicado; the Oficina then gives it to B, who starts it and leaves
+    // nothing open, so only the owner decides.
+    const { chofer, office, route, passenger, transfer, assign, publish } = await setup("stale-close");
+    const driver = await chofer();
+    const other = await chofer();
+    const routeId = await route(driver.driverId);
+    const transferId = await transfer((await passenger()).passengerId, "salida", "13:00");
+    await assign(transferId, routeId);
+    await publish(routeId);
+    const paused = pauseOwnerLookup(routeId);
+    const staleClose = request(`/driver/routes/${routeId}/close`, "POST", {}, driver.cookie);
+    try {
+      await paused.reached;
+      await answer(request(`/routes/${routeId}`, "PATCH", { driverId: other.driverId }, office), 200);
+      await publish(routeId);
+      await answer(request(`/driver/routes/${routeId}/start`, "POST", {}, other.cookie), 200);
+      await answer(mark(other.cookie, routeId, markBody(transferId, "ausente")), 201);
+    } finally {
+      paused.release();
+    }
+    expect(await answer(staleClose, 403)).toEqual({ error: "This Recorrido belongs to another Chofer" });
+    expect(await routeStatus(routeId)).toBe("en_curso");
+    expect(await closeLog()).toEqual([]);
+  });
+
+  it("does not let the previous Chofer start after the published owner changes", async () => {
+    const { chofer, office, route, passenger, transfer, assign, publish } = await setup("stale-start");
+    const driver = await chofer();
+    const other = await chofer();
+    const routeId = await route(driver.driverId);
+    await assign(await transfer((await passenger()).passengerId, "salida", "13:00"), routeId);
+    await publish(routeId);
+    const paused = pauseOwnerLookup(routeId);
+    const staleStart = request(`/driver/routes/${routeId}/start`, "POST", {}, driver.cookie);
+    try {
+      await paused.reached;
+      await answer(request(`/routes/${routeId}`, "PATCH", { driverId: other.driverId }, office), 200);
+      await publish(routeId);
+    } finally {
+      paused.release();
+    }
+    expect(await answer(staleStart, 403)).toEqual({ error: "This Recorrido belongs to another Chofer" });
+    expect(await routeStatus(routeId)).toBe("publicado");
+    expect(await rows("SELECT id FROM change_log WHERE entity = 'route' AND action = 'started'")).toEqual([]);
   });
 
   it("rule 3: an Entregado to company staff at the base counts as handed over", async () => {

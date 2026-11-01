@@ -1596,6 +1596,9 @@ export type CascadeWarning = { routeId: number; version: number; fromRouteId: nu
 
 const PLAN_TIME_ZONE = "America/Argentina/Tucuman";
 const OUT_OF_DRIVER_SCOPE = "Only today's and tomorrow's Recorridos are available";
+const NOT_OWN_ROUTE = "This Recorrido belongs to another Chofer";
+// The Chofer of a Recorrido `r`: the one of its latest Versión del plan, as the Chofer app shows it.
+const ROUTE_OWNER_SQL = "COALESCE((SELECT pv.driver_id FROM plan_versions pv WHERE pv.route_id = r.id ORDER BY pv.version DESC LIMIT 1), r.driver_id)";
 
 /** Today and tomorrow in the Plan diario's zone: the only days a Chofer can read or acknowledge. */
 function driverDays(now: Date) {
@@ -2026,16 +2029,29 @@ export function createApp({ db, routing, router, geocoder, solver, travelTime, c
    */
   async function ownRoute(context: Context, driverId: number, routeId: number, anyDay = false) {
     const route = await db.query(
-      `SELECT COALESCE((SELECT pv.driver_id FROM plan_versions pv WHERE pv.route_id = r.id ORDER BY pv.version DESC LIMIT 1), r.driver_id)
-                AS driver_id, to_char(dp.plan_date, 'YYYY-MM-DD') AS date
+      `SELECT ${ROUTE_OWNER_SQL} AS driver_id, to_char(dp.plan_date, 'YYYY-MM-DD') AS date
          FROM routes r JOIN daily_plans dp ON dp.id = r.daily_plan_id WHERE r.id = $1`,
       [routeId],
     ) as QueryResult;
     const row = route.rows[0];
     if (!row) return context.json({ error: "Recorrido not found" }, 404);
-    if (Number(row.driver_id) !== driverId) return context.json({ error: "This Recorrido belongs to another Chofer" }, 403);
+    if (Number(row.driver_id) !== driverId) return context.json({ error: NOT_OWN_ROUTE }, 403);
     if (!anyDay && !driverDays(now()).includes(String(row.date))) return context.json({ error: OUT_OF_DRIVER_SCOPE }, 403);
     return row;
+  }
+
+  /**
+   * Locks the Recorrido and returns its status, refusing a Chofer who no longer owns its latest Versión del plan. The
+   * check in ownRoute ran before the lock, and the Oficina may have given the Recorrido to another Chofer since; a
+   * publication locks the Recorrido too, so the owner read after the lock holds until the commit.
+   */
+  async function lockOwnRoute(client: Queryable, driverId: number, routeId: number) {
+    const route = (await client.query("SELECT status FROM routes WHERE id = $1 FOR UPDATE", [routeId]) as QueryResult).rows[0];
+    if (!route) throw new PlanningError(404, "Recorrido not found");
+    // A separate statement, so it reads the versions committed while it waited for the lock.
+    const owner = (await client.query(`SELECT ${ROUTE_OWNER_SQL} AS driver_id FROM routes r WHERE r.id = $1`, [routeId]) as QueryResult).rows[0];
+    if (Number(owner.driver_id) !== driverId) throw new PlanningError(403, NOT_OWN_ROUTE);
+    return String(route.status);
   }
 
   /**
@@ -4000,7 +4016,7 @@ export function createApp({ db, routing, router, geocoder, solver, travelTime, c
       if (route instanceof Response) return route;
       try {
         await inTransaction(db, async (client) => {
-          const status = (await client.query("SELECT status FROM routes WHERE id = $1 FOR UPDATE", [id]) as QueryResult).rows[0].status;
+          const status = await lockOwnRoute(client, chofer.driverId, id);
           if (status === "borrador") throw new PlanningError(409, "A Recorrido can be started once it is published");
           if (status === "cerrado") throw new PlanningError(409, "This Recorrido is closed");
           if (status === "publicado") {
@@ -4031,7 +4047,7 @@ export function createApp({ db, routing, router, geocoder, solver, travelTime, c
             [id],
           );
           await lockTransfers();
-          const status = (await client.query("SELECT status FROM routes WHERE id = $1 FOR UPDATE", [id]) as QueryResult).rows[0].status;
+          const status = await lockOwnRoute(client, chofer.driverId, id);
           if (status === "cerrado") return { status: 200 as const, body: { route: { routeId: id, status: "cerrado" } } };
           if (status !== "en_curso") throw new PlanningError(409, "Only a Recorrido en curso can be closed");
           await lockTransfers();
