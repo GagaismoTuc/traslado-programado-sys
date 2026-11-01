@@ -92,6 +92,13 @@
       "when": 1793561949285,
       "tag": "0012_outgoing_scarlet_spider",
       "breakpoints": true
+    },
+    {
+      "idx": 13,
+      "version": "7",
+      "when": 1793565499797,
+      "tag": "0013_spotty_malcolm_colcord",
+      "breakpoints": true
     }
   ]
 }

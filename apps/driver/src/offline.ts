@@ -1,9 +1,13 @@
 // The driver app's own offline store (no Background Sync): the Marca queue and the plan saved on the phone, in
 // IndexedDB, so they survive a reload, a closed tab and a phone without signal.
+import { markOrder } from "@traslado/shared";
 import type { DriverDay } from "./Days";
 import type { Handover, Mark } from "./Marks";
 
-/** A Marca on the phone: pending until the server confirms it, then kept as confirmed. `note` is the server's last word. */
+/**
+ * A Marca on the phone: pending until the server confirms it, then kept as confirmed. `note` is the server's last word.
+ * Each confirmation on the phone is later than the one before, so `confirmedAt` orders the Marcas as the server stored them.
+ */
 export type QueuedMark = {
   id: string;
   routeId: number;
@@ -100,13 +104,16 @@ export type FlushOutcome = { result: FlushResult; confirmed: number };
 type Send = (routeId: number, mark: Mark) => Promise<Response>;
 
 /**
- * Sends every pending Marca once, oldest phone time first. A Marca is confirmed only when the server answers with that
- * same Marca; any other answer keeps it pending with the server's message. No signal or an expired session stops the
+ * Sends every pending Marca once, in `queueOrder`, so the server stores them in the order the phone reads them. A Marca
+ * is confirmed only when the server answers with that same Marca; any other answer keeps it pending with the server's
+ * message. No signal or an expired session stops the
  * round and keeps the queue; a revoked device wipes the store without sending the rest.
  */
 async function flushOnce(store: LocalStore, send: Send): Promise<FlushOutcome> {
-  const pending = (await store.marks()).filter((item) => item.state === "pending")
-    .sort((a, b) => a.mark.phoneTime.localeCompare(b.mark.phoneTime) || a.id.localeCompare(b.id));
+  const items = await store.marks();
+  // At least 1 ms after the last confirmation, even within one millisecond or after the phone's clock went back.
+  let lastConfirmed = Math.max(0, ...items.map((item) => item.confirmedAt ? Date.parse(item.confirmedAt) : 0));
+  const pending = items.filter((item) => item.state === "pending").sort(queueOrder);
   let confirmed = 0;
   for (const item of pending) {
     let response: Response;
@@ -118,7 +125,8 @@ async function flushOnce(store: LocalStore, send: Send): Promise<FlushOutcome> {
     if (response.status === 401) return { result: await wipeIfRevoked(response, store) ? "revoked" : "signed_out", confirmed };
     const body = await response.json().catch(() => null) as { mark?: { id?: string }; conflict?: boolean; error?: string } | null;
     if (response.ok && body?.mark?.id === item.id) {
-      await store.putMark({ ...item, state: "confirmed", confirmedAt: new Date().toISOString(), note: body.conflict ? CONFLICT_NOTE : null });
+      lastConfirmed = Math.max(Date.now(), lastConfirmed + 1);
+      await store.putMark({ ...item, state: "confirmed", confirmedAt: new Date(lastConfirmed).toISOString(), note: body.conflict ? CONFLICT_NOTE : null });
       confirmed++;
     } else {
       await store.putMark({ ...item, note: body?.error ?? "The server did not take the Marca yet; it stays on the phone" });
@@ -164,13 +172,19 @@ export function markQueue(store: LocalStore, send: Send) {
   };
 }
 
-/** The newest Marca the phone holds for each Traslado. */
+/**
+ * The Marcas on the phone in the order the server holds them (`markOrder`). A Marca reaches the server when it is
+ * confirmed, so with the same phone time the confirmed ones come first, in the order they were confirmed, and the pending
+ * ones follow in the order the queue sends them, which is this same order (the UUID only breaks ties among those).
+ */
+export const queueOrder = markOrder<QueuedMark>((item) => item.mark.phoneTime, (a, b) =>
+  Number(a.state === "pending") - Number(b.state === "pending") || (a.confirmedAt ?? "").localeCompare(b.confirmedAt ?? "")
+  || a.id.localeCompare(b.id));
+
+/** The newest Marca the phone holds for each Traslado: the last one in `queueOrder`, the one the server takes as latest. */
 export function latestMarks(items: QueuedMark[]) {
   const latest: Record<number, QueuedMark> = {};
-  for (const item of items) {
-    const current = latest[item.mark.transferId];
-    if (!current || item.mark.phoneTime > current.mark.phoneTime) latest[item.mark.transferId] = item;
-  }
+  for (const item of [...items].sort(queueOrder)) latest[item.mark.transferId] = item;
   return latest;
 }
 

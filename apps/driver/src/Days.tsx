@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import {
-  currentLocation, fetchHandover, HandoverView, newMark, otherAdultReceiver, sendMark, startRoute,
-  type Handover, type MarkKind, type Receiver,
+  currentLocation, fetchHandover, HandoverView, newMark, otherAdultReceiver, sendMark, startRoute, undoMark,
+  type Handover, type Mark, type MarkKind, type Receiver,
 } from "./Marks";
 import {
   indexedDbStore, latestMarks, markQueue, requestPersistentStorage, savedPlanFor, startFlushing, wipeIfRevoked, type CachedPlan,
@@ -120,6 +120,8 @@ export type Marking = {
   sending: boolean;
   // The newest Marca the phone holds for each Traslado, saved on the phone or confirmed by the server.
   marks: Record<number, QueuedMark>;
+  // For each undo on the phone, by its UUID, the kind of the Marca it undoes.
+  undone: Record<string, MarkKind>;
   // When the plan shown was requested, or null before any plan.
   planFetchedAt: string | null;
   // The open home drop-off with its downloaded data and the last refusal.
@@ -127,6 +129,7 @@ export type Marking = {
   onStart: (route: DriverRoute) => void;
   onMark: (route: DriverRoute, stop: DriverStop, kind: MarkKind, receiver?: Receiver) => void;
   onFlush: () => void;
+  onUndo: (route: DriverRoute, mark: Mark) => void;
   onOpenHandover: (route: DriverRoute, stop: DriverStop) => void;
   onOtherAdult: (route: DriverRoute, stop: DriverStop, typed: { name: string; dni: string; adultConfirmed: boolean }) => void;
   onSearch: (route: DriverRoute, stop: DriverStop) => void;
@@ -136,18 +139,40 @@ export type Marking = {
  * The Traslado's state as the Chofer sees it: a Marca still on the phone, or one confirmed after the plan was requested,
  * wins over the plan, so a Marca made without signal is not offered again.
  */
-export function stopStatus(stop: DriverStop, local: QueuedMark | undefined, planFetchedAt: string | null) {
+export function stopStatus(stop: DriverStop, local: QueuedMark | undefined, planFetchedAt: string | null, undone: Record<string, MarkKind> = {}) {
   if (!local) return stop.transferStatus;
-  if (local.state === "pending" || planFetchedAt === null || (local.confirmedAt ?? "") > planFetchedAt) return local.mark.kind;
+  if (local.state === "pending" || planFetchedAt === null || (local.confirmedAt ?? "") > planFetchedAt) return markState(local, undone) ?? stop.transferStatus;
   return stop.transferStatus;
+}
+
+// The Traslado's state before a Marca of each kind: an undo of that Marca returns it there.
+const BEFORE: Record<string, string> = { subio: "planificado", ausente: "planificado", entregado: "subio" };
+
+/** The state a Marca on the phone leaves the Traslado in, or undefined for an undo whose Marca the phone no longer holds. */
+function markState(local: QueuedMark, undone: Record<string, MarkKind>) {
+  if (local.mark.kind !== "undo") return local.mark.kind;
+  const kind = undone[local.id];
+  return kind ? BEFORE[kind] : undefined;
+}
+
+/** For each undo on the phone, by its UUID, the kind of the Marca it undoes. */
+export function undoneKinds(items: QueuedMark[]) {
+  const kinds: Record<string, MarkKind> = {};
+  for (const item of items) {
+    const target = item.mark.kind === "undo" ? items.find((other) => other.id === item.mark.corrects) : undefined;
+    if (target) kinds[item.id] = target.mark.kind;
+  }
+  return kinds;
 }
 
 /** Subió or Ausente at a pickup; Entregado at a drop-off once the Pasajero is on board, to the Destino or at home. */
 export function StopActions({ route, stop, marking }: { route: DriverRoute; stop: DriverStop; marking: Marking }) {
   const local = marking.marks[stop.transferId];
-  const status = stopStatus(stop, local, marking.planFetchedAt);
+  const status = stopStatus(stop, local, marking.planFetchedAt, marking.undone);
   // The Marca's own state, unless the Oficina changed the Traslado since it was confirmed.
-  const shown = local && (local.state === "pending" || status === local.mark.kind) ? local : null;
+  const shown = local && (local.state === "pending" || status === markState(local, marking.undone)) ? local : null;
+  // The Chofer may undo the Marca on the phone at its own Parada; an undo cannot be undone: the Chofer marks again instead.
+  const undoable = shown && shown.mark.kind !== "undo" && stop.kind === (shown.mark.kind === "entregado" ? "dropoff" : "pickup") ? shown.mark : null;
   // The handover belongs to the drop-off, not to the pickup of the same Traslado.
   const open = stop.kind === "dropoff" && marking.handover?.transferId === stop.transferId ? marking.handover : null;
   const disabled = marking.sending;
@@ -156,6 +181,7 @@ export function StopActions({ route, stop, marking }: { route: DriverRoute; stop
     {shown && <div>{shown.state === "pending" ? "Saved on phone" : "Confirmed by server"}</div>}
     {shown?.note && <p role="alert">{shown.note}</p>}
     {shown?.state === "pending" && <button type="button" onClick={marking.onFlush}>Send now</button>}
+    {undoable && <button type="button" disabled={disabled} onClick={() => marking.onUndo(route, undoable)}>Deshacer</button>}
     {stop.kind === "pickup" && status === "planificado" && <div>
       <button type="button" disabled={disabled} onClick={() => marking.onMark(route, stop, "subio")}>Subió</button>
       <button type="button" disabled={disabled} onClick={() => marking.onMark(route, stop, "ausente")}>Ausente</button>
@@ -353,9 +379,30 @@ export function DriverHome({ apiUrl, userId, onSignedOut }: { apiUrl: string; us
     }
   }
 
+  /** Saves a Marca on the phone, then sends the queue; an undo of a Marca goes the same way, so it also works without signal. */
+  async function saveMark(route: DriverRoute, build: (location: Mark["location"], tappedAt: Date) => Mark) {
+    // The phone time is the tap, not when the GPS answers.
+    const tappedAt = new Date();
+    setSending(true);
+    try {
+      const location = await currentLocation(navigator.geolocation);
+      await queue.add(route.routeId, build(location, tappedAt));
+      setHandover(null);
+      setMessage("Marca saved on phone");
+      await refreshLocal();
+    } catch {
+      setMessage("The phone could not save the Marca: mark it again");
+      return;
+    } finally {
+      setSending(false);
+    }
+    await flush();
+  }
+
   const marking: Marking = {
     sending,
     marks: latestMarks(local),
+    undone: undoneKinds(local),
     planFetchedAt: plan?.fetchedAt ?? null,
     handover,
     onStart: (route) => void (async () => {
@@ -371,25 +418,11 @@ export function DriverHome({ apiUrl, userId, onSignedOut }: { apiUrl: string; us
         setSending(false);
       }
     })(),
-    onMark: (route, stop, kind, receiver) => void (async () => {
-      // The phone time is the tap, not when the GPS answers.
-      const tappedAt = new Date();
-      setSending(true);
-      try {
-        const location = await currentLocation(navigator.geolocation);
-        await queue.add(route.routeId, newMark({ transferId: stop.transferId, kind, location, version: route.version, ...(receiver ? { receiver } : {}) }, tappedAt));
-        setHandover(null);
-        setMessage("Marca saved on phone");
-        await refreshLocal();
-      } catch {
-        setMessage("The phone could not save the Marca: mark it again");
-        return;
-      } finally {
-        setSending(false);
-      }
-      await flush();
-    })(),
+    onMark: (route, stop, kind, receiver) => void saveMark(route, (location, tappedAt) => newMark({
+      transferId: stop.transferId, kind, location, version: route.version, ...(receiver ? { receiver } : {}),
+    }, tappedAt)),
     onFlush: () => void flush(),
+    onUndo: (route, mark) => void saveMark(route, (location, tappedAt) => undoMark(mark, route.version, location, tappedAt)),
     onOpenHandover: (route, stop) => void downloadHandover(route, stop, false),
     onOtherAdult: (route, stop, typed) => {
       if (!handover?.data) return;
