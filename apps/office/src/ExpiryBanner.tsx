@@ -14,6 +14,12 @@ export type ExpiryPanel = { today: string; documents: ExpiryItem[]; undated: Exp
 export type BannerDismissal = { date: string; keys: string[] };
 
 const DISMISSAL_KEY = "expiryBannerDismissal";
+const reloads = new Set<() => void>();
+
+/** Tells the banner a document was written, so it reloads and comes back if a new document entered the list. */
+export function announceDocumentsChanged() {
+  for (const reload of reloads) reload();
+}
 
 // A document re-enters the list with a new date, so the key includes the date.
 function bannerKey(item: ExpiryItem) {
@@ -53,9 +59,14 @@ export function ExpiryBanner() {
   const [dismissal, setDismissal] = useState<BannerDismissal | null>(readDismissal);
 
   useEffect(() => {
-    void send("/expiries", "GET")
-      .then(async (response) => { if (response.ok) setPanel(await response.json() as ExpiryPanel); })
-      .catch(() => undefined);
+    function load() {
+      void send("/expiries", "GET")
+        .then(async (response) => { if (response.ok) setPanel(await response.json() as ExpiryPanel); })
+        .catch(() => undefined);
+    }
+    load();
+    reloads.add(load);
+    return () => { reloads.delete(load); };
   }, []);
 
   if (!panel || !bannerVisible(panel, dismissal)) return null;

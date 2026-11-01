@@ -1,5 +1,6 @@
 import { useEffect, useState, type FormEvent } from "react";
 import { readError, redirectUnauthorized, send } from "./api";
+import { announceDocumentsChanged } from "./ExpiryBanner";
 
 export type DocumentItem = { id: number; name: string; expiresOn: string | null };
 export type DocumentOwner = { kind: "vehicle" | "driver"; id: number };
@@ -28,7 +29,10 @@ export function DocumentsPanel({ owner, initialDocuments = [] }: { owner: Docume
       const response = await send(path, method, body);
       if (await redirectUnauthorized(response)) return false;
       setMessage(response.ok ? done : await readError(response, "Unable to save the document"));
-      if (response.ok) await load();
+      if (response.ok) {
+        announceDocumentsChanged();
+        await load();
+      }
       return response.ok;
     } catch {
       setMessage("Unable to reach the server");
