@@ -3,7 +3,7 @@ import { renderToStaticMarkup } from "react-dom/server";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { RouteView, type DriverRoute, type DriverStop, type Marking } from "./Days";
 import {
-  CALL_THE_OFFICE, currentLocation, fetchHandover, HandoverView, newMark, otherAdultReceiver, sendMark, startRoute,
+  CALL_THE_OFFICE, currentLocation, fetchHandover, HandoverView, newMark, otherAdultReceiver, sendMark, startRoute, undoMark,
   type Handover, type HandoverActions,
 } from "./Marks";
 
@@ -27,7 +27,7 @@ const route = (status: string, stops: DriverStop[]): DriverRoute => ({
   routeId: 9, version: 2, startTime: "07:00", endTime: "18:00", vehiclePlate: "AAA001", status, acknowledgedVersion: 2, stops,
 });
 const marking = (fields: Partial<Marking> = {}): Marking => ({
-  sending: false, unsent: {}, handover: null, onStart: vi.fn(), onMark: vi.fn(), onResend: vi.fn(), onOpenHandover: vi.fn(),
+  sending: false, unsent: {}, last: null, handover: null, onStart: vi.fn(), onMark: vi.fn(), onResend: vi.fn(), onUndo: vi.fn(), onOpenHandover: vi.fn(),
   onOtherAdult: vi.fn(), onSearch: vi.fn(), ...fields,
 });
 const actions = (): HandoverActions => ({ onReceiver: vi.fn(), onOtherAdult: vi.fn(), onSearch: vi.fn() });
@@ -167,6 +167,23 @@ describe("Marcas in the driver app", () => {
     press(view, "Company staff at the base");
     expect(actionsFor.onSearch).toHaveBeenCalledWith(salida, salida.stops[0]);
     expect(actionsFor.onMark).toHaveBeenCalledWith(salida, salida.stops[0], "entregado", { kind: "base_staff" });
+  });
+
+  it("offers Deshacer on the Chofer's last confirmed Marca and sends an undo that names it with the tap's phone time", () => {
+    const subio = newMark({ transferId: 3, kind: "subio", location: null, version: 2 }, new Date("2026-10-23T12:00:00.000Z"), "00000000-0000-4000-8000-000000000001");
+    const actionsFor = marking({ last: subio });
+    const entrada = route("en_curso", [stop("pickup", "subio", 4), stop("dropoff", "subio", 4)]);
+    const view = <RouteView route={entrada} sending={false} onAcknowledge={() => undefined} marking={actionsFor} />;
+    expect(buttons(view).filter((item) => item.text === "Deshacer")).toHaveLength(1);
+    press(view, "Deshacer");
+    expect(actionsFor.onUndo).toHaveBeenCalledWith(entrada, subio);
+    expect(undoMark(subio, 2, null, new Date("2026-10-23T12:01:30.000Z"), "00000000-0000-4000-8000-000000000002")).toEqual({
+      id: "00000000-0000-4000-8000-000000000002", phoneTime: "2026-10-23T12:01:30.000Z", transferId: 3, kind: "undo",
+      corrects: subio.id, location: null, version: 2,
+    });
+    // Without a Marca confirmed from this phone there is nothing to undo.
+    expect(buttons(<RouteView route={entrada} sending={false} onAcknowledge={() => undefined} marking={marking()} />).map((item) => item.text))
+      .not.toContain("Deshacer");
   });
 
   it("keeps a Marca's UUID and phone time to send it again after a failure", async () => {

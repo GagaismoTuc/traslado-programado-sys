@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import {
-  currentLocation, fetchHandover, HandoverView, newMark, otherAdultReceiver, sendMark, startRoute,
+  currentLocation, fetchHandover, HandoverView, newMark, otherAdultReceiver, sendMark, startRoute, undoMark,
   type Handover, type Mark, type MarkKind, type Receiver,
 } from "./Marks";
 
@@ -87,11 +87,14 @@ export type Marking = {
   sending: boolean;
   // Marcas that did not reach the server, by Traslado: sending them again repeats their UUID.
   unsent: Record<number, Mark>;
+  // The last Marca the server confirmed from this phone, which the Chofer may undo.
+  last: Mark | null;
   // The open home drop-off with its downloaded data and the last refusal.
   handover: { transferId: number; data: Handover | null; blocked: string | null; searching: boolean } | null;
   onStart: (route: DriverRoute) => void;
   onMark: (route: DriverRoute, stop: DriverStop, kind: MarkKind, receiver?: Receiver) => void;
   onResend: (route: DriverRoute, mark: Mark) => void;
+  onUndo: (route: DriverRoute, mark: Mark) => void;
   onOpenHandover: (route: DriverRoute, stop: DriverStop) => void;
   onOtherAdult: (route: DriverRoute, stop: DriverStop, typed: { name: string; dni: string; adultConfirmed: boolean }) => void;
   onSearch: (route: DriverRoute, stop: DriverStop) => void;
@@ -104,6 +107,8 @@ export function StopActions({ route, stop, marking }: { route: DriverRoute; stop
   const disabled = marking.sending;
   return <>
     {MARKED[stop.transferStatus] && <div>{`Marked: ${MARKED[stop.transferStatus]}`}</div>}
+    {marking.last?.transferId === stop.transferId && stop.kind === (marking.last.kind === "entregado" ? "dropoff" : "pickup")
+      && <button type="button" disabled={disabled} onClick={() => marking.onUndo(route, marking.last!)}>Deshacer</button>}
     {unsent && <p role="alert">
       {"The Marca did not reach the server. "}
       <button type="button" disabled={disabled} onClick={() => marking.onResend(route, unsent)}>Send again</button>
@@ -170,6 +175,7 @@ export function DriverHome({ apiUrl, onSignedOut }: { apiUrl: string; onSignedOu
   const [loadError, setLoadError] = useState("");
   const [sending, setSending] = useState(false);
   const [unsent, setUnsent] = useState<Record<number, Mark>>({});
+  const [last, setLast] = useState<Mark | null>(null);
   const [handover, setHandover] = useState<Marking["handover"]>(null);
   const latestLoad = useRef(0);
   const signedOut = useRef(onSignedOut);
@@ -231,6 +237,8 @@ export function DriverHome({ apiUrl, onSignedOut }: { apiUrl: string; onSignedOu
       if (!response.ok) setMessage(result?.error ?? "Unable to save the Marca");
       else setMessage(result?.conflict ? "The server already had this Marca with other content; it kept the first one" : "Marca confirmed by the server");
       if (response.ok) setHandover(null);
+      // An undo cannot be undone: the Chofer marks again instead.
+      if (response.ok) setLast(mark.kind === "undo" ? null : mark);
       await load();
     } catch {
       setUnsent((current) => ({ ...current, [mark.transferId]: mark }));
@@ -260,6 +268,7 @@ export function DriverHome({ apiUrl, onSignedOut }: { apiUrl: string; onSignedOu
   const marking: Marking = {
     sending,
     unsent,
+    last,
     handover,
     onStart: (route) => void (async () => {
       setSending(true);
@@ -281,6 +290,10 @@ export function DriverHome({ apiUrl, onSignedOut }: { apiUrl: string; onSignedOu
       await submitMark(route.routeId, newMark({ transferId: stop.transferId, kind, location, version: route.version, ...(receiver ? { receiver } : {}) }, tappedAt));
     })(),
     onResend: (route, mark) => void submitMark(route.routeId, mark),
+    onUndo: (route, mark) => void (async () => {
+      const tappedAt = new Date();
+      await submitMark(route.routeId, undoMark(mark, route.version, await currentLocation(navigator.geolocation), tappedAt));
+    })(),
     onOpenHandover: (route, stop) => void downloadHandover(route, stop, false),
     onOtherAdult: (route, stop, typed) => {
       if (!handover?.data) return;
