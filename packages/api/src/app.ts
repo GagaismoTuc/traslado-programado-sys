@@ -1123,6 +1123,81 @@ async function loadPlanVersions(client: Queryable, where: string, values: unknow
 
 export type CascadeWarning = { routeId: number; version: number; fromRouteId: number; ok: boolean; problem: string | null };
 
+const PLAN_TIME_ZONE = "America/Argentina/Tucuman";
+const OUT_OF_DRIVER_SCOPE = "Only today's and tomorrow's Recorridos are available";
+
+/** Today and tomorrow in the Plan diario's zone: the only days a Chofer can read or acknowledge. */
+function driverDays(now: Date) {
+  const today = new Intl.DateTimeFormat("en-CA", { timeZone: PLAN_TIME_ZONE }).format(now);
+  const tomorrow = new Date(`${today}T00:00:00Z`);
+  tomorrow.setUTCDate(tomorrow.getUTCDate() + 1);
+  return [today, tomorrow.toISOString().slice(0, 10)];
+}
+
+/**
+ * The Chofer's Recorridos of one day, each as its latest Versión del plan: a Recorrido never published is not shown
+ * (tomorrow appears once it is published). Every Parada carries where it is and what the Chofer needs about the Pasajero.
+ */
+async function loadDriverDay(client: Queryable, driverId: number, date: string) {
+  const versions = await client.query(
+    `SELECT * FROM (
+       SELECT DISTINCT ON (pv.route_id) pv.id, pv.route_id, pv.version, to_char(pv.start_time, 'HH24:MI') AS start_time,
+              to_char(pv.end_time, 'HH24:MI') AS end_time, v.plate,
+              (SELECT max(seen.version) FROM version_acknowledgements va JOIN plan_versions seen ON seen.id = va.plan_version_id
+                WHERE seen.route_id = pv.route_id AND va.driver_id = $2) AS acknowledged
+         FROM plan_versions pv JOIN routes r ON r.id = pv.route_id JOIN daily_plans dp ON dp.id = r.daily_plan_id
+         JOIN vehicles v ON v.id = pv.vehicle_id
+        WHERE dp.plan_date = $1 AND r.driver_id = $2
+        ORDER BY pv.route_id, pv.version DESC) latest
+     ORDER BY start_time, route_id`,
+    [date, driverId],
+  ) as QueryResult;
+  const legs = await client.query(
+    `SELECT l.plan_version_id, l.position, l.kind, to_char(l.planned_time, 'HH24:MI') AS planned_time, l.transfer_id, t.direction,
+            pvt.companions, p.name, p.home_address, p.access_notes AS home_notes, p.wheelchair, p.medical_alert,
+            d.name AS d_name, d.address AS d_address, d.access_notes AS d_notes,
+            o.name AS o_name, o.address AS o_address, o.access_notes AS o_notes
+       FROM plan_version_legs l
+       JOIN plan_version_transfers pvt ON pvt.plan_version_id = l.plan_version_id AND pvt.transfer_id = l.transfer_id
+       JOIN transfers t ON t.id = l.transfer_id
+       JOIN passengers p ON p.id = t.passenger_id
+       JOIN destinations d ON d.id = t.destination_id
+       LEFT JOIN destinations o ON o.id = t.origin_destination_id
+      WHERE l.plan_version_id = ANY($1::int[]) ORDER BY l.plan_version_id, l.position`,
+    [versions.rows.map((row) => Number(row.id))],
+  ) as QueryResult;
+  const stop = (leg: Record<string, unknown>) => {
+    // An entrada is picked up at its origin Destino or at home and dropped at its Destino; a salida the other way round.
+    const prefix = leg.kind === "pickup"
+      ? (leg.direction === "entrada" ? (leg.o_name === null ? null : "o") : "d")
+      : (leg.direction === "entrada" ? "d" : null);
+    return {
+      position: Number(leg.position),
+      kind: String(leg.kind),
+      plannedTime: String(leg.planned_time),
+      transferId: Number(leg.transfer_id),
+      direction: String(leg.direction),
+      place: prefix === null
+        ? { name: null, address: String(leg.home_address), accessNotes: (leg.home_notes as string | null) ?? null }
+        : { name: String(leg[`${prefix}_name`]), address: String(leg[`${prefix}_address`]), accessNotes: (leg[`${prefix}_notes`] as string | null) ?? null },
+      passenger: { name: String(leg.name), wheelchair: Boolean(leg.wheelchair), medicalAlert: (leg.medical_alert as string | null) ?? null },
+      companions: Number(leg.companions),
+    };
+  };
+  return {
+    date,
+    routes: versions.rows.map((row) => ({
+      routeId: Number(row.route_id),
+      version: Number(row.version),
+      startTime: String(row.start_time),
+      endTime: String(row.end_time),
+      vehiclePlate: String(row.plate),
+      acknowledgedVersion: nullableNumber(row.acknowledged),
+      stops: legs.rows.filter((leg) => Number(leg.plan_version_id) === Number(row.id)).map(stop),
+    })),
+  };
+}
+
 export function createApp({ db, routing, router, geocoder, config }: {
   db: HealthDatabase;
   routing: RoutingHealth;
@@ -1177,6 +1252,16 @@ export function createApp({ db, routing, router, geocoder, config }: {
     const user = await authenticate(context);
     if (user instanceof Response || isOffice(user)) return user;
     return context.json({ error: "Office role required" }, 403);
+  }
+
+  /** A signed-in Chofer with their profile; every /driver endpoint scopes its reads and writes to `driverId`. */
+  async function requireDriver(context: Context) {
+    const user = await authenticate(context);
+    if (user instanceof Response) return user;
+    if (user.role !== "driver") return context.json({ error: "Chofer role required" }, 403);
+    const driver = await db.query("SELECT id FROM drivers WHERE user_id = $1", [user.id]) as QueryResult;
+    if (!driver.rows[0]) return context.json({ error: "This account has no Chofer profile" }, 403);
+    return { user, driverId: Number(driver.rows[0].id) };
   }
 
   // Only deactivated_at changes, so every other field of the Pasajero is kept. A repeated call is a no-op without a log entry.
@@ -2572,6 +2657,88 @@ export function createApp({ db, routing, router, geocoder, config }: {
       } catch (error) {
         return planningFailure(context, error);
       }
+    })
+    // The Choferes who have not acknowledged the latest Versión del plan of their Recorrido; acknowledgedVersion is the last one they saw.
+    .get("/daily-plans/:date/acknowledgements", async (context) => {
+      const actor = await requireOffice(context);
+      if (actor instanceof Response) return actor;
+      const date = parsePlanDate(context.req.param("date"));
+      if (!date) return context.json({ error: "Invalid request" }, 400);
+      try {
+        const planId = await findPlanId(db, date);
+        const result = await db.query(
+          `SELECT * FROM (
+             SELECT DISTINCT ON (pv.route_id) pv.id, pv.route_id, pv.version, pv.driver_id, dr.name AS driver_name,
+                    to_char(pv.start_time, 'HH24:MI') AS start_time, to_char(pv.end_time, 'HH24:MI') AS end_time,
+                    (SELECT max(seen.version) FROM version_acknowledgements va JOIN plan_versions seen ON seen.id = va.plan_version_id
+                      WHERE seen.route_id = pv.route_id AND va.driver_id = pv.driver_id) AS acknowledged
+               FROM plan_versions pv JOIN routes r ON r.id = pv.route_id JOIN drivers dr ON dr.id = pv.driver_id
+              WHERE r.daily_plan_id = $1
+              ORDER BY pv.route_id, pv.version DESC) latest
+            WHERE NOT EXISTS (SELECT 1 FROM version_acknowledgements va WHERE va.plan_version_id = latest.id AND va.driver_id = latest.driver_id)
+            ORDER BY start_time, route_id`,
+          [planId],
+        ) as QueryResult;
+        return context.json({
+          missing: result.rows.map((row) => ({
+            routeId: Number(row.route_id),
+            version: Number(row.version),
+            driverId: Number(row.driver_id),
+            driverName: String(row.driver_name),
+            startTime: String(row.start_time),
+            endTime: String(row.end_time),
+            acknowledgedVersion: nullableNumber(row.acknowledged),
+          })),
+        });
+      } catch (error) {
+        return planningFailure(context, error);
+      }
+    })
+    // The Chofer's own published Recorridos; the server refuses every other day, whatever the app shows.
+    .get("/driver/days/:date", async (context) => {
+      const chofer = await requireDriver(context);
+      if (chofer instanceof Response) return chofer;
+      const date = parsePlanDate(context.req.param("date"));
+      if (!date) return context.json({ error: "Invalid request" }, 400);
+      if (!driverDays(now()).includes(date)) return context.json({ error: OUT_OF_DRIVER_SCOPE }, 403);
+      return context.json(await loadDriverDay(db, chofer.driverId, date));
+    })
+    // A Confirmación de versión records the version the Chofer saw, even when a newer one exists; repeating it is a no-op.
+    .post("/driver/routes/:id/acknowledgements", async (context) => {
+      const chofer = await requireDriver(context);
+      if (chofer instanceof Response) return chofer;
+      const id = parseId(context.req.param("id"));
+      const body = await context.req.json().catch(() => null);
+      const version = isObject(body) ? positiveInt(body.version) : null;
+      if (!id || !version) return context.json({ error: "Invalid request" }, 400);
+      const route = await db.query(
+        "SELECT r.driver_id, to_char(dp.plan_date, 'YYYY-MM-DD') AS date FROM routes r JOIN daily_plans dp ON dp.id = r.daily_plan_id WHERE r.id = $1",
+        [id],
+      ) as QueryResult;
+      const row = route.rows[0];
+      if (!row) return context.json({ error: "Recorrido not found" }, 404);
+      if (Number(row.driver_id) !== chofer.driverId) return context.json({ error: "This Recorrido belongs to another Chofer" }, 403);
+      if (!driverDays(now()).includes(String(row.date))) return context.json({ error: OUT_OF_DRIVER_SCOPE }, 403);
+      const planVersion = await db.query(
+        "SELECT id FROM plan_versions WHERE route_id = $1 AND version = $2",
+        [id, version],
+      ) as QueryResult;
+      if (!planVersion.rows[0]) return context.json({ error: "Versión del plan not found" }, 404);
+      const planVersionId = Number(planVersion.rows[0].id);
+      const inserted = await db.query(
+        `INSERT INTO version_acknowledgements (plan_version_id, driver_id, session_id, acknowledged_at) VALUES ($1, $2, $3, $4)
+         ON CONFLICT (plan_version_id, driver_id) DO NOTHING RETURNING acknowledged_at`,
+        [planVersionId, chofer.driverId, chofer.user.session_id, now()],
+      ) as QueryResult;
+      const stored = inserted.rows[0] ?? (await db.query(
+        "SELECT acknowledged_at FROM version_acknowledgements WHERE plan_version_id = $1 AND driver_id = $2",
+        [planVersionId, chofer.driverId],
+      ) as QueryResult).rows[0];
+      const latest = await db.query("SELECT max(version) AS version FROM plan_versions WHERE route_id = $1", [id]) as QueryResult;
+      return context.json({
+        acknowledgement: { routeId: id, version, acknowledgedAt: new Date(stored.acknowledged_at as string | Date).toISOString() },
+        latestVersion: Number(latest.rows[0].version),
+      }, inserted.rows[0] ? 201 : 200);
     })
     .post("/geocode", async (context) => {
       const user = await requireOffice(context);
