@@ -55,6 +55,15 @@ export type DaySummary = {
   failed: { routeId: number; error: string; violations?: PassengerViolations[] }[];
   cascade: CascadeWarning[];
 };
+// A published Recorrido whose Chofer has not acknowledged its latest version; acknowledgedVersion is the last one seen.
+export type MissingAcknowledgement = {
+  routeId: number;
+  version: number;
+  driverName: string;
+  startTime: string;
+  endTime: string;
+  acknowledgedVersion: number | null;
+};
 // A refused publication with the violations to show under its Recorrido; forcing is offered only when allowed.
 type Refusal = { routeId: number; error: string; violations: PassengerViolations[] };
 type Option = { id: number; name: string };
@@ -163,10 +172,23 @@ export function UnpublishedTransfers({ day }: { day: Pick<Day, "transfers" | "un
   </section>;
 }
 
+/** The Choferes who have not acknowledged the latest Versión del plan of their Recorrido. */
+export function MissingAcknowledgements({ missing }: { missing: MissingAcknowledgement[] }) {
+  return <section>
+    <h2>Not acknowledged by the Chofer</h2>
+    {missing.length
+      ? <ul>{missing.map((item) => <li key={item.routeId}>
+        {`${item.driverName} ${item.startTime}-${item.endTime}: version ${item.version}, `
+          + (item.acknowledgedVersion === null ? "no version acknowledged yet" : `last acknowledged version ${item.acknowledgedVersion}`)}
+      </li>)}</ul>
+      : <p>Every Chofer acknowledged the latest version of their Recorrido.</p>}
+  </section>;
+}
+
 export function PlanPage() {
   const [date, setDate] = useState(todayInPlanZone);
   // The loaded view remembers its date, so a day is shown and mutable only while that date is selected.
-  const [view, setView] = useState<{ date: string; day: Day | null; missing: boolean } | null>(null);
+  const [view, setView] = useState<{ date: string; day: Day | null; missing: boolean; unacknowledged: MissingAcknowledgement[] } | null>(null);
   const [passengers, setPassengers] = useState<PassengerOption[]>([]);
   const [destinations, setDestinations] = useState<Option[]>([]);
   const [drivers, setDrivers] = useState<DriverOption[]>([]);
@@ -193,6 +215,7 @@ export function PlanPage() {
     try {
       const responses = await Promise.all([
         send(`/daily-plans/${forDate}`, "GET"),
+        send(`/daily-plans/${forDate}/acknowledgements`, "GET"),
         send("/passengers", "GET"),
         send("/destinations", "GET"),
         send("/drivers", "GET"),
@@ -200,18 +223,21 @@ export function PlanPage() {
       ]);
       if (stale()) return;
       if (await redirectUnauthorized(...responses)) return;
-      const [dayRes, ...lists] = responses;
-      if (lists.some((response) => !response.ok) || (!dayRes.ok && dayRes.status !== 404)) {
+      const [dayRes, acknowledgementsRes, ...lists] = responses;
+      if (lists.some((response) => !response.ok) || [dayRes, acknowledgementsRes].some((response) => !response.ok && response.status !== 404)) {
         if (!stale()) setMessage("Unable to load the plan");
         return;
       }
       const loadedDay = dayRes.ok ? await dayRes.json() as Day : null;
+      const unacknowledged = acknowledgementsRes.ok
+        ? (await acknowledgementsRes.json() as { missing: MissingAcknowledgement[] }).missing
+        : [];
       const passengerList = (await lists[0].json() as { passengers: PassengerOption[] }).passengers;
       const destinationList = (await lists[1].json() as { destinations: Option[] }).destinations;
       const driverList = (await lists[2].json() as { drivers: DriverOption[] }).drivers;
       const vehicleList = (await lists[3].json() as { vehicles: VehicleOption[] }).vehicles;
       if (stale()) return;
-      setView({ date: forDate, day: loadedDay, missing: dayRes.status === 404 });
+      setView({ date: forDate, day: loadedDay, missing: dayRes.status === 404, unacknowledged });
       setPassengers(passengerList.filter((item) => !item.deactivatedAt));
       setDestinations(destinationList);
       setDrivers(driverList);
@@ -387,6 +413,7 @@ export function PlanPage() {
     {day && <>
       <p>Times are local to {day.plan.timeZone}. Day total: {kmLabel(day.km)}</p>
       <UnpublishedTransfers day={day} />
+      <MissingAcknowledgements missing={view?.unacknowledged ?? []} />
       <h2>Traslados</h2>
       <ul>{day.transfers.map((transfer) => <li key={transfer.id}>
         <strong>{transferLabel(transfer)}</strong>

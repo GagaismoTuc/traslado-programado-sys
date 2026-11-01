@@ -1,6 +1,7 @@
-import { useState, type FormEvent } from "react";
+import { useEffect, useState, type FormEvent } from "react";
 import { hc } from "hono/client";
 import type { AppType } from "@traslado/api";
+import { DriverHome } from "./Days";
 
 const apiUrl = import.meta.env.VITE_API_URL ?? "http://localhost:3000";
 const api = hc<AppType>(apiUrl);
@@ -10,6 +11,14 @@ export function App() {
   const [error, setError] = useState("");
   const [signedIn, setSignedIn] = useState(false);
   const [loading, setLoading] = useState(false);
+
+  // On open, a Chofer whose session is still valid goes straight to the Recorridos.
+  useEffect(() => {
+    fetch(`${apiUrl}/auth/me`, { credentials: "include" })
+      .then(async (response) => response.ok ? await response.json() as { user?: { role?: string } } : null)
+      .then((result) => { if (result?.user?.role === "driver") setSignedIn(true); })
+      .catch(() => undefined);
+  }, []);
 
   async function submit(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
@@ -46,7 +55,11 @@ export function App() {
   }
 
   if (signedIn) {
-    return <main><h1>Driver</h1><p>Signed in.</p><button type="button" onClick={() => void logout()}>Sign out</button></main>;
+    return <main>
+      <h1>Driver</h1>
+      <button type="button" onClick={() => void logout()}>Sign out</button>
+      <DriverHome apiUrl={apiUrl} onSignedOut={() => setSignedIn(false)} />
+    </main>;
   }
 
   return <main>
