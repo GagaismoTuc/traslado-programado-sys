@@ -60,8 +60,11 @@ export const destinations = pgTable("destinations", {
   accessNotes: text("access_notes"),
   latitude: doublePrecision().notNull(),
   longitude: doublePrecision().notNull(),
+  // Tolerancia de llegada: minutes after an entrada's target time that arrival is still accepted.
+  arrivalToleranceMinutes: integer("arrival_tolerance_minutes").default(0).notNull(),
   createdAt: timestamp("created_at", { withTimezone: true, mode: "string" }).defaultNow().notNull(),
 }, (table) => [
+  check("destinations_arrival_tolerance_check", sql`${table.arrivalToleranceMinutes} BETWEEN 0 AND 240`),
   check("destinations_kind_check", sql`${table.kind} IN ('school', 'clinic', 'therapy', 'day_centre', 'other')`),
   check("destinations_latitude_check", sql`${table.latitude} BETWEEN -90 AND 90`),
   check("destinations_longitude_check", sql`${table.longitude} BETWEEN -180 AND 180`),
@@ -164,10 +167,22 @@ export const routes = pgTable("routes", {
   startTime: time("start_time").notNull(),
   endTime: time("end_time").notNull(),
   status: text().default("borrador").notNull(),
+  // Where the engine starts and ends the Recorrido; null keeps the default rule (home, chained or open).
+  startKind: text("start_kind"),
+  startLatitude: doublePrecision("start_latitude"),
+  startLongitude: doublePrecision("start_longitude"),
+  endKind: text("end_kind"),
   createdAt: timestamp("created_at", { withTimezone: true, mode: "string" }).defaultNow().notNull(),
 }, (table) => [
   check("routes_status_check", sql`${table.status} IN ('borrador', 'publicado', 'en_curso', 'cerrado')`),
   check("routes_time_band_check", sql`${table.endTime} >= ${table.startTime}`),
+  check("routes_start_kind_check", sql`${table.startKind} IN ('home', 'previous', 'point')`),
+  check(
+    "routes_start_point_check",
+    sql`(${table.startKind} = 'point' AND ${table.startLatitude} BETWEEN -90 AND 90 AND ${table.startLongitude} BETWEEN -180 AND 180)
+      OR (${table.startKind} IS DISTINCT FROM 'point' AND ${table.startLatitude} IS NULL AND ${table.startLongitude} IS NULL)`,
+  ),
+  check("routes_end_kind_check", sql`${table.endKind} IN ('home', 'open')`),
 ]);
 
 // An entrada may start at another Destino (origin) instead of home; a salida always ends at home.
@@ -193,7 +208,8 @@ export const transfers = pgTable("transfers", {
 ]);
 
 // A Traslado is assigned to a Recorrido by its two Paradas; the unique index keeps it in one Recorrido at most.
-// leg_distance_meters is the leg that ends at this Parada, stored for the current order only.
+// leg_distance_meters is the leg that ends at this Parada and planned_time the engine's start of the Parada,
+// both stored for the current order only.
 export const stops = pgTable("stops", {
   id: integer().generatedAlwaysAsIdentity().primaryKey(),
   routeId: integer("route_id").notNull().references(() => routes.id, { onDelete: "restrict" }),
@@ -201,6 +217,7 @@ export const stops = pgTable("stops", {
   kind: text().notNull(),
   position: integer().notNull(),
   legDistanceMeters: integer("leg_distance_meters"),
+  plannedTime: time("planned_time"),
 }, (table) => [
   uniqueIndex("stops_transfer_kind_unique").on(table.transferId, table.kind),
   check("stops_kind_check", sql`${table.kind} IN ('pickup', 'dropoff')`),
