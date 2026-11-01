@@ -27,7 +27,13 @@ export type DriverRoute = {
   status: string;
   acknowledgedVersion: number | null;
   stops: DriverStop[];
+  // From version 2 on: what changed since the version the Chofer acknowledged, or since the previous one.
+  changes?: { sinceVersion: number; items: VersionChange[] };
 };
+export type VersionChange =
+  | { kind: "vehicle"; from: string; to: string }
+  | { kind: "added" | "removed"; transferId: number; passengerName: string }
+  | { kind: "time"; transferId: number; stopKind: string; passengerName: string; from: string; to: string };
 export type DriverDay = { date: string; routes: DriverRoute[] };
 
 const PLAN_TIME_ZONE = "America/Argentina/Tucuman";
@@ -76,6 +82,23 @@ export function StopView({ stop }: { stop: DriverStop }) {
     {stop.passenger.wheelchair && <div>Wheelchair</div>}
     {stop.passenger.medicalAlert && <div role="alert">{`Medical alert: ${stop.passenger.medicalAlert}`}</div>}
   </>;
+}
+
+function changeText(change: VersionChange) {
+  if (change.kind === "vehicle") return `Vehicle: ${change.from} → ${change.to}`;
+  if (change.kind === "time") {
+    return `${change.stopKind === "pickup" ? "Pick up" : "Drop off"} ${change.passengerName}: ${change.from} → ${change.to}`;
+  }
+  return `${change.kind === "added" ? "New" : "Removed"}: ${change.passengerName}`;
+}
+
+/** What changed between versions, so the Chofer does not have to compare the lists. */
+export function ChangesView({ route }: { route: DriverRoute }) {
+  if (!route.changes?.items.length) return null;
+  return <section>
+    <p>{`Changes since version ${route.changes.sinceVersion}:`}</p>
+    <ul>{route.changes.items.map((change, index) => <li key={index}>{changeText(change)}</li>)}</ul>
+  </section>;
 }
 
 type Acknowledge = (routeId: number, version: number) => void;
@@ -147,6 +170,7 @@ export function RouteView({ route, sending, onAcknowledge, marking }: {
           {`Acknowledge version ${route.version}`}
         </button>
       </>}
+    <ChangesView route={route} />
     {marking && route.status === "publicado" && <button type="button" disabled={marking.sending} onClick={() => marking.onStart(route)}>Start Recorrido</button>}
     {marking && route.status === "en_curso" && <p>Recorrido en curso.</p>}
     <ol>{route.stops.map((stop) => <li key={stop.position}>

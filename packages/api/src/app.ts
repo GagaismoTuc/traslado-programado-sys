@@ -1039,6 +1039,10 @@ function parseRouteEnds(body: Record<string, unknown>) {
   return result;
 }
 
+// The local minute of the Traslado's (alias t) latest Subió: when the Pasajero actually got on.
+const BOARDED_MINUTES_SQL = `(SELECT EXTRACT(EPOCH FROM (m.phone_time AT TIME ZONE '${LOCAL_TIME_ZONE}')::time) / 60
+    FROM marks m WHERE m.transfer_id = t.id AND m.kind = 'subio' ORDER BY m.phone_time DESC, m.id DESC LIMIT 1)`;
+
 const ORDER_ROUTE_SQL = `
   SELECT r.daily_plan_id, r.driver_id, r.vehicle_id, r.status, to_char(r.start_time, 'HH24:MI') AS start_time,
          r.start_kind, r.start_latitude, r.start_longitude, r.end_kind, v.seats,
@@ -1050,7 +1054,7 @@ const ORDER_ROUTE_SQL = `
 // One row per Traslado of the Recorrido, in its current order, with what the engine and the validator need.
 const ORDER_TRANSFERS_SQL = `
   SELECT t.id, t.passenger_id, t.direction, to_char(t.target_time, 'HH24:MI') AS target,
-         to_char(t.exit_time, 'HH24:MI') AS exit_time, t.companions, p.name,
+         to_char(t.exit_time, 'HH24:MI') AS exit_time, t.companions, p.name, t.status, ${BOARDED_MINUTES_SQL} AS boarded_minutes,
          p.home_latitude, p.home_longitude, p.front_seat, p.max_ride_time_minutes, p.pickup_duration_minutes,
          p.dropoff_duration_minutes, d.latitude AS d_lat, d.longitude AS d_lng, d.arrival_tolerance_minutes,
          o.latitude AS o_lat, o.longitude AS o_lng,
@@ -1165,6 +1169,7 @@ function toPlanTransfer(row: Record<string, unknown>): PlanTransfer {
 }
 
 // The applied order checked by the route validator; entradas accept arrival up to T + the Destino's Tolerancia de llegada.
+// An on-board Pasajero (Subió) rides from their actual Subió, which comes before every planned Parada.
 function validateOrder(
   rows: Record<string, unknown>[],
   stops: { transferId: number; kind: "pickup" | "dropoff"; plannedSeconds: number }[],
@@ -1172,13 +1177,17 @@ function validateOrder(
 ) {
   const placed = new Set(stops.map((stop) => stop.transferId));
   const served = rows.filter((row) => placed.has(Number(row.id)));
-  const validatorStops: ValidatorStop[] = stops.map((stop) => ({
-    id: `${stop.transferId}-${stop.kind}`,
-    transferId: String(stop.transferId),
-    type: stop.kind,
-    plannedTime: stop.plannedSeconds / 60,
-  }));
-  return validateRoute({
+  const boarded = served.filter((row) => row.status === "subio");
+  const validatorStops: ValidatorStop[] = [
+    ...boarded.map((row) => ({ id: `${row.id}-pickup`, transferId: String(row.id), type: "pickup" as const, plannedTime: Number(row.boarded_minutes) })),
+    ...stops.map((stop) => ({
+      id: `${stop.transferId}-${stop.kind}`,
+      transferId: String(stop.transferId),
+      type: stop.kind,
+      plannedTime: stop.plannedSeconds / 60,
+    })),
+  ];
+  return forgetBoardedPickups(validateRoute({
     route: validatorStops,
     passengers: served.map((row) => ({
       id: String(row.passenger_id),
@@ -1196,7 +1205,7 @@ function validateOrder(
       companions: Number(row.companions),
       ...(row.direction === "entrada" ? { lateToleranceMinutes: Number(row.arrival_tolerance_minutes) } : {}),
     })),
-  });
+  }), boarded.map((row) => ({ id: Number(row.id), direction: String(row.direction) })));
 }
 
 type Point = { lat: number; lng: number };
@@ -1243,13 +1252,59 @@ type PublicationTransfer = {
   // The Distancia directa runs from where the Traslado starts to where it ends, on its own.
   from: Point;
   to: Point;
+  status: string;
+  // Local minute of the Traslado's latest Subió, null without one.
+  boardedMinutes: number | null;
 };
+// A leg of the latest Versión del plan, with its planned time to the second.
+type LatestLeg = { position: number; transferId: number; kind: string; distanceMeters: number; durationSeconds: number; plannedMinutes: number };
 type PublicationSnapshot = {
   route: { id: number; dailyPlanId: number; driverId: number; vehicleId: number; startTime: string; endTime: string; status: string };
   vehicle: { seats: number; features: string[] };
   stops: PublicationStop[];
   transfers: PublicationTransfer[];
+  latestLegs: LatestLeg[];
 };
+
+const DONE_STOPS_FIRST = "A done Parada never changes: done Paradas stay first, in the order of the latest version";
+
+// A done Parada already happened: a pickup marked Subió, Entregado or Ausente, or a drop-off marked Entregado.
+function isDoneStop(kind: string, status: string) {
+  return kind === "pickup" ? ["subio", "entregado", "ausente"].includes(status) : status === "entregado";
+}
+
+const LATEST_LEGS_SQL = `
+  SELECT l.position, l.transfer_id, l.kind, l.distance_meters, l.duration_seconds, EXTRACT(EPOCH FROM l.planned_time) / 60 AS minutes
+    FROM plan_version_legs l JOIN plan_versions pv ON pv.id = l.plan_version_id
+   WHERE pv.route_id = $1 AND pv.version = (SELECT max(version) FROM plan_versions WHERE route_id = $1)
+   ORDER BY l.position`;
+
+async function loadLatestLegs(client: Queryable, routeId: number): Promise<LatestLeg[]> {
+  return ((await client.query(LATEST_LEGS_SQL, [routeId]) as QueryResult).rows).map((leg) => ({
+    position: Number(leg.position),
+    transferId: Number(leg.transfer_id),
+    kind: String(leg.kind),
+    distanceMeters: Number(leg.distance_meters),
+    durationSeconds: Number(leg.duration_seconds),
+    plannedMinutes: Number(leg.minutes),
+  }));
+}
+
+/**
+ * The latest version's legs of the done Paradas, which must be the first ones, in that version's order: what already
+ * happened is never planned again, so the next version keeps their legs and planned times.
+ */
+function lockedLegs(snapshot: PublicationSnapshot) {
+  const status = new Map(snapshot.transfers.map((transfer) => [transfer.id, transfer.status]));
+  const count = snapshot.stops.filter((stop) => isDoneStop(stop.kind, status.get(stop.transferId)!)).length;
+  const legs = snapshot.stops.slice(0, count).map((stop) => isDoneStop(stop.kind, status.get(stop.transferId)!)
+    ? snapshot.latestLegs.find((leg) => leg.transferId === stop.transferId && leg.kind === stop.kind)
+    : undefined);
+  if (legs.some((leg, index) => !leg || (index > 0 && leg.position <= legs[index - 1]!.position))) {
+    throw new PlanningError(409, DONE_STOPS_FIRST);
+  }
+  return legs as LatestLeg[];
+}
 
 /** Everything a publication reads about one Recorrido, in Parada order. */
 async function loadPublicationSnapshot(client: Queryable, routeId: number): Promise<PublicationSnapshot> {
@@ -1276,6 +1331,7 @@ async function loadPublicationSnapshot(client: Queryable, routeId: number): Prom
             p.max_ride_time_minutes AS "maxRideTimeMinutes", p.pickup_duration_minutes AS "pickupDurationMinutes",
             p.dropoff_duration_minutes AS "dropoffDurationMinutes", p.front_seat AS "frontSeat",
             COALESCE(array_agg(rf.feature_id::text) FILTER (WHERE rf.feature_id IS NOT NULL), '{}') AS "requiredFeatures",
+            t.status, ${BOARDED_MINUTES_SQL} AS "boardedMinutes",
             COALESCE(o.latitude, CASE WHEN t.direction = 'entrada' THEN p.home_latitude ELSE d.latitude END) AS "fromLat",
             COALESCE(o.longitude, CASE WHEN t.direction = 'entrada' THEN p.home_longitude ELSE d.longitude END) AS "fromLng",
             CASE WHEN t.direction = 'entrada' THEN d.latitude ELSE p.home_latitude END AS "toLat",
@@ -1320,17 +1376,21 @@ async function loadPublicationSnapshot(client: Queryable, routeId: number): Prom
       requiredFeatures: transfer.requiredFeatures as string[],
       from: { lat: Number(transfer.fromLat), lng: Number(transfer.fromLng) },
       to: { lat: Number(transfer.toLat), lng: Number(transfer.toLng) },
+      status: String(transfer.status),
+      boardedMinutes: nullableNumber(transfer.boardedMinutes),
     })),
+    latestLegs: await loadLatestLegs(client, routeId),
   };
 }
 
 /**
  * What a Versión del plan was computed from: every input of the snapshot, so any change that can move distances, times
- * or the validator's verdict changes it. Left out: the status, which publishing itself changes, and the Pasajero's name.
+ * or the validator's verdict changes it. Left out: the status, which publishing itself changes, the Pasajero's name, and
+ * the Marcas and the latest version, which are what happened and what was published, not a change to the plan.
  */
 function publicationSignature(snapshot: PublicationSnapshot) {
   const { status: _status, ...route } = snapshot.route;
-  const transfers = snapshot.transfers.map(({ passengerName: _name, ...transfer }) => transfer);
+  const transfers = snapshot.transfers.map(({ passengerName: _name, status: _marked, boardedMinutes: _boarded, ...transfer }) => transfer);
   return createHash("sha256").update(JSON.stringify({ route, vehicle: snapshot.vehicle, stops: snapshot.stops, transfers })).digest("hex");
 }
 
@@ -1369,30 +1429,44 @@ function clockOfSeconds(seconds: number) {
 /**
  * Planned minute of each Parada: the latest start that puts every target Parada (an entrada's drop-off, a salida's
  * pickup) on or before its target time; each next Parada follows after the service at the previous one and the leg.
+ * The first `locked` Paradas (the done ones) keep their minutes, and the rest cannot start before the last of them ends.
  */
-function plannedMinutes(snapshot: PublicationSnapshot, legs: RouteLeg[]) {
+function plannedMinutes(snapshot: PublicationSnapshot, legs: RouteLeg[], locked: number[] = []) {
+  const first = locked.length;
+  const stops = snapshot.stops.slice(first);
   const relative: number[] = [];
-  snapshot.stops.forEach((stop, index) => {
-    relative.push(index === 0 ? 0 : relative[index - 1] + snapshot.stops[index - 1].serviceMinutes + legs[index].durationSeconds / 60);
+  stops.forEach((stop, index) => {
+    relative.push(index === 0 ? 0 : relative[index - 1] + stops[index - 1].serviceMinutes + legs[first + index].durationSeconds / 60);
   });
-  const slack = snapshot.stops.flatMap((stop, index) => {
+  const slack = stops.flatMap((stop, index) => {
     const transfer = snapshot.transfers.find((candidate) => candidate.id === stop.transferId)!;
     const isTarget = (transfer.direction === "entrada") === (stop.kind === "dropoff");
     return isTarget ? [minutesOf(transfer.targetTime) - relative[index]] : [];
   });
-  const start = slack.length ? Math.min(...slack) : minutesOf(snapshot.route.startTime);
-  return relative.map((minutes) => start + minutes);
+  const earliest = first && stops.length
+    ? locked[first - 1] + snapshot.stops[first - 1].serviceMinutes + legs[first].durationSeconds / 60
+    : undefined;
+  let start = slack.length ? Math.min(...slack) : earliest ?? minutesOf(snapshot.route.startTime);
+  if (earliest !== undefined) start = Math.max(start, earliest);
+  return [...locked, ...relative.map((minutes) => start + minutes)];
 }
 
+/**
+ * The validator on what can still happen: closed Traslados (Entregado, Ausente) are left out, an on-board Pasajero's ride
+ * counts from their actual Subió, and an on-board salida's pickup is not held to its target time any more.
+ */
 function validatePublication(snapshot: PublicationSnapshot, planned: number[]) {
-  return validateRoute({
-    route: snapshot.stops.map((stop, index) => ({
+  const open = snapshot.transfers.filter((transfer) => !CLOSED_TRANSFER_STATUSES.includes(transfer.status));
+  const boarded = new Map(open.filter((transfer) => transfer.status === "subio" && transfer.boardedMinutes !== null)
+    .map((transfer) => [transfer.id, transfer.boardedMinutes!]));
+  return forgetBoardedPickups(validateRoute({
+    route: snapshot.stops.flatMap((stop, index) => open.some((transfer) => transfer.id === stop.transferId) ? [{
       id: String(index + 1),
       transferId: String(stop.transferId),
       type: stop.kind,
-      plannedTime: planned[index],
-    })),
-    passengers: [...new Map(snapshot.transfers.map((transfer) => [transfer.passengerId, {
+      plannedTime: stop.kind === "pickup" && boarded.has(stop.transferId) ? boarded.get(stop.transferId)! : planned[index],
+    }] : []),
+    passengers: [...new Map(open.map((transfer) => [transfer.passengerId, {
       id: String(transfer.passengerId),
       maxRideTimeMinutes: transfer.maxRideTimeMinutes,
       frontSeat: transfer.frontSeat,
@@ -1401,14 +1475,20 @@ function validatePublication(snapshot: PublicationSnapshot, planned: number[]) {
       dropoffDurationMinutes: transfer.dropoffDurationMinutes,
     }])).values()],
     vehicle: { id: String(snapshot.route.vehicleId), capacity: { seats: snapshot.vehicle.seats, front: 1 }, features: snapshot.vehicle.features },
-    transfers: snapshot.transfers.map((transfer) => ({
+    transfers: open.map((transfer) => ({
       id: String(transfer.id),
       passengerId: String(transfer.passengerId),
       direction: transfer.direction,
       targetTime: minutesOf(transfer.targetTime),
       companions: transfer.companions,
     })),
-  });
+  }), open.filter((transfer) => boarded.has(transfer.id)));
+}
+
+// The pickup of an on-board salida already happened: its target time is no longer something to fix.
+function forgetBoardedPickups(violations: RouteViolation[], boarded: { id: number; direction: string }[]) {
+  const salidas = new Set(boarded.filter((transfer) => transfer.direction === "salida").map((transfer) => String(transfer.id)));
+  return violations.filter((violation) => violation.rule !== "target_time_window_broken" || !salidas.has(violation.transferId ?? ""));
 }
 
 // Everything the engine was given, the neighbouring Recorridos included; the result is applied only while this is unchanged.
@@ -1416,7 +1496,10 @@ async function orderInputKey(client: Queryable, routeId: number) {
   const route = (await client.query(ORDER_ROUTE_SQL, [routeId]) as QueryResult).rows[0];
   const rows = route ? (await client.query(ORDER_TRANSFERS_SQL, [routeId]) as QueryResult).rows : [];
   const neighbours = route ? await loadNeighbours(client, routeId, route) : {};
-  return { route, rows, neighbours, key: JSON.stringify([route, rows, neighbours]) };
+  const stops = (await client.query("SELECT transfer_id, kind FROM stops WHERE route_id = $1 ORDER BY position", [routeId]) as QueryResult).rows
+    .map((stop) => ({ transferId: Number(stop.transfer_id), kind: stop.kind as "pickup" | "dropoff" }));
+  const latestLegs = await loadLatestLegs(client, routeId);
+  return { route, rows, neighbours, stops, latestLegs, key: JSON.stringify([route, rows, neighbours, stops, latestLegs]) };
 }
 
 /**
@@ -1582,20 +1665,75 @@ async function loadDriverDay(client: Queryable, driverId: number, date: string) 
       companions: Number(leg.companions),
     };
   };
+  // What changed is measured from the version the Chofer acknowledged, or from the previous one once they saw this one.
+  const since = (row: Record<string, unknown>) => {
+    const acknowledged = nullableNumber(row.acknowledged);
+    return acknowledged !== null && acknowledged < Number(row.version) ? acknowledged : Number(row.version) - 1;
+  };
+  const earlier = versions.rows.filter((row) => since(row) >= 1);
+  const bases = (await client.query(
+    `SELECT pv.id, pv.route_id, pv.version, v.plate FROM plan_versions pv JOIN vehicles v ON v.id = pv.vehicle_id
+      WHERE (pv.route_id, pv.version) IN (SELECT * FROM unnest($1::int[], $2::int[]))`,
+    [earlier.map((row) => Number(row.route_id)), earlier.map(since)],
+  ) as QueryResult).rows;
+  const baseLegs = (await client.query(
+    `SELECT l.plan_version_id, l.transfer_id, l.kind, to_char(l.planned_time, 'HH24:MI') AS planned_time, p.name
+       FROM plan_version_legs l JOIN transfers t ON t.id = l.transfer_id JOIN passengers p ON p.id = t.passenger_id
+      WHERE l.plan_version_id = ANY($1::int[]) ORDER BY l.plan_version_id, l.position`,
+    [bases.map((base) => Number(base.id))],
+  ) as QueryResult).rows;
+  const changes = (row: Record<string, unknown>, stops: ReturnType<typeof stop>[]) => {
+    const base = bases.find((item) => Number(item.route_id) === Number(row.route_id));
+    if (!base) return null;
+    const before = baseLegs.filter((leg) => Number(leg.plan_version_id) === Number(base.id));
+    const items: VersionChange[] = [];
+    if (base.plate !== row.plate) items.push({ kind: "vehicle", from: String(base.plate), to: String(row.plate) });
+    for (const current of stops.filter((item) => item.kind === "pickup")) {
+      if (!before.some((leg) => Number(leg.transfer_id) === current.transferId)) {
+        items.push({ kind: "added", transferId: current.transferId, passengerName: current.passenger.name });
+      }
+    }
+    for (const leg of before.filter((item) => item.kind === "pickup")) {
+      if (!stops.some((item) => item.transferId === Number(leg.transfer_id))) {
+        items.push({ kind: "removed", transferId: Number(leg.transfer_id), passengerName: String(leg.name) });
+      }
+    }
+    for (const current of stops) {
+      const old = before.find((leg) => Number(leg.transfer_id) === current.transferId && leg.kind === current.kind);
+      if (old && old.planned_time !== current.plannedTime) {
+        items.push({
+          kind: "time", transferId: current.transferId, stopKind: current.kind, passengerName: current.passenger.name,
+          from: String(old.planned_time), to: current.plannedTime,
+        });
+      }
+    }
+    return { sinceVersion: Number(base.version), items };
+  };
   return {
     date,
-    routes: versions.rows.map((row) => ({
-      routeId: Number(row.route_id),
-      version: Number(row.version),
-      startTime: String(row.start_time),
-      endTime: String(row.end_time),
-      vehiclePlate: String(row.plate),
-      status: String(row.status),
-      acknowledgedVersion: nullableNumber(row.acknowledged),
-      stops: legs.rows.filter((leg) => Number(leg.plan_version_id) === Number(row.id)).map(stop),
-    })),
+    routes: versions.rows.map((row) => {
+      const stops = legs.rows.filter((leg) => Number(leg.plan_version_id) === Number(row.id)).map(stop);
+      const changed = changes(row, stops);
+      return {
+        routeId: Number(row.route_id),
+        version: Number(row.version),
+        startTime: String(row.start_time),
+        endTime: String(row.end_time),
+        vehiclePlate: String(row.plate),
+        status: String(row.status),
+        acknowledgedVersion: nullableNumber(row.acknowledged),
+        stops,
+        // Only from version 2 on: what changed since the version it is measured from.
+        ...(changed ? { changes: changed } : {}),
+      };
+    }),
   };
 }
+
+type VersionChange =
+  | { kind: "vehicle"; from: string; to: string }
+  | { kind: "added" | "removed"; transferId: number; passengerName: string }
+  | { kind: "time"; transferId: number; stopKind: string; passengerName: string; from: string; to: string };
 
 // "undo" is only a Corrección: it takes back the Marca it corrects.
 type MarkKind = "subio" | "ausente" | "entregado" | "undo";
@@ -2132,6 +2270,8 @@ export function createApp({ db, routing, router, geocoder, solver, travelTime, c
       throw new PlanningError(502, "Routing is unavailable: try publishing again");
     }
     const published = await inTransaction(db, async (client) => {
+      // The Traslados before the Recorrido, as a Marca locks them, so no Marca lands between this read and the commit.
+      await client.query("SELECT id FROM transfers WHERE id = ANY($1::int[]) ORDER BY id FOR SHARE", [before.transfers.map((transfer) => transfer.id)]);
       await lockRoute(client, routeId);
       const snapshot = await loadPublicationSnapshot(client, routeId);
       // Places, limits and order must be what OSRM was asked about.
@@ -2154,7 +2294,11 @@ export function createApp({ db, routing, router, geocoder, solver, travelTime, c
       ) as QueryResult;
       if (overlap.rows[0].driver) throw new PlanningError(409, "The Chofer is in another published Recorrido at the same time");
       if (overlap.rows[0].vehicle) throw new PlanningError(409, "The Vehículo is in another published Recorrido at the same time");
-      const planned = plannedMinutes(snapshot, legs);
+      const locked = lockedLegs(snapshot);
+      locked.forEach((leg, index) => {
+        legs[index] = { distanceMeters: index === 0 ? 0 : leg.distanceMeters, durationSeconds: index === 0 ? 0 : leg.durationSeconds };
+      });
+      const planned = plannedMinutes(snapshot, legs, locked.map((leg) => leg.plannedMinutes));
       const violations = groupByPassenger(validatePublication(snapshot, planned), snapshot.transfers);
       if (violations.some((group) => group.violations.some((violation) => violation.rule === "unserved_transfer"))) {
         throw new PlanningError(409, "A Recorrido that leaves a Traslado unserved is never published, even forced", { violations });
@@ -3464,17 +3608,51 @@ export function createApp({ db, routing, router, geocoder, solver, travelTime, c
       if (!id) return context.json({ error: "Invalid request" }, 400);
       if (!solver || !travelTime) return context.json({ error: "The routing engine is not configured" }, 503);
       try {
-        const { route, rows, neighbours, key } = await orderInputKey(db, id);
+        const { route, rows: all, neighbours, stops: current, latestLegs, key } = await orderInputKey(db, id);
         if (!route) throw new PlanningError(404, "Recorrido not found");
-        if (route.status !== "borrador") throw new PlanningError(409, "Only a Borrador Recorrido can be ordered");
+        if (route.status !== "borrador" && route.status !== "en_curso") {
+          throw new PlanningError(409, "Only a Borrador or En curso Recorrido can be ordered");
+        }
+        // En curso, what happened stays: the done Paradas go first as they are, and an Ausente's drop-off, which never
+        // happens, right after them. The engine gets the Planificados and, as drop-offs only, the Pasajeros on board.
+        const status = new Map(all.map((row) => [Number(row.id), String(row.status)]));
+        const locked = current.filter((stop) => isDoneStop(stop.kind, status.get(stop.transferId)!));
+        const voided = current.filter((stop) => stop.kind === "dropoff" && status.get(stop.transferId) === "ausente");
+        const rows = all.filter((row) => row.status === "planificado" || row.status === "subio");
         // Entradas from another Destino stored before the exit time existed cannot be planned until the Oficina sets it.
-        const withoutExit = rows.filter((row) => row.o_lat !== null && row.exit_time === null);
+        const withoutExit = rows.filter((row) => row.status === "planificado" && row.o_lat !== null && row.exit_time === null);
         if (withoutExit.length) {
           const names = withoutExit.map((row) => `${row.name} (Traslado ${row.id})`).join(", ");
           throw new PlanningError(409, `Set the exit time from the first Destino of: ${names}`);
         }
         let plan: PlanResult = { stops: [], unassigned: [] };
-        if (rows.length) {
+        if (rows.length && locked.length) {
+          // The Recorrido goes on from its last done Parada, once it ended and every Pasajero on board got on.
+          const last = locked.at(-1)!;
+          const lastRow = all.find((row) => Number(row.id) === last.transferId)!;
+          const lastLeg = latestLegs.find((leg) => leg.transferId === last.transferId && leg.kind === last.kind);
+          const service = Number(last.kind === "pickup" ? lastRow.pickup_duration_minutes : lastRow.dropoff_duration_minutes);
+          const startMinutes = Math.ceil(Math.max(
+            lastLeg ? lastLeg.plannedMinutes + service : 0,
+            ...rows.filter((row) => row.status === "subio").map((row) => Number(row.boarded_minutes)),
+          ));
+          const home = lngLat(route.home_latitude, route.home_longitude);
+          try {
+            plan = await planRoute({
+              transfers: rows.map((row) => ({
+                ...toPlanTransfer(row),
+                ...(row.status === "subio" ? { boardedMinutes: Number(row.boarded_minutes) } : {}),
+              })),
+              vehicle: { seats: Number(route.seats), featureIds: (route.feature_ids as number[]).map(Number) },
+              start: stopLocation(lastRow, last.kind),
+              end: (route.end_kind ?? (neighbours.next ? "open" : "home")) === "home" ? home : null,
+              notBeforeMinutes: startMinutes,
+              startMinutes,
+            }, plannerSettings, solver);
+          } catch {
+            return context.json({ error: "The routing engine is unavailable: the order was not changed" }, 502);
+          }
+        } else if (rows.length) {
           const ends = resolveRouteEnds(route, neighbours, routeGapMinutes);
           const startMinutes = minutesOf(String(route.start_time));
           try {
@@ -3501,7 +3679,7 @@ export function createApp({ db, routing, router, geocoder, solver, travelTime, c
           }
         }
         const stops = await inTransaction(db, async (client) => {
-          await lockOrderInputs(client, id, rows, neighbours);
+          await lockOrderInputs(client, id, all, neighbours);
           if ((await orderInputKey(client, id)).key !== key) {
             throw new PlanningError(409, "The Recorrido changed while it was being ordered: order it again");
           }
@@ -3515,13 +3693,15 @@ export function createApp({ db, routing, router, geocoder, solver, travelTime, c
               reason: item.reason,
             });
           }
-          if (plan.stops.length) {
+          const kept = [...locked, ...voided].map((stop) => ({ ...stop, plannedSeconds: null, legDistanceMeters: null }));
+          const order = [...kept, ...plan.stops];
+          if (order.length) {
             await client.query(
               `UPDATE stops SET position = o.ord, planned_time = time '00:00' + o.seconds * interval '1 second', leg_distance_meters = o.meters
                  FROM unnest($2::int[], $3::text[], $4::int[], $5::int[]) WITH ORDINALITY AS o(transfer_id, kind, seconds, meters, ord)
                 WHERE stops.route_id = $1 AND stops.transfer_id = o.transfer_id AND stops.kind = o.kind`,
-              [id, plan.stops.map((stop) => stop.transferId), plan.stops.map((stop) => stop.kind),
-                plan.stops.map((stop) => Math.round(stop.plannedSeconds)), plan.stops.map((stop) => stop.legDistanceMeters)],
+              [id, order.map((stop) => stop.transferId), order.map((stop) => stop.kind),
+                order.map((stop) => stop.plannedSeconds === null ? null : Math.round(stop.plannedSeconds)), order.map((stop) => stop.legDistanceMeters)],
             );
           }
           await appendChange(client, actor.id, "route", String(id), "ordered", { stopIds: before }, {
@@ -3550,7 +3730,8 @@ export function createApp({ db, routing, router, geocoder, solver, travelTime, c
         return planningFailure(context, error);
       }
     })
-    // Manual order: the full list of the Recorrido's Paradas; a pickup after its own drop-off is refused.
+    // Manual order: the full list of the Recorrido's Paradas; a pickup after its own drop-off is refused, and so is moving a
+    // done Parada: done Paradas stay first, in their order.
     .patch("/routes/:id/stops", async (context) => {
       const actor = await requireOffice(context);
       if (actor instanceof Response) return actor;
@@ -3566,13 +3747,16 @@ export function createApp({ db, routing, router, geocoder, solver, travelTime, c
         await inTransaction(db, async (client) => {
           await lockRoute(client, id);
           const current = await client.query(
-            "SELECT id, transfer_id, kind FROM stops WHERE route_id = $1 ORDER BY position",
+            "SELECT s.id, s.transfer_id, s.kind, t.status FROM stops s JOIN transfers t ON t.id = s.transfer_id WHERE s.route_id = $1 ORDER BY s.position",
             [id],
           ) as QueryResult;
           const byId = new Map(current.rows.map((row) => [Number(row.id), row]));
           if (order.length !== byId.size || order.some((stopId) => !byId.has(stopId))) {
             throw new PlanningError(400, "Send every Parada of the Recorrido exactly once");
           }
+          const done = (stopId: number) => isDoneStop(String(byId.get(stopId)!.kind), String(byId.get(stopId)!.status));
+          const doneNow = current.rows.map((row) => Number(row.id)).filter(done);
+          if (order.slice(0, doneNow.length).join() !== doneNow.join()) throw new PlanningError(409, DONE_STOPS_FIRST);
           const pickedUp = new Set<number>();
           for (const stopId of order) {
             const stop = byId.get(stopId)!;

@@ -5,6 +5,7 @@ import { migrate } from "drizzle-orm/node-postgres/migrator";
 import { Pool } from "pg";
 import { afterAll, expect, inject, it } from "vitest";
 import { createDrizzle } from "../src/db.js";
+import { ignoreAdministratorTermination } from "./helpers/pool.js";
 
 const migrationsFolder = resolve(import.meta.dirname, "../drizzle");
 const workerId = process.env.VITEST_POOL_ID ?? "1";
@@ -34,7 +35,8 @@ it("backfills the Tolerancia de llegada of existing Destinos from their kind and
   await admin.query(`CREATE DATABASE ${databaseName}`);
   const url = new URL(inject("adminConnectionString"));
   url.pathname = `/${databaseName}`;
-  const pool = new Pool({ connectionString: url.toString(), options: "-c timezone=UTC" });
+  // `pool.end()` resolves before the socket closes, so the drop in afterAll can still terminate this connection.
+  const pool = ignoreAdministratorTermination(new Pool({ connectionString: url.toString(), options: "-c timezone=UTC" }));
   try {
     await migrate(createDrizzle(pool), { migrationsFolder: await migrationsUpTo("0007_purple_solo") });
     for (const kind of ["therapy", "clinic", "school", "day_centre", "other"]) {
