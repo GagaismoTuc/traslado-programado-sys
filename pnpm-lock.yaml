@@ -29,6 +29,9 @@ importers:
       '@traslado/api':
         specifier: workspace:*
         version: link:../../packages/api
+      '@traslado/shared':
+        specifier: workspace:*
+        version: link:../../packages/shared
       hono:
         specifier: 4.13.13
         version: 4.13.13
@@ -51,6 +54,9 @@ importers:
       '@traslado/api':
         specifier: workspace:*
         version: link:../../packages/api
+      '@traslado/shared':
+        specifier: workspace:*
+        version: link:../../packages/shared
       hono:
         specifier: 4.13.13
         version: 4.13.13

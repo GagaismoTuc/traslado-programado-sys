@@ -1,5 +1,5 @@
 {
-  "id": "06193c74-fe7b-4247-ae48-f3edd5cdfe66",
+  "id": "7c74b70f-008b-4c51-a826-4cf2f84007ca",
   "prevId": "539d4922-e91e-4a98-9dee-9abb21df085b",
   "version": "7",
   "dialect": "postgresql",
@@ -226,7 +226,7 @@
       "checkConstraints": {
         "alerts_kind_check": {
           "name": "alerts_kind_check",
-          "value": "\"alerts\".\"kind\" IN ('other_adult_handover', 'mark_flagged', 'mark_conflict', 'authorization_conflict', 'absent_on_entrada', 'close_refused')"
+          "value": "\"alerts\".\"kind\" IN ('other_adult_handover', 'mark_flagged', 'mark_conflict', 'authorization_conflict', 'absent_on_entrada')"
         }
       },
       "isRLSEnabled": false
@@ -1020,7 +1020,19 @@
           "name": "driver_id",
           "type": "integer",
           "primaryKey": false,
-          "notNull": true
+          "notNull": false
+        },
+        "corrects_mark_id": {
+          "name": "corrects_mark_id",
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "reason": {
+          "name": "reason",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false
         },
         "session_id": {
           "name": "session_id",
@@ -1118,6 +1130,21 @@
           "concurrently": false,
           "method": "btree",
           "with": {}
+        },
+        "marks_corrects_mark_id_index": {
+          "name": "marks_corrects_mark_id_index",
+          "columns": [
+            {
+              "expression": "corrects_mark_id",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            }
+          ],
+          "isUnique": false,
+          "concurrently": false,
+          "method": "btree",
+          "with": {}
         }
       },
       "foreignKeys": {
@@ -1153,6 +1180,19 @@
           "tableTo": "drivers",
           "columnsFrom": [
             "driver_id"
+          ],
+          "columnsTo": [
+            "id"
+          ],
+          "onDelete": "restrict",
+          "onUpdate": "no action"
+        },
+        "marks_corrects_mark_id_marks_id_fk": {
+          "name": "marks_corrects_mark_id_marks_id_fk",
+          "tableFrom": "marks",
+          "tableTo": "marks",
+          "columnsFrom": [
+            "corrects_mark_id"
           ],
           "columnsTo": [
             "id"
@@ -1219,7 +1259,19 @@
       "checkConstraints": {
         "marks_kind_check": {
           "name": "marks_kind_check",
-          "value": "\"marks\".\"kind\" IN ('subio', 'ausente', 'entregado')"
+          "value": "\"marks\".\"kind\" IN ('subio', 'ausente', 'entregado', 'undo')"
+        },
+        "marks_undo_check": {
+          "name": "marks_undo_check",
+          "value": "\"marks\".\"kind\" <> 'undo' OR \"marks\".\"corrects_mark_id\" IS NOT NULL"
+        },
+        "marks_reason_check": {
+          "name": "marks_reason_check",
+          "value": "\"marks\".\"reason\" IS NULL OR \"marks\".\"corrects_mark_id\" IS NOT NULL"
+        },
+        "marks_office_correction_check": {
+          "name": "marks_office_correction_check",
+          "value": "\"marks\".\"driver_id\" IS NOT NULL OR \"marks\".\"reason\" IS NOT NULL"
         },
         "marks_location_check": {
           "name": "marks_location_check",

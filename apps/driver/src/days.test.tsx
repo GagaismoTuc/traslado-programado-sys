@@ -1,6 +1,6 @@
 import { renderToStaticMarkup } from "react-dom/server";
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { acknowledgeVersion, driverDays, RouteView, startRefetching, StopView, type DriverRoute, type DriverStop } from "./Days";
+import { acknowledgeVersion, driverDays, RouteView, startRefetching, StopView, visibleDays, type DriverRoute, type DriverStop } from "./Days";
 
 // Synthetic data only.
 const passenger = { name: "Pasajero Sintético", wheelchair: true, medicalAlert: "Alergia sintética a la penicilina" };
@@ -55,6 +55,14 @@ describe("driver Recorridos", () => {
     expect(driverDays(new Date("2026-10-23T12:00:00.000Z"))).toEqual(["2026-10-23", "2026-10-24"]);
     expect(driverDays(new Date("2026-10-24T02:30:00.000Z"))).toEqual(["2026-10-23", "2026-10-24"]);
   });
+
+  it("opens the plan saved on the phone for today and tomorrow, so last evening's download is today's plan", () => {
+    const day = (date: string) => ({ date, routes: [route(1, null)] });
+    // Downloaded on the evening of the 22nd, opened at 06:30 of the 23rd without signal.
+    expect(visibleDays([day("2026-10-22"), day("2026-10-23")], new Date("2026-10-23T09:30:00.000Z"))).toEqual([day("2026-10-23")]);
+    expect(visibleDays([day("2026-10-23"), day("2026-10-24")], new Date("2026-10-23T09:30:00.000Z"))).toEqual([day("2026-10-23"), day("2026-10-24")]);
+    expect(visibleDays([day("2026-10-21"), day("2026-10-22")], new Date("2026-10-23T09:30:00.000Z"))).toEqual([]);
+  });
 });
 
 describe("Confirmación de versión in the driver app", () => {
@@ -65,6 +73,27 @@ describe("Confirmación de versión in the driver app", () => {
       .toContain("<p role=\"alert\">The plan changed since you acknowledged version 1.</p><button type=\"button\">Acknowledge version 2</button>");
     expect(renderToStaticMarkup(<RouteView route={route(2, 2)} sending={false} onAcknowledge={() => undefined} />))
       .toContain("<p>You acknowledged version 2.</p><ol>");
+  });
+
+  it("shows what changed since the version the Chofer acknowledged", () => {
+    const changed: DriverRoute = {
+      ...route(2, 1),
+      changes: {
+        sinceVersion: 1,
+        items: [
+          { kind: "vehicle", from: "AAA001", to: "BBB002" },
+          { kind: "added", transferId: 5, passengerName: "Pasajero Nuevo" },
+          { kind: "removed", transferId: 6, passengerName: "Pasajero Ausente" },
+          { kind: "time", transferId: 3, stopKind: "pickup", passengerName: "Pasajero Sintético", from: "07:51", to: "07:58" },
+        ],
+      },
+    };
+    expect(renderToStaticMarkup(<RouteView route={changed} sending={false} onAcknowledge={() => undefined} />)).toContain(
+      "<section><p>Changes since version 1:</p><ul><li>Vehicle: AAA001 → BBB002</li><li>New: Pasajero Nuevo</li>"
+      + "<li>Removed: Pasajero Ausente</li><li>Pick up Pasajero Sintético: 07:51 → 07:58</li></ul></section>",
+    );
+    expect(renderToStaticMarkup(<RouteView route={{ ...changed, changes: { sinceVersion: 1, items: [] } }} sending={false} onAcknowledge={() => undefined} />))
+      .not.toContain("Changes since");
   });
 
   it("sends the version the Chofer saw, not the latest one", async () => {

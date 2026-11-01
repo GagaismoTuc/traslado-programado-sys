@@ -1,6 +1,6 @@
 import { sql } from "drizzle-orm";
 import {
-  boolean, check, date, doublePrecision, foreignKey, integer, jsonb, pgTable, primaryKey, text, time, timestamp, unique, uniqueIndex, uuid,
+  type AnyPgColumn, boolean, check, date, doublePrecision, foreignKey, index, integer, jsonb, pgTable, primaryKey, text, time, timestamp, unique, uniqueIndex, uuid,
 } from "drizzle-orm/pg-core";
 
 export const foundationPermissionProbe = pgTable("foundation_permission_probe", {
@@ -362,12 +362,16 @@ export const oneOffAuthorizationRevocations = pgTable("one_off_authorization_rev
 
 // A Marca as the Chofer's phone made it: client_id is the phone's UUID, so a resent Marca is found instead of stored twice.
 // Append-only (the app role has no UPDATE or DELETE). flags are why the server accepted it with a warning.
+// A Corrección is a Marca naming the one it replaces in corrects_mark_id, with the corrected outcome or 'undo'. The
+// Oficina's carries a reason and no Chofer; its session says who made it.
 export const marks = pgTable("marks", {
   id: integer().generatedAlwaysAsIdentity().primaryKey(),
   clientId: uuid("client_id").notNull(),
   transferId: integer("transfer_id").notNull().references(() => transfers.id, { onDelete: "restrict" }),
   planVersionId: integer("plan_version_id").notNull().references(() => planVersions.id, { onDelete: "restrict" }),
-  driverId: integer("driver_id").notNull().references(() => drivers.id, { onDelete: "restrict" }),
+  driverId: integer("driver_id").references(() => drivers.id, { onDelete: "restrict" }),
+  correctsMarkId: integer("corrects_mark_id").references((): AnyPgColumn => marks.id, { onDelete: "restrict" }),
+  reason: text(),
   sessionId: integer("session_id").notNull().references(() => sessions.id, { onDelete: "restrict" }),
   kind: text().notNull(),
   phoneTime: timestamp("phone_time", { withTimezone: true, mode: "string" }).notNull(),
@@ -383,7 +387,13 @@ export const marks = pgTable("marks", {
   flags: jsonb().default([]).notNull(),
 }, (table) => [
   uniqueIndex("marks_client_id_unique").on(table.clientId),
-  check("marks_kind_check", sql`${table.kind} IN ('subio', 'ausente', 'entregado')`),
+  // A later Corrección replaces the Corrección; once the one that replaced a Marca is undone, the Marca can be corrected again.
+  index("marks_corrects_mark_id_index").on(table.correctsMarkId),
+  check("marks_kind_check", sql`${table.kind} IN ('subio', 'ausente', 'entregado', 'undo')`),
+  check("marks_undo_check", sql`${table.kind} <> 'undo' OR ${table.correctsMarkId} IS NOT NULL`),
+  // Only a Corrección carries a reason, and one without a Chofer is the Oficina's, which always has one.
+  check("marks_reason_check", sql`${table.reason} IS NULL OR ${table.correctsMarkId} IS NOT NULL`),
+  check("marks_office_correction_check", sql`${table.driverId} IS NOT NULL OR ${table.reason} IS NOT NULL`),
   check(
     "marks_location_check",
     sql`(${table.latitude} IS NULL AND ${table.longitude} IS NULL)

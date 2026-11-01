@@ -150,6 +150,11 @@ export function RouteDriverField({ route, drivers, onChange }: {
   </label>;
 }
 
+/** The engine orders a Borrador Recorrido and, keeping its done Paradas, one En curso. */
+export function canOrder(route: Pick<Route, "status">) {
+  return route.status === "borrador" || route.status === "en_curso";
+}
+
 /** A Recorrido may be forced with a reason unless it leaves a Traslado unserved. */
 export function canForce(violations: PassengerViolations[]) {
   return violations.every((group) => group.violations.every((violation) => violation.rule !== "unserved_transfer"));
@@ -475,6 +480,7 @@ export function PlanPage() {
       <ul>{day.transfers.map((transfer) => <li key={transfer.id}>
         <strong>{transferLabel(transfer)}</strong>
         <div>Companions: {transfer.companions}{transfer.status === "cancelado_ausencia" ? " - Cancelled: absence" : ""}</div>
+        <a href={`/transfers/${transfer.id}/history`}>History</a>
         {transfer.status === "planificado" && <>
           <label>
             Recorrido
@@ -571,7 +577,7 @@ export function PlanPage() {
           drivers={drivers}
           onChange={(driverId) => void write(`/routes/${route.id}`, "PATCH", { driverId }, driverChangedMessage(route))}
         />
-        {route.status === "borrador" && <button type="button" onClick={() => void order(route)}>Order</button>}
+        {canOrder(route) && <button type="button" onClick={() => void order(route)}>Order</button>}
         {orders[route.id]?.unassigned.length ? <>
           <p>Not placed by the engine (back among the unassigned Traslados):</p>
           <ul>{orders[route.id].unassigned.map((item) => <li key={item.transferId}>

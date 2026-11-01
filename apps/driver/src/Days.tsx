@@ -1,8 +1,12 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import {
-  closeRoute, currentLocation, fetchHandover, HandoverView, newMark, otherAdultReceiver, sendMark, startRoute,
+  closeRoute, currentLocation, fetchHandover, HandoverView, newMark, otherAdultReceiver, sendMark, startRoute, undoMark,
   type Handover, type Mark, type MarkKind, type Receiver,
 } from "./Marks";
+import {
+  indexedDbStore, latestMarks, markQueue, requestPersistentStorage, savedPlanFor, startFlushing, wipeIfRevoked, type CachedPlan,
+  type QueuedMark,
+} from "./offline";
 
 export type DriverStop = {
   position: number;
@@ -27,7 +31,13 @@ export type DriverRoute = {
   status: string;
   acknowledgedVersion: number | null;
   stops: DriverStop[];
+  // From version 2 on: what changed since the version the Chofer acknowledged, or since the previous one.
+  changes?: { sinceVersion: number; items: VersionChange[] };
 };
+export type VersionChange =
+  | { kind: "vehicle"; from: string; to: string }
+  | { kind: "added" | "removed"; transferId: number; passengerName: string }
+  | { kind: "time"; transferId: number; stopKind: string; passengerName: string; from: string; to: string };
 export type DriverDay = { date: string; routes: DriverRoute[] };
 
 const PLAN_TIME_ZONE = "America/Argentina/Tucuman";
@@ -38,6 +48,12 @@ export function driverDays(now = new Date()) {
   const tomorrow = new Date(`${today}T00:00:00Z`);
   tomorrow.setUTCDate(tomorrow.getUTCDate() + 1);
   return [today, tomorrow.toISOString().slice(0, 10)];
+}
+
+/** The days of a saved plan that are still today or tomorrow: a plan downloaded last evening opens as today's. */
+export function visibleDays(days: DriverDay[], now = new Date()) {
+  const dates = driverDays(now);
+  return days.filter((day) => dates.includes(day.date));
 }
 
 type Listener = Pick<EventTarget, "addEventListener" | "removeEventListener">;
@@ -78,6 +94,23 @@ export function StopView({ stop }: { stop: DriverStop }) {
   </>;
 }
 
+function changeText(change: VersionChange) {
+  if (change.kind === "vehicle") return `Vehicle: ${change.from} → ${change.to}`;
+  if (change.kind === "time") {
+    return `${change.stopKind === "pickup" ? "Pick up" : "Drop off"} ${change.passengerName}: ${change.from} → ${change.to}`;
+  }
+  return `${change.kind === "added" ? "New" : "Removed"}: ${change.passengerName}`;
+}
+
+/** What changed between versions, so the Chofer does not have to compare the lists. */
+export function ChangesView({ route }: { route: DriverRoute }) {
+  if (!route.changes?.items.length) return null;
+  return <section>
+    <p>{`Changes since version ${route.changes.sinceVersion}:`}</p>
+    <ul>{route.changes.items.map((change, index) => <li key={index}>{changeText(change)}</li>)}</ul>
+  </section>;
+}
+
 type Acknowledge = (routeId: number, version: number) => void;
 
 /** A Traslado that keeps the Recorrido from closing, as the server lists it. */
@@ -85,11 +118,15 @@ export type OpenTransfer = { transferId: number; passengerName: string; directio
 
 const MARKED: Record<string, string> = { subio: "Subió", ausente: "Ausente", entregado: "Entregado", cancelado_ausencia: "Cancelled: absence" };
 
-/** What the Chofer does on a Recorrido: start it, mark its Paradas, hand a Pasajero over at home and resend a failed Marca. */
+/** What the Chofer does on a Recorrido: start it, mark its Paradas, hand a Pasajero over at home and send the queue now. */
 export type Marking = {
   sending: boolean;
-  // Marcas that did not reach the server, by Traslado: sending them again repeats their UUID.
-  unsent: Record<number, Mark>;
+  // The newest Marca the phone holds for each Traslado, saved on the phone or confirmed by the server.
+  marks: Record<number, QueuedMark>;
+  // For each undo on the phone, by its UUID, the kind of the Marca it undoes.
+  undone: Record<string, MarkKind>;
+  // When the plan shown was requested, or null before any plan.
+  planFetchedAt: string | null;
   // The open home drop-off with its downloaded data and the last refusal.
   handover: { transferId: number; data: Handover | null; blocked: string | null; searching: boolean } | null;
   // The Traslados the server named when it last refused to close a Recorrido.
@@ -97,28 +134,65 @@ export type Marking = {
   onStart: (route: DriverRoute) => void;
   onClose: (route: DriverRoute) => void;
   onMark: (route: DriverRoute, stop: DriverStop, kind: MarkKind, receiver?: Receiver) => void;
-  onResend: (route: DriverRoute, mark: Mark) => void;
+  onFlush: () => void;
+  onUndo: (route: DriverRoute, mark: Mark) => void;
   onOpenHandover: (route: DriverRoute, stop: DriverStop) => void;
   onOtherAdult: (route: DriverRoute, stop: DriverStop, typed: { name: string; dni: string; adultConfirmed: boolean }) => void;
   onSearch: (route: DriverRoute, stop: DriverStop) => void;
 };
 
+/**
+ * The Traslado's state as the Chofer sees it: a Marca still on the phone, or one confirmed after the plan was requested,
+ * wins over the plan, so a Marca made without signal is not offered again.
+ */
+export function stopStatus(stop: DriverStop, local: QueuedMark | undefined, planFetchedAt: string | null, undone: Record<string, MarkKind> = {}) {
+  if (!local) return stop.transferStatus;
+  if (local.state === "pending" || planFetchedAt === null || (local.confirmedAt ?? "") > planFetchedAt) return markState(local, undone) ?? stop.transferStatus;
+  return stop.transferStatus;
+}
+
+// The Traslado's state before a Marca of each kind: an undo of that Marca returns it there.
+const BEFORE: Record<string, string> = { subio: "planificado", ausente: "planificado", entregado: "subio" };
+
+/** The state a Marca on the phone leaves the Traslado in, or undefined for an undo whose Marca the phone no longer holds. */
+function markState(local: QueuedMark, undone: Record<string, MarkKind>) {
+  if (local.mark.kind !== "undo") return local.mark.kind;
+  const kind = undone[local.id];
+  return kind ? BEFORE[kind] : undefined;
+}
+
+/** For each undo on the phone, by its UUID, the kind of the Marca it undoes. */
+export function undoneKinds(items: QueuedMark[]) {
+  const kinds: Record<string, MarkKind> = {};
+  for (const item of items) {
+    const target = item.mark.kind === "undo" ? items.find((other) => other.id === item.mark.corrects) : undefined;
+    if (target) kinds[item.id] = target.mark.kind;
+  }
+  return kinds;
+}
+
 /** Subió or Ausente at a pickup; Entregado at a drop-off once the Pasajero is on board, to the Destino or at home. */
 export function StopActions({ route, stop, marking }: { route: DriverRoute; stop: DriverStop; marking: Marking }) {
-  const unsent = marking.unsent[stop.transferId];
-  const open = marking.handover?.transferId === stop.transferId ? marking.handover : null;
+  const local = marking.marks[stop.transferId];
+  const status = stopStatus(stop, local, marking.planFetchedAt, marking.undone);
+  // The Marca's own state, unless the Oficina changed the Traslado since it was confirmed.
+  const shown = local && (local.state === "pending" || status === markState(local, marking.undone)) ? local : null;
+  // The Chofer may undo the Marca on the phone at its own Parada; an undo cannot be undone: the Chofer marks again instead.
+  const undoable = shown && shown.mark.kind !== "undo" && stop.kind === (shown.mark.kind === "entregado" ? "dropoff" : "pickup") ? shown.mark : null;
+  // The handover belongs to the drop-off, not to the pickup of the same Traslado.
+  const open = stop.kind === "dropoff" && marking.handover?.transferId === stop.transferId ? marking.handover : null;
   const disabled = marking.sending;
   return <>
-    {MARKED[stop.transferStatus] && <div>{`Marked: ${MARKED[stop.transferStatus]}`}</div>}
-    {unsent && <p role="alert">
-      {"The Marca did not reach the server. "}
-      <button type="button" disabled={disabled} onClick={() => marking.onResend(route, unsent)}>Send again</button>
-    </p>}
-    {stop.kind === "pickup" && stop.transferStatus === "planificado" && <div>
+    {MARKED[status] && <div>{`Marked: ${MARKED[status]}`}</div>}
+    {shown && <div>{shown.state === "pending" ? "Saved on phone" : "Confirmed by server"}</div>}
+    {shown?.note && <p role="alert">{shown.note}</p>}
+    {shown?.state === "pending" && <button type="button" onClick={marking.onFlush}>Send now</button>}
+    {undoable && <button type="button" disabled={disabled} onClick={() => marking.onUndo(route, undoable)}>Deshacer</button>}
+    {stop.kind === "pickup" && status === "planificado" && <div>
       <button type="button" disabled={disabled} onClick={() => marking.onMark(route, stop, "subio")}>Subió</button>
       <button type="button" disabled={disabled} onClick={() => marking.onMark(route, stop, "ausente")}>Ausente</button>
     </div>}
-    {stop.kind === "dropoff" && stop.transferStatus === "subio" && (stop.place.destinationId !== null
+    {stop.kind === "dropoff" && status === "subio" && (stop.place.destinationId !== null
       ? <button type="button" disabled={disabled} onClick={() => marking.onMark(route, stop, "entregado", {
         kind: "destination", destinationId: stop.place.destinationId!,
       })}>{`Entregado at ${stop.place.name}`}</button>
@@ -135,10 +209,14 @@ export function StopActions({ route, stop, marking }: { route: DriverRoute; stop
   </>;
 }
 
-/** The refused list with each Traslado's state now, without those resolved since; one no longer in the Recorrido (reassigned) is resolved. */
-export function stillOpen(route: DriverRoute, transfers: OpenTransfer[]): OpenTransfer[] {
+/**
+ * The refused list with each Traslado's state as the Chofer sees it now (`stopStatus`, so a Marca saved on the phone counts),
+ * without those resolved since; one no longer in the Recorrido (reassigned) is resolved.
+ */
+export function stillOpen(route: DriverRoute, transfers: OpenTransfer[], marking: Pick<Marking, "marks" | "planFetchedAt" | "undone">): OpenTransfer[] {
   return transfers.flatMap((transfer) => {
-    const status = route.stops.find((stop) => stop.transferId === transfer.transferId)?.transferStatus;
+    const stop = route.stops.find((candidate) => candidate.transferId === transfer.transferId);
+    const status = stop && stopStatus(stop, marking.marks[stop.transferId], marking.planFetchedAt, marking.undone);
     return status === "planificado" || status === "subio" ? [{ ...transfer, status }] : [];
   });
 }
@@ -166,11 +244,12 @@ export function RouteView({ route, sending, onAcknowledge, marking }: {
           {`Acknowledge version ${route.version}`}
         </button>
       </>}
+    <ChangesView route={route} />
     {marking && route.status === "publicado" && <button type="button" disabled={marking.sending} onClick={() => marking.onStart(route)}>Start Recorrido</button>}
     {marking && route.status === "en_curso" && <>
       <p>Recorrido en curso.</p>
       <button type="button" disabled={marking.sending} onClick={() => marking.onClose(route)}>Close Recorrido</button>
-      {marking.refusedClose?.routeId === route.routeId && <CloseRefusal transfers={stillOpen(route, marking.refusedClose.transfers)} />}
+      {marking.refusedClose?.routeId === route.routeId && <CloseRefusal transfers={stillOpen(route, marking.refusedClose.transfers, marking)} />}
     </>}
     {marking && route.status === "cerrado" && <p>Recorrido closed.</p>}
     <ol>{route.stops.map((stop) => <li key={stop.position}>
@@ -191,53 +270,119 @@ export function DayView({ title, day, sending, onAcknowledge, marking }: {
   </section>;
 }
 
-/** Today's and tomorrow's Recorridos, fetched on open and on focus; a 401 sends the Chofer back to sign-in. */
-export function DriverHome({ apiUrl, onSignedOut }: { apiUrl: string; onSignedOut: () => void }) {
-  const [days, setDays] = useState<DriverDay[] | null>(null);
+/** The handover data of every home drop-off in the plan, so the handover rule works without signal; failures are skipped. */
+async function downloadHandovers(apiUrl: string, days: DriverDay[]) {
+  const handovers: Record<number, Handover> = {};
+  await Promise.all(days.flatMap((day) => day.routes.flatMap((route) => route.stops
+    .filter((stop) => stop.kind === "dropoff" && stop.place.destinationId === null)
+    .map(async (stop) => {
+      try {
+        const response = await fetchHandover(apiUrl, route.routeId, stop.transferId);
+        if (response.ok) handovers[stop.transferId] = await response.json() as Handover;
+      } catch {
+        // Kept from the previous download, if any.
+      }
+    }))));
+  return handovers;
+}
+
+/**
+ * Today's and tomorrow's Recorridos, fetched on open and on focus and saved on the phone, which shows the saved plan
+ * without signal. Marcas go to the queue first and are sent on open, when the connection returns and when the app
+ * becomes visible. A 401 sends the Chofer back to sign-in; a revoked device also wipes the phone.
+ */
+export function DriverHome({ apiUrl, userId, onSignedOut }: { apiUrl: string; userId: number; onSignedOut: () => void }) {
+  const [plan, setPlan] = useState<CachedPlan | null>(null);
   const [message, setMessage] = useState("");
   // A failed load is shown until a later load succeeds, apart from the acknowledgement message.
   const [loadError, setLoadError] = useState("");
   const [sending, setSending] = useState(false);
-  const [unsent, setUnsent] = useState<Record<number, Mark>>({});
+  const [local, setLocal] = useState<QueuedMark[]>([]);
   const [handover, setHandover] = useState<Marking["handover"]>(null);
   const [refusedClose, setRefusedClose] = useState<Marking["refusedClose"]>(null);
+  const [store] = useState(() => indexedDbStore());
+  const [queue] = useState(() => markQueue(store, (routeId, mark) => sendMark(apiUrl, routeId, mark)));
   const latestLoad = useRef(0);
   const signedOut = useRef(onSignedOut);
   signedOut.current = onSignedOut;
 
+  const refreshLocal = useCallback(async () => setLocal(await store.marks().catch(() => [])), [store]);
+
+  const endSession = useCallback(async (response: Response) => {
+    if (await wipeIfRevoked(response, store).catch(() => true)) {
+      setPlan(null);
+      setLocal([]);
+    }
+    signedOut.current();
+  }, [store]);
+
   const load = useCallback(async () => {
     // Only the newest load may update the screen.
     const loadId = ++latestLoad.current;
+    const requestedAt = new Date().toISOString();
     try {
       const responses = await Promise.all(driverDays().map((date) => fetch(`${apiUrl}/driver/days/${date}`, { credentials: "include" })));
       if (loadId !== latestLoad.current) return;
-      if (responses.some((response) => response.status === 401)) {
-        signedOut.current();
-        return;
-      }
+      const unauthorized = responses.find((response) => response.status === 401);
+      if (unauthorized) return await endSession(unauthorized);
       if (responses.some((response) => !response.ok)) {
         setLoadError("Unable to load your Recorridos");
         return;
       }
-      const loaded = await Promise.all(responses.map(async (response) => await response.json() as DriverDay));
+      const days = await Promise.all(responses.map(async (response) => await response.json() as DriverDay));
+      const fresh = await downloadHandovers(apiUrl, days);
+      const previous = savedPlanFor(await store.plan().catch(() => null), userId);
       if (loadId !== latestLoad.current) return;
-      setDays(loaded);
+      const handovers: Record<number, Handover> = {};
+      for (const route of days.flatMap((day) => day.routes)) {
+        for (const stop of route.stops) {
+          const data = fresh[stop.transferId] ?? previous?.handovers[stop.transferId];
+          if (data) handovers[stop.transferId] = data;
+        }
+      }
+      const next = { userId, days, handovers, fetchedAt: requestedAt };
+      setPlan(next);
       setLoadError("");
+      await store.putPlan(next).catch(() => undefined);
     } catch {
       if (loadId === latestLoad.current) setLoadError("Unable to reach the server");
     }
-  }, [apiUrl]);
+  }, [apiUrl, userId, store, endSession]);
 
+  const flush = useCallback(async () => {
+    const outcome = await queue.flush().catch(() => ({ result: "offline" as const, confirmed: 0 }));
+    if (outcome.result === "revoked") {
+      setPlan(null);
+      setLocal([]);
+      signedOut.current();
+      return;
+    }
+    await refreshLocal();
+    // An expired session keeps the queue: it is sent once the Chofer signs in again.
+    if (outcome.result === "signed_out") return signedOut.current();
+    if (outcome.confirmed) {
+      setMessage(outcome.confirmed === 1 ? "Marca confirmed by the server" : `${outcome.confirmed} Marcas confirmed by the server`);
+      await load();
+    }
+  }, [queue, refreshLocal, load]);
+
+  useEffect(() => {
+    // The saved plan shows until the first load answers.
+    void store.plan().then((saved) => {
+      const own = savedPlanFor(saved, userId);
+      if (own) setPlan((current) => current ?? own);
+    }).catch(() => undefined);
+    void refreshLocal();
+    void requestPersistentStorage(navigator.storage);
+  }, [store, userId, refreshLocal]);
   useEffect(() => startRefetching(window, document, () => void load()), [load]);
+  useEffect(() => startFlushing(window, document, () => void flush()), [flush]);
 
   async function acknowledge(routeId: number, version: number) {
     setSending(true);
     try {
       const response = await acknowledgeVersion(apiUrl, routeId, version);
-      if (response.status === 401) {
-        signedOut.current();
-        return;
-      }
+      if (response.status === 401) return await endSession(response);
       setMessage(response.ok ? `Version ${version} acknowledged` : "Unable to acknowledge the version");
       await load();
     } catch {
@@ -247,56 +392,59 @@ export function DriverHome({ apiUrl, onSignedOut }: { apiUrl: string; onSignedOu
     }
   }
 
-  /** Sends a Marca; without signal it stays on screen with its UUID to be sent again. */
-  async function submitMark(routeId: number, mark: Mark) {
-    setSending(true);
-    try {
-      const response = await sendMark(apiUrl, routeId, mark);
-      if (response.status === 401) {
-        signedOut.current();
-        return;
-      }
-      const result = await response.json().catch(() => null) as { error?: string; conflict?: boolean } | null;
-      setUnsent(({ [mark.transferId]: _, ...rest }) => rest);
-      if (!response.ok) setMessage(result?.error ?? "Unable to save the Marca");
-      else setMessage(result?.conflict ? "The server already had this Marca with other content; it kept the first one" : "Marca confirmed by the server");
-      if (response.ok) setHandover(null);
-      await load();
-    } catch {
-      setUnsent((current) => ({ ...current, [mark.transferId]: mark }));
-      setMessage("Unable to reach the server: send the Marca again");
-    } finally {
-      setSending(false);
-    }
-  }
-
   async function downloadHandover(route: DriverRoute, stop: DriverStop, searching: boolean) {
-    setHandover((current) => ({ transferId: stop.transferId, data: current?.transferId === stop.transferId ? current.data : null, blocked: null, searching }));
+    const saved = plan?.handovers[stop.transferId] ?? null;
+    setHandover((current) => ({
+      transferId: stop.transferId, data: (current?.transferId === stop.transferId ? current.data : null) ?? saved, blocked: null, searching,
+    }));
     try {
       const response = await fetchHandover(apiUrl, route.routeId, stop.transferId);
-      if (response.status === 401) {
-        signedOut.current();
-        return;
-      }
+      if (response.status === 401) return await endSession(response);
       const data = response.ok ? await response.json() as Handover : null;
       setHandover((current) => ({
         transferId: stop.transferId, data: data ?? current?.data ?? null, blocked: data ? null : "Unable to load who may receive", searching: false,
       }));
     } catch {
-      setHandover((current) => ({ transferId: stop.transferId, data: current?.data ?? null, blocked: "Unable to reach the server", searching: false }));
+      // Without signal the saved plan still says who may receive; only "Buscar autorización" needs the server.
+      setHandover((current) => {
+        const data = current?.data ?? null;
+        return { transferId: stop.transferId, data, blocked: data && !searching ? null : "Unable to reach the server", searching: false };
+      });
     }
+  }
+
+  /** Saves a Marca on the phone, then sends the queue; an undo of a Marca goes the same way, so it also works without signal. */
+  async function saveMark(route: DriverRoute, build: (location: Mark["location"], tappedAt: Date) => Mark) {
+    // The phone time is the tap, not when the GPS answers.
+    const tappedAt = new Date();
+    setSending(true);
+    try {
+      const location = await currentLocation(navigator.geolocation);
+      await queue.add(route.routeId, build(location, tappedAt));
+      setHandover(null);
+      setMessage("Marca saved on phone");
+      await refreshLocal();
+    } catch {
+      setMessage("The phone could not save the Marca: mark it again");
+      return;
+    } finally {
+      setSending(false);
+    }
+    await flush();
   }
 
   const marking: Marking = {
     sending,
-    unsent,
+    marks: latestMarks(local),
+    undone: undoneKinds(local),
+    planFetchedAt: plan?.fetchedAt ?? null,
     handover,
     refusedClose,
     onStart: (route) => void (async () => {
       setSending(true);
       try {
         const response = await startRoute(apiUrl, route.routeId);
-        if (response.status === 401) return signedOut.current();
+        if (response.status === 401) return await endSession(response);
         setMessage(response.ok ? "Recorrido started" : "Unable to start the Recorrido");
         await load();
       } catch {
@@ -309,7 +457,7 @@ export function DriverHome({ apiUrl, onSignedOut }: { apiUrl: string; onSignedOu
       setSending(true);
       try {
         const response = await closeRoute(apiUrl, route.routeId);
-        if (response.status === 401) return signedOut.current();
+        if (response.status === 401) return await endSession(response);
         const result = await response.json().catch(() => null) as { transfers?: OpenTransfer[] } | null;
         setRefusedClose(response.status === 409 && result?.transfers ? { routeId: route.routeId, transfers: result.transfers } : null);
         setMessage(response.ok ? "Recorrido closed" : response.status === 409 && result?.transfers
@@ -321,13 +469,11 @@ export function DriverHome({ apiUrl, onSignedOut }: { apiUrl: string; onSignedOu
         setSending(false);
       }
     })(),
-    onMark: (route, stop, kind, receiver) => void (async () => {
-      // The phone time is the tap, not when the GPS answers.
-      const tappedAt = new Date();
-      const location = await currentLocation(navigator.geolocation);
-      await submitMark(route.routeId, newMark({ transferId: stop.transferId, kind, location, version: route.version, ...(receiver ? { receiver } : {}) }, tappedAt));
-    })(),
-    onResend: (route, mark) => void submitMark(route.routeId, mark),
+    onMark: (route, stop, kind, receiver) => void saveMark(route, (location, tappedAt) => newMark({
+      transferId: stop.transferId, kind, location, version: route.version, ...(receiver ? { receiver } : {}),
+    }, tappedAt)),
+    onFlush: () => void flush(),
+    onUndo: (route, mark) => void saveMark(route, (location, tappedAt) => undoMark(mark, route.version, location, tappedAt)),
     onOpenHandover: (route, stop) => void downloadHandover(route, stop, false),
     onOtherAdult: (route, stop, typed) => {
       if (!handover?.data) return;
@@ -338,18 +484,22 @@ export function DriverHome({ apiUrl, onSignedOut }: { apiUrl: string; onSignedOu
     onSearch: (route, stop) => void downloadHandover(route, stop, true),
   };
 
+  const [today] = driverDays();
+  const days = plan ? visibleDays(plan.days) : null;
   return <>
     {loadError && <p role="alert">{loadError}</p>}
     {message && <p role="status">{message}</p>}
     {days
-      ? days.map((day, index) => <DayView
-        key={day.date}
-        title={index === 0 ? "Today" : "Tomorrow"}
-        day={day}
-        sending={sending}
-        onAcknowledge={(routeId, version) => void acknowledge(routeId, version)}
-        marking={marking}
-      />)
+      ? days.length
+        ? days.map((day) => <DayView
+          key={day.date}
+          title={day.date === today ? "Today" : "Tomorrow"}
+          day={day}
+          sending={sending}
+          onAcknowledge={(routeId, version) => void acknowledge(routeId, version)}
+          marking={marking}
+        />)
+        : <p>No plan saved on the phone for today.</p>
       : <p>Loading your Recorridos...</p>}
   </>;
 }

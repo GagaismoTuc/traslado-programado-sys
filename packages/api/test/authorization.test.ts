@@ -75,6 +75,8 @@ const authorizationEvidence = new Map([
   ["POST /transfers/:id/authorizations", "lets only the Oficina record, list and revoke Autorizaciones puntuales and read the alert inbox"],
   ["POST /authorizations/:id/revocation", "lets only the Oficina record, list and revoke Autorizaciones puntuales and read the alert inbox"],
   ["GET /alerts", "lets only the Oficina record, list and revoke Autorizaciones puntuales and read the alert inbox"],
+  ["POST /marks/:id/corrections", "lets only the Oficina correct a Marca and read a Traslado's history"],
+  ["GET /transfers/:id/history", "lets only the Oficina correct a Marca and read a Traslado's history"],
 ]);
 
 describe("API route authorization coverage", () => {
@@ -145,6 +147,8 @@ describe("API route authorization coverage", () => {
       ["POST", "/transfers/1/authorizations", { legalGuardianId: 1, call: "outgoing", name: "Tía Sintética", dni: "-3000001" }],
       ["POST", "/authorizations/1/revocation", {}],
       ["GET", "/alerts"],
+      ["POST", "/marks/00000000-0000-4000-8000-000000000001/corrections", { kind: "undo", reason: "Prueba" }],
+      ["GET", "/transfers/1/history"],
     ];
     for (const [method, path, body] of probes) {
       const response = await app.request(path, {

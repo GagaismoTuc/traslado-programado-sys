@@ -1,7 +1,8 @@
 // Marks made with signal: the offline queue comes later, so a Marca that cannot reach the server keeps its UUID and is
 // sent again by the Chofer.
 
-export type MarkKind = "subio" | "ausente" | "entregado";
+// "undo" is only a Corrección of the Chofer's own last Marca.
+export type MarkKind = "subio" | "ausente" | "entregado" | "undo";
 export type Receiver =
   | { kind: "authorized_adult"; adultId: number }
   | { kind: "destination"; destinationId: number }
@@ -16,6 +17,8 @@ export type Mark = {
   location: Location;
   version: number;
   receiver?: Receiver;
+  // The UUID of the Marca this Corrección replaces.
+  corrects?: string;
 };
 /** What the Chofer needs at a home drop-off, downloaded from the server; authorizations are only the valid ones. */
 export type Handover = {
@@ -32,6 +35,14 @@ export const CALL_THE_OFFICE = "no entregues, llamá a la Oficina";
 /** Builds a Marca once, so sending it again after a failure repeats its UUID and phone time. */
 export function newMark(fields: Omit<Mark, "id" | "phoneTime">, now = new Date(), id: string = crypto.randomUUID()): Mark {
   return { id, phoneTime: now.toISOString(), ...fields };
+}
+
+/**
+ * "Deshacer": a Corrección that takes back `mark`. The server accepts it when both phone times are within 2 minutes, so it
+ * works without signal; later it answers to call the Oficina.
+ */
+export function undoMark(mark: Mark, version: number, location: Location, now = new Date(), id: string = crypto.randomUUID()): Mark {
+  return newMark({ transferId: mark.transferId, kind: "undo", corrects: mark.id, location, version }, now, id);
 }
 
 function normalizeDni(value: string) {
