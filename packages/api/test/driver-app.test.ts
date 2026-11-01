@@ -104,18 +104,18 @@ async function setup(name: string) {
     return { routeId, transferId };
   };
   const republish = async (routeId: number) => await post(`/routes/${routeId}/publish`, {});
-  return { office, chofer, recorrido, republish };
+  return { office, chofer, recorrido, republish, school };
 }
 
 describe("Driver app scope", () => {
   it("gives a Chofer his own published Recorridos of today and tomorrow with every Parada's details", async () => {
-    const { chofer, recorrido } = await setup("scope");
+    const { chofer, recorrido, school: schoolId } = await setup("scope");
     const first = await chofer(1);
     const today = await recorrido(first.driverId, TODAY, "entrada", "08:00");
     const tomorrow = await recorrido(first.driverId, TOMORROW, "salida", "13:00");
 
-    const home = { name: null, address: "Calle Inventada 101", accessNotes: "Timbre del fondo" };
-    const school = { name: "Escuela scope", address: "Avenida Sintetica 303", accessNotes: "Entrada por el portón lateral" };
+    const home = { name: null, destinationId: null, address: "Calle Inventada 101", accessNotes: "Timbre del fondo" };
+    const school = { name: "Escuela scope", destinationId: schoolId, address: "Avenida Sintetica 303", accessNotes: "Entrada por el portón lateral" };
     const passenger = { name: "Pasajero Sintético", wheelchair: true, medicalAlert: "Alergia sintética a la penicilina" };
     expect(await answer(request(`/driver/days/${TODAY}`, "GET", undefined, first.cookie), 200)).toEqual({
       date: TODAY,

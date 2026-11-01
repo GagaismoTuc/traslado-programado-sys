@@ -1398,7 +1398,7 @@ async function loadDriverDay(client: Queryable, driverId: number, date: string) 
   ) as QueryResult;
   const legs = await client.query(
     `SELECT l.plan_version_id, l.position, l.kind, to_char(l.planned_time, 'HH24:MI') AS planned_time, l.transfer_id, t.direction,
-            t.status, pvt.companions, p.name, p.home_address, p.access_notes AS home_notes, p.wheelchair, p.medical_alert,
+            t.status, t.destination_id, t.origin_destination_id, pvt.companions, p.name, p.home_address, p.access_notes AS home_notes, p.wheelchair, p.medical_alert,
             d.name AS d_name, d.address AS d_address, d.access_notes AS d_notes,
             o.name AS o_name, o.address AS o_address, o.access_notes AS o_notes
        FROM plan_version_legs l
@@ -1423,9 +1423,15 @@ async function loadDriverDay(client: Queryable, driverId: number, date: string) 
       direction: String(leg.direction),
       // The Traslado's state now (Planificado, Subió, Entregado, ...), so the app shows what is already marked.
       transferStatus: String(leg.status),
+      // destinationId is the Destino the Chofer marks as Receptor at a drop-off there; null at home.
       place: prefix === null
-        ? { name: null, address: String(leg.home_address), accessNotes: (leg.home_notes as string | null) ?? null }
-        : { name: String(leg[`${prefix}_name`]), address: String(leg[`${prefix}_address`]), accessNotes: (leg[`${prefix}_notes`] as string | null) ?? null },
+        ? { name: null, destinationId: null, address: String(leg.home_address), accessNotes: (leg.home_notes as string | null) ?? null }
+        : {
+          name: String(leg[`${prefix}_name`]),
+          destinationId: Number(prefix === "o" ? leg.origin_destination_id : leg.destination_id),
+          address: String(leg[`${prefix}_address`]),
+          accessNotes: (leg[`${prefix}_notes`] as string | null) ?? null,
+        },
       passenger: { name: String(leg.name), wheelchair: Boolean(leg.wheelchair), medicalAlert: (leg.medical_alert as string | null) ?? null },
       companions: Number(leg.companions),
     };
