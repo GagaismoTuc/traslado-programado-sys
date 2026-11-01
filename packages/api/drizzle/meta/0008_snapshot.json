@@ -1,5 +1,5 @@
 {
-  "id": "58bfb26f-3912-4a0d-b7a4-ff4c1991ea43",
+  "id": "e29b4c22-99d3-49b8-8631-87f6010f0796",
   "prevId": "7f7a0506-c451-4813-8beb-ccb7db4957d9",
   "version": "7",
   "dialect": "postgresql",
@@ -1149,6 +1149,12 @@
           "primaryKey": false,
           "notNull": true,
           "default": "'[]'::jsonb"
+        },
+        "input_signature": {
+          "name": "input_signature",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true
         }
       },
       "indexes": {

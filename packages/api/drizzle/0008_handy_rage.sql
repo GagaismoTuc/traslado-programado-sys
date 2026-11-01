@@ -33,6 +33,7 @@ CREATE TABLE "plan_versions" (
 	"published_by" integer NOT NULL,
 	"override_reason" text,
 	"violations" jsonb DEFAULT '[]'::jsonb NOT NULL,
+	"input_signature" text NOT NULL,
 	CONSTRAINT "plan_versions_version_positive" CHECK ("plan_versions"."version" > 0),
 	CONSTRAINT "plan_versions_override_reason_check" CHECK ("plan_versions"."override_reason" IS NULL OR btrim("plan_versions"."override_reason") <> '')
 );

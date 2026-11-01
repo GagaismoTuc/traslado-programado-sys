@@ -1,4 +1,4 @@
-import { randomBytes } from "node:crypto";
+import { createHash, randomBytes } from "node:crypto";
 import { getCookie, deleteCookie, setCookie } from "hono/cookie";
 import { getConnInfo } from "@hono/node-server/conninfo";
 import { Hono, type Context } from "hono";
@@ -972,43 +972,23 @@ async function loadPublicationSnapshot(client: Queryable, routeId: number): Prom
   };
 }
 
-/** What a Versión del plan fixes: the same signature as the latest version means nothing changed since. */
-function publicationSignature(snapshot: Pick<PublicationSnapshot, "route" | "stops" | "transfers">) {
-  return JSON.stringify({
-    vehicleId: snapshot.route.vehicleId,
-    driverId: snapshot.route.driverId,
-    band: [snapshot.route.startTime, snapshot.route.endTime],
-    stops: snapshot.stops.map((stop) => [stop.transferId, stop.kind]),
-    companions: snapshot.transfers.map((transfer) => [transfer.id, transfer.companions]),
-  });
+/**
+ * What a Versión del plan was computed from: every input of the snapshot, so any change that can move distances, times
+ * or the validator's verdict changes it. Left out: the status, which publishing itself changes, and the Pasajero's name.
+ */
+function publicationSignature(snapshot: PublicationSnapshot) {
+  const { status: _status, ...route } = snapshot.route;
+  const transfers = snapshot.transfers.map(({ passengerName: _name, ...transfer }) => transfer);
+  return createHash("sha256").update(JSON.stringify({ route, vehicle: snapshot.vehicle, stops: snapshot.stops, transfers })).digest("hex");
 }
 
 async function latestVersionSignature(client: Queryable, routeId: number) {
   const version = await client.query(
-    `SELECT id, version, vehicle_id, driver_id, to_char(start_time, 'HH24:MI') AS start_time, to_char(end_time, 'HH24:MI') AS end_time
-       FROM plan_versions WHERE route_id = $1 ORDER BY version DESC LIMIT 1`,
+    "SELECT version, input_signature FROM plan_versions WHERE route_id = $1 ORDER BY version DESC LIMIT 1",
     [routeId],
   ) as QueryResult;
   const row = version.rows[0];
-  if (!row) return null;
-  const legs = await client.query(
-    "SELECT transfer_id, kind FROM plan_version_legs WHERE plan_version_id = $1 ORDER BY position",
-    [row.id],
-  ) as QueryResult;
-  const transfers = await client.query(
-    "SELECT transfer_id, companions FROM plan_version_transfers WHERE plan_version_id = $1 ORDER BY transfer_id",
-    [row.id],
-  ) as QueryResult;
-  return {
-    version: Number(row.version),
-    signature: JSON.stringify({
-      vehicleId: Number(row.vehicle_id),
-      driverId: Number(row.driver_id),
-      band: [String(row.start_time), String(row.end_time)],
-      stops: legs.rows.map((leg) => [Number(leg.transfer_id), String(leg.kind)]),
-      companions: transfers.rows.map((transfer) => [Number(transfer.transfer_id), Number(transfer.companions)]),
-    }),
-  };
+  return row ? { version: Number(row.version), signature: String(row.input_signature) } : null;
 }
 
 type GroupedViolations = { passengerId: number; passengerName: string; violations: { rule: string; transferId: number | null; message: string }[] }[];
@@ -1292,9 +1272,9 @@ export function createApp({ db, routing, router, geocoder, config }: {
       const version = (current?.version ?? 0) + 1;
       const overrideReason = violations.length ? reason : null;
       const inserted = await client.query(
-        `INSERT INTO plan_versions (route_id, version, vehicle_id, driver_id, start_time, end_time, published_by, override_reason, violations)
-         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9) RETURNING id`,
-        [routeId, version, vehicleId, driverId, startTime, endTime, actorId, overrideReason, JSON.stringify(violations)],
+        `INSERT INTO plan_versions (route_id, version, vehicle_id, driver_id, start_time, end_time, published_by, override_reason, violations, input_signature)
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10) RETURNING id`,
+        [routeId, version, vehicleId, driverId, startTime, endTime, actorId, overrideReason, JSON.stringify(violations), expected],
       ) as QueryResult;
       const versionId = Number(inserted.rows[0].id);
       const distances = legs.map((leg) => Math.round(leg.distanceMeters));

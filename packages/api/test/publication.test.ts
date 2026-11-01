@@ -97,11 +97,19 @@ async function setup(name: string) {
       userId, name: `Chofer ${username}`, homeAddress: "Pasaje de Prueba 202", homeLat: -26.85, homeLng: -65.23, usualVehicleId,
     })).driver.id as number;
   };
-  const passenger = async (overrides: Record<string, unknown> = {}, home: Point = H) => (await post("/passengers", {
-    name: `Pasajero Sintético ${name}`, homeAddress: "Calle Inventada 101", homeLat: home.lat, homeLng: home.lng,
-    companions: 1, frontSeat: false, wheelchair: false, maxRideTimeMinutes: 60, pickupDurationMinutes: 5, dropoffDurationMinutes: 5,
-    ...overrides,
-  })).passenger.id as number;
+  // Each Pasajero gets a Consentimiento, which a Traslado needs before it can be assigned to a Recorrido.
+  const passenger = async (overrides: Record<string, unknown> = {}, home: Point = H) => {
+    const id = (await post("/passengers", {
+      name: `Pasajero Sintético ${name}`, homeAddress: "Calle Inventada 101", homeLat: home.lat, homeLng: home.lng,
+      companions: 1, frontSeat: false, wheelchair: false, maxRideTimeMinutes: 60, pickupDurationMinutes: 5, dropoffDurationMinutes: 5,
+      ...overrides,
+    })).passenger.id as number;
+    const signer = (await post(`/passengers/${id}/authorized-adults`, {
+      name: "Madre Sintética", dni: "-1000001", relation: "madre", phone: "381-000-0001", legalGuardian: true,
+    })).adult.id as number;
+    await post(`/passengers/${id}/consent`, { signedByAdultId: signer, signedAt: "2026-10-01", otherAdultAllowed: false });
+    return id;
+  };
   await post("/daily-plans", { date: DAY });
   const route = async (driverId: number, startTime: string, endTime: string, vehicleId?: number) =>
     (await post(`/daily-plans/${DAY}/routes`, { driverId, startTime, endTime, ...(vehicleId ? { vehicleId } : {}) })).route.id as number;
@@ -249,6 +257,34 @@ describe("Publication and Versiones del plan", () => {
     expect(await stored("SELECT route_id, version FROM plan_versions ORDER BY id")).toEqual([
       { route_id: morning, version: 1 }, { route_id: afternoon, version: 1 }, { route_id: morning, version: 2 }, { route_id: afternoon, version: 2 },
     ]);
+  });
+
+  it("republishes from the whole Plan diario a Recorrido whose Pasajero moved home or changed a limit", async () => {
+    const { vehicle, driver, passenger, route, transfer, office, versions } = await setup("regla4-pasajero");
+    const routeId = await route(await driver(await vehicle()), "07:00", "09:00");
+    const input = {
+      name: "Pasajero Sintético regla4-pasajero", homeAddress: "Calle Inventada 101", homeLat: H.lat, homeLng: H.lng,
+      companions: 1, frontSeat: false, wheelchair: false, maxRideTimeMinutes: 60, pickupDurationMinutes: 5, dropoffDurationMinutes: 5,
+    };
+    const passengerId = await passenger();
+    await transfer(passengerId, "08:00", routeId);
+    const publishDay = () => ok(request(`/daily-plans/${DAY}/publish`, "POST", undefined, office), 200);
+    const editPassenger = (changes: Record<string, unknown>) =>
+      ok(request(`/passengers/${passengerId}`, "PATCH", { ...input, ...changes }, office), 200);
+    expect((await publishDay()).published).toEqual([{ routeId, version: 1 }]);
+
+    // A new home moves the Paradas: new legs and a new Distancia directa.
+    await editPassenger({ homeLat: H2.lat, homeLng: H2.lng });
+    expect(await publishDay()).toEqual({ published: [{ routeId, version: 2 }], unchanged: [], failed: [], cascade: [] });
+    const [moved, first] = await versions(routeId);
+    expect(moved.transfers[0].directDistanceMeters).not.toBe(first.transfers[0].directDistanceMeters);
+    // A longer pickup changes the planned times; a shorter ride limit changes what the validator checks.
+    await editPassenger({ homeLat: H2.lat, homeLng: H2.lng, pickupDurationMinutes: 9 });
+    expect((await publishDay()).published).toEqual([{ routeId, version: 3 }]);
+    await editPassenger({ homeLat: H2.lat, homeLng: H2.lng, pickupDurationMinutes: 9, maxRideTimeMinutes: 50 });
+    expect((await publishDay()).published).toEqual([{ routeId, version: 4 }]);
+    // Nothing changed since: it keeps version 4.
+    expect(await publishDay()).toEqual({ published: [], unchanged: [routeId], failed: [], cascade: [] });
   });
 
   it("publishes each Recorrido of the day in its own transaction and summarizes the ones that failed the validator", async () => {

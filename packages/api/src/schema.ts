@@ -252,6 +252,8 @@ export const planVersions = pgTable("plan_versions", {
   publishedBy: integer("published_by").notNull().references(() => users.id, { onDelete: "restrict" }),
   overrideReason: text("override_reason"),
   violations: jsonb().default([]).notNull(),
+  // Hash of everything the publication read about the Recorrido: equal on the next one means nothing changed since.
+  inputSignature: text("input_signature").notNull(),
 }, (table) => [
   uniqueIndex("plan_versions_route_version_unique").on(table.routeId, table.version),
   check("plan_versions_version_positive", sql`${table.version} > 0`),
