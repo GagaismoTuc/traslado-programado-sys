@@ -52,6 +52,23 @@ describe("Autorización puntual", () => {
     });
   });
 
+  it("lets only the Responsable legal who signed the Consentimiento give it, not another adult flagged as a guardian", async () => {
+    const { passengerId, office, record } = await salida("only-current-signer");
+    const { adult } = await answer(request(`/passengers/${passengerId}/authorized-adults`, "POST", {
+      name: "Synthetic second guardian", dni: "-5000001", relation: "family", phone: "381-000-0002", legalGuardian: true,
+    }, office), 201);
+    expect(await answer(record({ legalGuardianId: adult.id }), 409))
+      .toEqual({ error: "Only a Responsable legal of this Pasajero can give an Autorización puntual" });
+    expect(await stored()).toEqual([]);
+
+    // Once the Consentimiento is signed again by that adult, they are the Responsable legal.
+    await answer(request(`/passengers/${passengerId}/consent`, "POST", {
+      signedByAdultId: adult.id, signedAt: "2026-10-02", otherAdultAllowed: false,
+    }, office), 200);
+    expect((await answer(record({ legalGuardianId: adult.id }), 201)).authorization)
+      .toMatchObject({ authorizedBy: { adultId: adult.id, name: "Synthetic second guardian" }, calledPhone: "381-000-0002" });
+  });
+
   it("counts only a call the Oficina makes to the Responsable legal's registered phone", async () => {
     const { record, transferId, guardian, office } = await salida("call");
     expect(await answer(record({ call: "incoming" }), 409))

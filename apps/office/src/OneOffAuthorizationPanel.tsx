@@ -1,7 +1,7 @@
 import { useEffect, useState, type FormEvent } from "react";
 import { readError, redirectUnauthorized, send } from "./api";
 
-type Guardian = { id: number; name: string; phone: string; legalGuardian: boolean };
+type Guardian = { id: number; name: string; phone: string };
 export type OneOffAuthorization = {
   id: number;
   authorizedBy: { adultId: number; name: string };
@@ -22,6 +22,11 @@ export function authorizationBody(values: { legalGuardianId: string; name: strin
   };
 }
 
+/** The Responsable legal is the Adulto autorizado who signed the Consentimiento; without one, nobody can authorise. */
+export function consentSigner(adults: Guardian[], consent: { signedByAdultId: number } | null): Guardian[] {
+  return adults.filter((adult) => adult.id === consent?.signedByAdultId);
+}
+
 export function AuthorizationList({ authorizations, onRevoke }: { authorizations: OneOffAuthorization[]; onRevoke: (id: number) => void }) {
   if (!authorizations.length) return <p>No Autorización puntual on this Traslado.</p>;
   return <ul>{authorizations.map((item) => <li key={item.id}>
@@ -31,7 +36,7 @@ export function AuthorizationList({ authorizations, onRevoke }: { authorizations
 }
 
 /**
- * Autorizaciones puntuales of one salida whose Consentimiento does not allow another adult: the Oficina calls a
+ * Autorizaciones puntuales of one salida whose Consentimiento does not allow another adult: the Oficina calls the
  * Responsable legal on their registered phone and records the one person they authorise.
  */
 export function OneOffAuthorizationPanel({ transferId, passengerId }: { transferId: number; passengerId: number }) {
@@ -40,16 +45,18 @@ export function OneOffAuthorizationPanel({ transferId, passengerId }: { transfer
   const [message, setMessage] = useState("");
 
   async function load() {
-    const [adultsRes, listRes] = await Promise.all([
+    const [adultsRes, consentRes, listRes] = await Promise.all([
       send(`/passengers/${passengerId}/authorized-adults`, "GET"),
+      send(`/passengers/${passengerId}/consent`, "GET"),
       send(`/transfers/${transferId}/authorizations`, "GET"),
     ]);
-    if (await redirectUnauthorized(adultsRes, listRes)) return;
-    if (!adultsRes.ok || !listRes.ok) {
+    if (await redirectUnauthorized(adultsRes, consentRes, listRes)) return;
+    if (!adultsRes.ok || !consentRes.ok || !listRes.ok) {
       setMessage("Unable to load the Autorizaciones puntuales");
       return;
     }
-    setGuardians((await adultsRes.json() as { adults: Guardian[] }).adults.filter((adult) => adult.legalGuardian));
+    const { consent } = await consentRes.json() as { consent: { signedByAdultId: number } | null };
+    setGuardians(consentSigner((await adultsRes.json() as { adults: Guardian[] }).adults, consent));
     setAuthorizations((await listRes.json() as { authorizations: OneOffAuthorization[] }).authorizations);
   }
 

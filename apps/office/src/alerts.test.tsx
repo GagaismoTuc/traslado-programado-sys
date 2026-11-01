@@ -2,7 +2,7 @@ import { renderToStaticMarkup } from "react-dom/server";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { AlertList, ALERT_POLL_MS, startPolling, type Alert } from "./AlertsPage";
 import { App } from "./App";
-import { AuthorizationList, authorizationBody, type OneOffAuthorization } from "./OneOffAuthorizationPanel";
+import { AuthorizationList, authorizationBody, consentSigner, type OneOffAuthorization } from "./OneOffAuthorizationPanel";
 
 afterEach(() => {
   vi.useRealTimers();
@@ -73,6 +73,15 @@ describe("Autorización puntual in the Plan diario", () => {
     expect(authorizationBody({ legalGuardianId: "7", name: "Tía Sintética", dni: "-3000001", calledRegisteredPhone: true }))
       .toEqual({ legalGuardianId: 7, call: "outgoing", name: "Tía Sintética", dni: "-3000001" });
     expect(authorizationBody({ legalGuardianId: "7", name: "Tía Sintética", dni: "-3000001", calledRegisteredPhone: false }).call).toBe("incoming");
+  });
+
+  it("offers as Responsable legal only the adult who signed the Consentimiento", () => {
+    const adults = [
+      { id: 7, name: "Madre Sintética", phone: "381-000-0001" },
+      { id: 8, name: "Padre Sintético", phone: "381-000-0002" },
+    ];
+    expect(consentSigner(adults, { signedByAdultId: 8 })).toEqual([{ id: 8, name: "Padre Sintético", phone: "381-000-0002" }]);
+    expect(consentSigner(adults, null)).toEqual([]);
   });
 
   it("offers to revoke only an Autorización puntual still unused", () => {

@@ -3832,7 +3832,7 @@ export function createApp({ db, routing, router, geocoder, solver, travelTime, c
       const result = await db.query(`${AUTHORIZATION_SELECT_SQL} WHERE oa.transfer_id = $1 ORDER BY oa.id`, [id]) as QueryResult;
       return context.json({ authorizations: result.rows.map(formatAuthorization) });
     })
-    // Records an Autorización puntual on a salida: only a Responsable legal of the Pasajero gives it, on a call the Oficina makes.
+    // Records an Autorización puntual on a salida: only the Responsable legal who signed the Consentimiento gives it, on a call the Oficina makes.
     .post("/transfers/:id/authorizations", async (context) => {
       const actor = await requireOffice(context);
       if (actor instanceof Response) return actor;
@@ -3853,15 +3853,21 @@ export function createApp({ db, routing, router, geocoder, solver, travelTime, c
           if (CLOSED_TRANSFER_STATUSES.includes(String(transfer.status))) {
             throw new PlanningError(409, "The Traslado is closed: an Autorización puntual expires when its Traslado closes");
           }
-          const consent = await client.query("SELECT other_adult_allowed FROM consents WHERE passenger_id = $1", [transfer.passenger_id]) as QueryResult;
-          if (consent.rows[0]?.other_adult_allowed === true) {
+          // FOR SHARE keeps the Consentimiento from changing signer before this commits.
+          const consent = (await client.query(
+            "SELECT other_adult_allowed, signed_by_adult_id FROM consents WHERE passenger_id = $1 FOR SHARE",
+            [transfer.passenger_id],
+          ) as QueryResult).rows[0];
+          if (consent?.other_adult_allowed === true) {
             throw new PlanningError(409, "The Consentimiento already allows another adult: no Autorización puntual is needed");
           }
+          // The Responsable legal is the Adulto autorizado who signed the Consentimiento, not any adult flagged as a guardian.
           const guardian = (await client.query(
-            "SELECT passenger_id, phone, legal_guardian FROM authorized_adults WHERE id = $1 AND removed_at IS NULL FOR SHARE",
+            "SELECT passenger_id, phone FROM authorized_adults WHERE id = $1 AND removed_at IS NULL FOR SHARE",
             [fields.legalGuardianId],
           ) as QueryResult).rows[0];
-          if (!guardian || Number(guardian.passenger_id) !== Number(transfer.passenger_id) || guardian.legal_guardian !== true) {
+          if (!guardian || Number(guardian.passenger_id) !== Number(transfer.passenger_id)
+            || Number(consent?.signed_by_adult_id) !== fields.legalGuardianId) {
             throw new PlanningError(409, "Only a Responsable legal of this Pasajero can give an Autorización puntual");
           }
           if (fields.call !== "outgoing") {
