@@ -156,6 +156,7 @@ export function PlanPage() {
   const [refusal, setRefusal] = useState<Refusal | null>(null);
   const [cascade, setCascade] = useState<CascadeWarning[]>([]);
   const [summary, setSummary] = useState<DaySummary | null>(null);
+  const [publishing, setPublishing] = useState(false);
   const selectedDate = useRef(date);
   selectedDate.current = date;
   const latestLoad = useRef(0);
@@ -195,7 +196,13 @@ export function PlanPage() {
     }
   }
 
-  useEffect(() => { void load(date); }, [date]);
+  useEffect(() => {
+    // Publication results belong to the day they were made for.
+    setRefusal(null);
+    setCascade([]);
+    setSummary(null);
+    void load(date);
+  }, [date]);
 
   async function write(path: string, method: string, body: unknown, done: string) {
     try {
@@ -211,18 +218,22 @@ export function PlanPage() {
   }
 
   // A refusal with violations stays under its Recorrido so the planner can fix it or force it with a reason.
+  // Each publication is a new version, so the buttons stay disabled while one is pending; an answer for another day is dropped.
   async function publishRoute(routeId: number, overrideReason?: string) {
+    const forDate = selectedDate.current;
+    setPublishing(true);
     try {
       const response = await send(`/routes/${routeId}/publish`, "POST", overrideReason === undefined ? {} : { overrideReason });
       if (await redirectUnauthorized(response)) return false;
       const result = await response.json().catch(() => null) as
         { version?: { version: number }; cascade?: CascadeWarning[]; error?: string; violations?: PassengerViolations[] } | null;
+      if (forDate !== selectedDate.current) return false;
       setSummary(null);
       if (response.ok && result?.version) {
         setRefusal(null);
         setCascade(result.cascade ?? []);
-        setMessage(response.status === 201 ? `Published as version ${result.version.version}` : `Unchanged: still version ${result.version.version}`);
-        await load(selectedDate.current);
+        setMessage(`Published as version ${result.version.version}`);
+        await load(forDate);
         return true;
       }
       setCascade([]);
@@ -231,25 +242,34 @@ export function PlanPage() {
       setMessage(error);
     } catch {
       setMessage("Unable to reach the server");
+    } finally {
+      setPublishing(false);
     }
     return false;
   }
 
   async function publishDay() {
+    const forDate = selectedDate.current;
+    setPublishing(true);
     try {
-      const response = await send(`/daily-plans/${date}/publish`, "POST");
+      const response = await send(`/daily-plans/${forDate}/publish`, "POST");
       if (await redirectUnauthorized(response)) return;
-      if (!response.ok) {
-        setMessage(await readError(response, "Unable to publish the plan"));
+      const result = response.ok ? await response.json() as DaySummary : null;
+      const error = result ? "" : await readError(response, "Unable to publish the plan");
+      if (forDate !== selectedDate.current) return;
+      if (!result) {
+        setMessage(error);
         return;
       }
       setRefusal(null);
       setCascade([]);
-      setSummary(await response.json() as DaySummary);
+      setSummary(result);
       setMessage("Plan diario published");
-      await load(selectedDate.current);
+      await load(forDate);
     } catch {
       setMessage("Unable to reach the server");
+    } finally {
+      setPublishing(false);
     }
   }
 
@@ -398,17 +418,17 @@ export function PlanPage() {
             <button type="button" disabled={index === route.stops.length - 1} onClick={() => moveStop(route, index, 1)}>Down</button>
           </div>
         </li>)}</ol>
-        <button type="button" onClick={() => void publishRoute(route.id)}>Publish</button>
+        <button type="button" disabled={publishing} onClick={() => void publishRoute(route.id)}>Publish</button>
         {refusal?.routeId === route.id && <div>
           <p>{refusal.error}</p>
           <ViolationList violations={refusal.violations} />
           {canForce(refusal.violations) && <form onSubmit={forceRoute(route.id)}>
             <label>Reason to publish anyway<input name="overrideReason" required maxLength={1000} /></label>
-            <button type="submit">Publish anyway</button>
+            <button type="submit" disabled={publishing}>Publish anyway</button>
           </form>}
         </div>}
       </li>)}</ul>
-      <button type="button" onClick={() => void publishDay()}>Publish the whole plan</button>
+      <button type="button" disabled={publishing} onClick={() => void publishDay()}>Publish the whole plan</button>
       {summary && <DaySummaryView summary={summary} routes={routes} />}
 
       <form onSubmit={addRoute}>

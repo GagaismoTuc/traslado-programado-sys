@@ -200,7 +200,7 @@ describe("Publication and Versiones del plan", () => {
     expect(await stored("SELECT status FROM routes")).toEqual([{ status: "borrador" }]);
   });
 
-  it("never edits a published version: a change publishes the next version, an unchanged Recorrido keeps its version", async () => {
+  it("never edits a published version: a change publishes the next version, and so does each later publication", async () => {
     const { vehicle, driver, passenger, route, transfer, publish, versions, day } = await setup("regla3");
     const recorrido = await route(await driver(await vehicle()), "07:00", "09:00");
     await transfer(await passenger(), "08:00", recorrido);
@@ -221,10 +221,11 @@ describe("Publication and Versiones del plan", () => {
     expect(await versions(recorrido)).toEqual([first, second.version]);
     expect((await day()).routes[0]).toMatchObject({ status: "publicado", version: 2 });
 
-    const again = await ok(publish(recorrido), 200);
-    expect(again).toEqual({ version: second.version, cascade: [] });
-    expect(await stored("SELECT version FROM plan_versions ORDER BY version")).toEqual([{ version: 1 }, { version: 2 }]);
-    expect(await stored("SELECT id FROM change_log WHERE action = 'published'")).toHaveLength(2);
+    const again = await ok(publish(recorrido));
+    expect(again.version).toMatchObject({ version: 3, legs: second.version.legs, transfers: second.version.transfers });
+    expect(await versions(recorrido)).toEqual([first, second.version, again.version]);
+    expect(await stored("SELECT version FROM plan_versions ORDER BY version")).toEqual([{ version: 1 }, { version: 2 }, { version: 3 }]);
+    expect(await stored("SELECT id FROM change_log WHERE action = 'published'")).toHaveLength(3);
   });
 
   it("publishes the whole Plan diario the evening before; morning and 15:00 changes are new versions of the affected Recorridos", async () => {

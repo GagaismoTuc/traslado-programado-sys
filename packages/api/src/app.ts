@@ -1159,13 +1159,14 @@ export function createApp({ db, routing, router, geocoder, config }: {
   }
   /**
    * Publishes the Recorrido as its next Versión del plan. It reads the Recorrido and asks OSRM outside the transaction,
-   * then publishes only if the Recorrido did not change meanwhile. Publishing it unchanged returns its latest version.
+   * then publishes only if nothing it read changed meanwhile. With `onlyIfChanged` (the whole Plan diario), a Recorrido
+   * equal to its latest version keeps that version instead of getting a new one.
    */
-  async function publishRoute(actorId: number, routeId: number, reason: string | null) {
+  async function publishRoute(actorId: number, routeId: number, reason: string | null, onlyIfChanged = false) {
     const before = await loadPublicationSnapshot(db, routeId);
     if (!before.stops.length) throw new PlanningError(409, "A Recorrido without Paradas cannot be published");
     const expected = publicationSignature(before);
-    const latest = await latestVersionSignature(db, routeId);
+    const latest = onlyIfChanged ? await latestVersionSignature(db, routeId) : null;
     if (latest?.signature === expected) {
       const [version] = await loadPlanVersions(db, "pv.route_id = $1 AND pv.version = $2", [routeId, latest.version]);
       return { created: false, version, cascade: [] as CascadeWarning[] };
@@ -1183,11 +1184,12 @@ export function createApp({ db, routing, router, geocoder, config }: {
     const published = await inTransaction(db, async (client) => {
       await lockRoute(client, routeId);
       const snapshot = await loadPublicationSnapshot(client, routeId);
-      if (publicationSignature(snapshot) !== expected) {
+      // Places, limits and order must be what OSRM was asked about.
+      if (JSON.stringify(snapshot) !== JSON.stringify(before)) {
         throw new PlanningError(409, "The Recorrido changed while it was being published: publish it again");
       }
       const current = await latestVersionSignature(client, routeId);
-      if (current?.signature === expected) return { created: false, version: current.version };
+      if (onlyIfChanged && current?.signature === expected) return { created: false, version: current.version };
       const { dailyPlanId, driverId, vehicleId, startTime, endTime, status } = snapshot.route;
       // Every publication locks the Chofer, then the Vehículo, so two of them cannot deadlock or both pass the overlap check.
       await client.query("SELECT id FROM drivers WHERE id = $1 FOR UPDATE", [driverId]);
@@ -2333,7 +2335,8 @@ export function createApp({ db, routing, router, geocoder, config }: {
         return planningFailure(context, error);
       }
     })
-    // Publishes one Recorrido; with violations only a non-empty overrideReason forces it (never for a Traslado unserved).
+    // Publishes one Recorrido as a new version each time; with violations only a non-empty overrideReason forces it
+    // (never for a Traslado unserved).
     .post("/routes/:id/publish", async (context) => {
       const actor = await requireOffice(context);
       if (actor instanceof Response) return actor;
@@ -2345,7 +2348,7 @@ export function createApp({ db, routing, router, geocoder, config }: {
       }
       try {
         const result = await publishRoute(actor.id, id, reason?.trim() || null);
-        return context.json({ version: result.version, cascade: result.cascade }, result.created ? 201 : 200);
+        return context.json({ version: result.version, cascade: result.cascade }, 201);
       } catch (error) {
         return planningFailure(context, error);
       }
@@ -2377,7 +2380,7 @@ export function createApp({ db, routing, router, geocoder, config }: {
         for (const row of routes.rows) {
           const routeId = Number(row.id);
           try {
-            const result = await publishRoute(actor.id, routeId, null);
+            const result = await publishRoute(actor.id, routeId, null, true);
             if (result.created) summary.published.push({ routeId, version: result.version.version });
             else summary.unchanged.push(routeId);
             summary.cascade.push(...result.cascade);
