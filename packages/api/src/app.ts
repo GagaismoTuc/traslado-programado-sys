@@ -825,7 +825,7 @@ const ORDER_TRANSFERS_SQL = `
          p.home_latitude, p.home_longitude, p.front_seat, p.max_ride_time_minutes, p.pickup_duration_minutes,
          p.dropoff_duration_minutes, d.latitude AS d_lat, d.longitude AS d_lng, d.arrival_tolerance_minutes,
          o.latitude AS o_lat, o.longitude AS o_lng,
-         ARRAY(SELECT feature_id FROM passenger_required_features f WHERE f.passenger_id = p.id) AS feature_ids
+         ARRAY(SELECT feature_id FROM passenger_required_features f WHERE f.passenger_id = p.id ORDER BY feature_id) AS feature_ids
     FROM stops s
     JOIN transfers t ON t.id = s.transfer_id
     JOIN passengers p ON p.id = t.passenger_id
