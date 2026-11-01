@@ -1,6 +1,6 @@
 import { sql } from "drizzle-orm";
 import {
-  type AnyPgColumn, boolean, check, date, doublePrecision, foreignKey, integer, jsonb, pgTable, primaryKey, text, time, timestamp, unique, uniqueIndex, uuid,
+  type AnyPgColumn, boolean, check, date, doublePrecision, foreignKey, index, integer, jsonb, pgTable, primaryKey, text, time, timestamp, unique, uniqueIndex, uuid,
 } from "drizzle-orm/pg-core";
 
 export const foundationPermissionProbe = pgTable("foundation_permission_probe", {
@@ -387,8 +387,8 @@ export const marks = pgTable("marks", {
   flags: jsonb().default([]).notNull(),
 }, (table) => [
   uniqueIndex("marks_client_id_unique").on(table.clientId),
-  // A Marca is replaced at most once; a later Corrección replaces the Corrección.
-  uniqueIndex("marks_corrects_mark_id_unique").on(table.correctsMarkId),
+  // A later Corrección replaces the Corrección; once the one that replaced a Marca is undone, the Marca can be corrected again.
+  index("marks_corrects_mark_id_index").on(table.correctsMarkId),
   check("marks_kind_check", sql`${table.kind} IN ('subio', 'ausente', 'entregado', 'undo')`),
   check("marks_undo_check", sql`${table.kind} <> 'undo' OR ${table.correctsMarkId} IS NOT NULL`),
   // Only a Corrección carries a reason, and one without a Chofer is the Oficina's, which always has one.

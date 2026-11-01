@@ -41,7 +41,7 @@ describe("Correcciones", () => {
     await answer(mark(driver.cookie, routeId, entregado), 201);
     expect(await transferStatus(transferId)).toBe("entregado");
 
-    // Undoing Entregado goes back to Subió; undoing that Subió goes back to Planificado.
+    // Undoing Entregado goes back to Subió; undoing that Subió goes back to the Ausente it replaced.
     at("12:01:30");
     const undoEntregado = markBody(transferId, "undo", { corrects: entregado.id });
     const undone = await answer(mark(driver.cookie, routeId, undoEntregado), 201);
@@ -49,7 +49,7 @@ describe("Correcciones", () => {
     expect(await transferStatus(transferId)).toBe("subio");
     at("12:02:00");
     await answer(mark(driver.cookie, routeId, markBody(transferId, "undo", { corrects: subio.id })), 201);
-    expect(await transferStatus(transferId)).toBe("planificado");
+    expect(await transferStatus(transferId)).toBe("ausente");
 
     expect((await rows(
       `SELECT m.kind, c.client_id AS corrects FROM marks m LEFT JOIN marks c ON c.id = m.corrects_mark_id WHERE m.transfer_id = $1 ORDER BY m.id`,
@@ -151,7 +151,42 @@ describe("Correcciones", () => {
 
     expect(await markRow(subio.id)).toEqual(original);
     expect(await markRow(ausente.id)).toEqual(correction);
-    expect(await transferStatus(transferId)).toBe("planificado");
+    expect(await transferStatus(transferId)).toBe("subio");
+  });
+
+  it("undoing a corrected Marca restores the state it replaced", async () => {
+    const { passenger, served } = await setup("undo-chain");
+    const { passengerId } = await passenger();
+    const { driver, routeId, transferId } = await served(passengerId, "entrada");
+    const original = markBody(transferId, "ausente");
+    await answer(mark(driver.cookie, routeId, original), 201);
+    at("12:30:00");
+    const corrected = markBody(transferId, "subio", { corrects: original.id, phoneTime: "2026-10-23T12:02:00.000Z" });
+    await answer(mark(driver.cookie, routeId, corrected), 201);
+    at("12:40:00");
+    const undo = markBody(transferId, "undo", { corrects: corrected.id, phoneTime: "2026-10-23T12:04:00.000Z" });
+    await answer(mark(driver.cookie, routeId, undo), 201);
+    expect(await transferStatus(transferId)).toBe("ausente");
+  });
+
+  it("lets the Oficina correct a Marca again once the Corrección that replaced it is undone", async () => {
+    const { office, passenger, served } = await setup("recorrect");
+    const { passengerId } = await passenger();
+    const { driver, routeId, transferId } = await served(passengerId, "entrada");
+    const ausente = markBody(transferId, "ausente");
+    await answer(mark(driver.cookie, routeId, ausente), 201);
+    at("12:01:00");
+    const subio = markBody(transferId, "subio", { corrects: ausente.id });
+    await answer(mark(driver.cookie, routeId, subio), 201);
+    at("12:01:30");
+    await answer(mark(driver.cookie, routeId, markBody(transferId, "undo", { corrects: subio.id })), 201);
+    expect(await transferStatus(transferId)).toBe("ausente");
+
+    at("12:30:00");
+    const corrected = await answer(request(`/marks/${ausente.id}/corrections`, "POST", { kind: "subio", reason: "La escuela confirmó que viajó" }, office), 201);
+    expect(corrected.mark).toMatchObject({ kind: "subio", corrects: ausente.id });
+    expect(await transferStatus(transferId)).toBe("subio");
+    expect(await rows("SELECT client_id FROM marks WHERE transfer_id = $1", [transferId])).toHaveLength(4);
   });
 
   it("shows the Oficina a Traslado's planned times per version, its Marcas and Correcciones and the changes with their actors", async () => {

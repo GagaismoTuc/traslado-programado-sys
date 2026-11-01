@@ -1624,7 +1624,10 @@ const CHOFER_CORRECTION_WINDOW_MS = 2 * 60 * 1000;
 const CALL_THE_OFFICE_TO_CORRECT = "More than 2 minutes have passed since this Marca: call the Oficina to correct it";
 const REASON_REQUIRED = "A Corrección by the Oficina requires a reason";
 // A Marca in force: not an undo and not replaced by a Corrección. The Traslado's state is its latest one in force.
-const MARK_IN_FORCE_SQL = `e.kind <> 'undo' AND NOT EXISTS (SELECT 1 FROM marks c WHERE c.corrects_mark_id = e.id)`;
+// A Marca is in force unless it is an undo or a Corrección replaced it: an undo, or a corrected outcome nobody undid. Undoing
+// a Corrección so puts back the Marca it replaced.
+const MARK_IN_FORCE_SQL = `e.kind <> 'undo' AND NOT EXISTS (SELECT 1 FROM marks c WHERE c.corrects_mark_id = e.id
+  AND (c.kind = 'undo' OR NOT EXISTS (SELECT 1 FROM marks u WHERE u.corrects_mark_id = c.id AND u.kind = 'undo')))`;
 const UUID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 const RECEIVER_REQUIRED = "Entregado requires a Receptor";
 // A Traslado in one of these states is closed: an Autorización puntual on it has expired.
@@ -2010,7 +2013,8 @@ export function createApp({ db, routing, router, geocoder, solver, travelTime, c
     if (!inserted.rows[0]) return await resend((await stored())!);
     const markId = Number(inserted.rows[0].id);
     // The Traslado follows its Marca in force with the latest phone time, so one that arrives late does not undo a newer
-    // one. With none left (every Marca undone) it is back where it was before the first: Planificado, or cancelled.
+    // one. With none left (every Marca undone) it is back where it was before the first: Planificado, or cancelled. Undoing a
+    // Corrección puts back the state of the Marca it replaced.
     await client.query(
       `UPDATE transfers t SET status = COALESCE(
          (SELECT e.kind FROM marks e WHERE e.transfer_id = $1 AND ${MARK_IN_FORCE_SQL} ORDER BY e.phone_time DESC, e.id DESC LIMIT 1),
@@ -4029,7 +4033,7 @@ export function createApp({ db, routing, router, geocoder, solver, travelTime, c
           WHERE pvt.transfer_id = $1 ORDER BY pv.published_at, pv.id`,
         [id],
       ) as QueryResult;
-      const marks = await db.query(`${MARK_SELECT_SQL} WHERE m.transfer_id = $1 ORDER BY m.server_time, m.id`, [id]) as QueryResult;
+      const marks = await db.query(`${MARK_SELECT_SQL} WHERE m.transfer_id = $1 ORDER BY m.id`, [id]) as QueryResult;
       const changes = await db.query(
         `SELECT cl.action, cl.before_data, cl.after_data, cl.occurred_at, cl.actor_user_id, cl.actor_label, u.username
            FROM change_log cl LEFT JOIN users u ON u.id = cl.actor_user_id

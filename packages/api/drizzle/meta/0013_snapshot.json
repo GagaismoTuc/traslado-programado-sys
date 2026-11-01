@@ -1,5 +1,5 @@
 {
-  "id": "b3176be2-6e4c-4717-b119-a8b2958c7b1d",
+  "id": "7c74b70f-008b-4c51-a826-4cf2f84007ca",
   "prevId": "539d4922-e91e-4a98-9dee-9abb21df085b",
   "version": "7",
   "dialect": "postgresql",
@@ -1131,8 +1131,8 @@
           "method": "btree",
           "with": {}
         },
-        "marks_corrects_mark_id_unique": {
-          "name": "marks_corrects_mark_id_unique",
+        "marks_corrects_mark_id_index": {
+          "name": "marks_corrects_mark_id_index",
           "columns": [
             {
               "expression": "corrects_mark_id",
@@ -1141,7 +1141,7 @@
               "nulls": "last"
             }
           ],
-          "isUnique": true,
+          "isUnique": false,
           "concurrently": false,
           "method": "btree",
           "with": {}
