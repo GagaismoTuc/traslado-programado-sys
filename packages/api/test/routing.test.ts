@@ -223,6 +223,37 @@ describe("routing infrastructure", () => {
     }
   });
 
+  it("C2 on-board case: a child on board is a drop-off-only job of this Vehículo, by actual Subió + Tiempo máximo a bordo − margin", async () => {
+    const settings: PlannerSettings = { rideTimeBufferMinutes: 5, speedFactors: [], earlyToleranceMinutes: 15 };
+    // Subió at 13:10 at the school with one Acompañante: both seats of the Vehículo are taken until the drop-off.
+    const onBoard: PlanTransfer = {
+      id: 1, direction: "salida", targetMinutes: 13 * 60, boardedMinutes: 13 * 60 + 10, pickup: [-65.2, -26.82], dropoff: [-65.22, -26.82],
+      seats: 2, frontSeat: false, requiredFeatureIds: [], maxRideMinutes: 30, pickupMinutes: 2, dropoffMinutes: 3,
+    };
+    const waiting: PlanTransfer = {
+      id: 2, direction: "salida", targetMinutes: 13 * 60 + 15, pickup: [-65.21, -26.83], dropoff: [-65.2, -26.84],
+      seats: 1, frontSeat: false, requiredFeatureIds: [], maxRideMinutes: 60, pickupMinutes: 2, dropoffMinutes: 3,
+    };
+    const input: PlanInput = {
+      transfers: [onBoard, waiting], vehicle: { seats: 2, featureIds: [] }, start: [-65.2, -26.82], end: null,
+      startMinutes: 13 * 60 + 12, notBeforeMinutes: 13 * 60 + 12,
+    };
+    const solve = createVroomSolver({ vroomUrl: stack.vroomUrl });
+    const result = await planRoute(input, settings, solve);
+    expect(result.unassigned).toEqual([]);
+    expect(result.stops.filter((stop) => stop.transferId === 1).map((stop) => stop.kind)).toEqual(["dropoff"]);
+    const dropoff = result.stops.findIndex((stop) => stop.transferId === 1);
+    // Subió 13:10 + 30 min − 5 min margin, less the 3 min drop-off service: the drop-off starts by 13:32.
+    expect(result.stops[dropoff].plannedSeconds).toBeLessThanOrEqual((13 * 60 + 32) * 60);
+    expect(dropoff).toBeLessThan(result.stops.findIndex((stop) => stop.transferId === 2 && stop.kind === "pickup"));
+
+    // Subió long ago: the bound has passed, and the child still stays in this Vehículo, dropped off first.
+    const late = await planRoute({ ...input, transfers: [{ ...onBoard, boardedMinutes: 12 * 60 }, waiting] }, settings, solve);
+    expect(late.unassigned).toEqual([]);
+    expect(late.stops[0]).toMatchObject({ transferId: 1, kind: "dropoff" });
+    expect(late.stops.filter((stop) => stop.transferId === 1)).toHaveLength(1);
+  });
+
   it("reports unavailable when VROOM does not answer", async () => {
     const routing = createRoutingHealth({ osrmUrl: stack.osrmUrl, vroomUrl: deadUrl });
     const response = await createApp({ db: appPool, routing, config: { serverEpoch: "vroom-down" } }).request("/health");
