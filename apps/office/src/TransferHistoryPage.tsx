@@ -26,11 +26,17 @@ export type TransferHistory = {
 const KINDS: Record<HistoryMark["kind"], string> = { subio: "Subió", ausente: "Ausente", entregado: "Entregado", undo: "Undo" };
 const when = new Intl.DateTimeFormat("en-GB", { timeZone: "America/Argentina/Tucuman", dateStyle: "short", timeStyle: "medium" });
 
-/** The Marca the Traslado follows now: the latest by phone time that is not an undo and that no Corrección replaced. */
+/**
+ * The Marca the Traslado follows now, as the server picks it: the latest by phone time, then the last stored (the history
+ * lists the Marcas in the order the server stored them), that is not an undo and that no Corrección replaced. A Corrección
+ * that was undone no longer replaces the Marca it corrected.
+ */
 export function markInForce(marks: HistoryMark[]) {
-  const replaced = new Set(marks.map((mark) => mark.corrects).filter(Boolean));
-  return marks.filter((mark) => mark.kind !== "undo" && !replaced.has(mark.id))
-    .sort((a, b) => b.phoneTime.localeCompare(a.phoneTime))[0] ?? null;
+  const undone = new Set(marks.filter((mark) => mark.kind === "undo").map((mark) => mark.corrects));
+  const replaced = new Set(marks.filter((mark) => mark.kind === "undo" || !undone.has(mark.id)).map((mark) => mark.corrects).filter(Boolean));
+  return marks.map((mark, stored) => ({ mark, stored }))
+    .filter(({ mark }) => mark.kind !== "undo" && !replaced.has(mark.id))
+    .sort((a, b) => b.mark.phoneTime.localeCompare(a.mark.phoneTime) || b.stored - a.stored)[0]?.mark ?? null;
 }
 
 function markLine(mark: HistoryMark) {

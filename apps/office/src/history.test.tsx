@@ -52,4 +52,16 @@ describe("Traslado history", () => {
     expect(markup).toContain('<textarea name="reason" required="" maxLength="1000"></textarea>');
     expect(renderToStaticMarkup(<TransferHistoryView history={{ ...history, marks: [] }} onCorrect={() => undefined} />)).not.toContain("Record Corrección");
   });
+
+  it("selects the newer in-force Marca when phone timestamps tie", () => {
+    const phoneTime = "2026-10-23T12:00:00.000Z";
+    const older = mark("00000000-0000-4000-8000-000000000001", "subio", phoneTime, { serverTime: "2026-10-23T12:00:01.000Z" });
+    const latest = mark("00000000-0000-4000-8000-000000000002", "subio", phoneTime, { serverTime: "2026-10-23T12:00:02.000Z" });
+    expect(markInForce([older, latest])).toBe(latest);
+  });
+
+  it("puts back in force the Marca a Corrección replaced when that Corrección is undone", () => {
+    const undo = mark("00000000-0000-4000-8000-000000000005", "undo", "2026-10-23T12:02:00.000Z", { corrects: ausente.id });
+    expect(markInForce([subio, ausente, undo])).toBe(subio);
+  });
 });
