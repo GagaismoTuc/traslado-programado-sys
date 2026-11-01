@@ -29,6 +29,8 @@ export type PlanTransfer = {
   maxRideMinutes: number;
   pickupMinutes: number;
   dropoffMinutes: number;
+  // A Pasajero already on board since this minute (their actual Subió): only the drop-off is left, in this Vehículo.
+  boardedMinutes?: number;
 };
 
 export type PlanInput = {
@@ -106,6 +108,19 @@ export function stepWindows(transfer: PlanTransfer, settings: PlannerSettings): 
   return { pickup: [target, latestDropoff], dropoff: [target, latestDropoff] };
 }
 
+/**
+ * Window of an on-board Pasajero's drop-off: the ride counts from the actual Subió, so the drop-off starts by
+ * Subió + R' − drop-off service; an entrada also arrives between T − early tolerance and T. Null when it no longer fits.
+ */
+export function boardedWindow(transfer: PlanTransfer, settings: PlannerSettings): Window | null {
+  const latest = (transfer.boardedMinutes! + transfer.maxRideMinutes - settings.rideTimeBufferMinutes - transfer.dropoffMinutes) * 60;
+  const target = transfer.targetMinutes * 60;
+  const window: Window = transfer.direction === "entrada"
+    ? [Math.max(0, target - settings.earlyToleranceMinutes * 60), Math.min(target, latest)]
+    : [transfer.boardedMinutes! * 60, latest];
+  return window[0] <= window[1] ? window : null;
+}
+
 function localReason(transfer: PlanTransfer, input: PlanInput, settings: PlannerSettings): UnassignedReason | null {
   const features = new Set(input.vehicle.featureIds);
   if (transfer.requiredFeatureIds.some((feature) => !features.has(feature))) return "adaptation";
@@ -115,6 +130,8 @@ function localReason(transfer: PlanTransfer, input: PlanInput, settings: Planner
 }
 
 export function buildProblem(input: PlanInput, settings: PlannerSettings, transfers = input.transfers, relaxed = false): VroomProblem {
+  const shipments = transfers.filter((transfer) => transfer.boardedMinutes === undefined);
+  const boarded = transfers.filter((transfer) => transfer.boardedMinutes !== undefined);
   return {
     vehicles: [{
       id: 1,
@@ -126,7 +143,18 @@ export function buildProblem(input: PlanInput, settings: PlannerSettings, transf
       speed_factor: speedFactorAt(settings.speedFactors, input.startMinutes),
       costs: VEHICLE_COSTS,
     }],
-    shipments: transfers.map((transfer) => {
+    // An on-board Pasajero is a job with a delivery: VROOM loads it at the start, in this one Vehículo only.
+    ...(boarded.length ? {
+      jobs: boarded.map((transfer) => ({
+        id: transfer.id,
+        location: transfer.dropoff,
+        service: transfer.dropoffMinutes * 60,
+        delivery: [transfer.seats, transfer.frontSeat ? 1 : 0],
+        time_windows: [boardedWindow(transfer, settings)!],
+        priority: 100,
+      })),
+    } : {}),
+    shipments: shipments.map((transfer) => {
       const windows = stepWindows(transfer, settings)!;
       return {
         amount: [transfer.seats, transfer.frontSeat ? 1 : 0],
@@ -144,7 +172,7 @@ export function readSolution(solution: VroomSolution): PlannedStop[] {
   const stops: PlannedStop[] = [];
   let previousDistance: number | undefined = steps[0]?.type === "start" ? steps[0].distance : 0;
   for (const step of steps) {
-    if (step.type !== "pickup" && step.type !== "delivery") continue;
+    if (step.type !== "pickup" && step.type !== "delivery" && step.type !== "job") continue;
     const legDistanceMeters = step.distance === undefined || previousDistance === undefined ? null : step.distance - previousDistance;
     previousDistance = step.distance;
     stops.push({
@@ -159,21 +187,31 @@ export function readSolution(solution: VroomSolution): PlannedStop[] {
 
 /**
  * Orders one Recorrido. Every input Traslado ends up in `stops` or in `unassigned`, never dropped;
- * the engine never adds a Vehículo or splits the Recorrido.
+ * the engine never adds a Vehículo or splits the Recorrido. An on-board Pasajero is never unassigned: when their
+ * drop-off no longer fits its window it goes first, at the start time, and the validator reports the ride.
  */
 export async function planRoute(input: PlanInput, settings: PlannerSettings, solve: VroomSolver): Promise<PlanResult> {
   const unassigned: PlanResult["unassigned"] = [];
   const candidates: PlanTransfer[] = [];
+  const late: PlanTransfer[] = [];
   for (const transfer of input.transfers) {
+    if (transfer.boardedMinutes !== undefined) {
+      (boardedWindow(transfer, settings) ? candidates : late).push(transfer);
+      continue;
+    }
     const reason = localReason(transfer, input, settings);
     if (reason) unassigned.push({ transferId: transfer.id, reason });
     else candidates.push(transfer);
   }
-  if (!candidates.length) return { stops: [], unassigned };
-
-  const stops = readSolution(await solve(buildProblem(input, settings, candidates)));
-  const placed = new Set(stops.map((stop) => stop.transferId));
-  const left = candidates.filter((transfer) => !placed.has(transfer.id));
+  const solved = candidates.length ? readSolution(await solve(buildProblem(input, settings, candidates))) : [];
+  const placed = new Set(solved.map((stop) => stop.transferId));
+  late.push(...candidates.filter((transfer) => transfer.boardedMinutes !== undefined && !placed.has(transfer.id)));
+  const startSeconds = (input.notBeforeMinutes ?? input.startMinutes) * 60;
+  const stops: PlannedStop[] = [
+    ...late.map((transfer) => ({ transferId: transfer.id, kind: "dropoff" as const, plannedSeconds: startSeconds, legDistanceMeters: null })),
+    ...solved,
+  ];
+  const left = candidates.filter((transfer) => transfer.boardedMinutes === undefined && !placed.has(transfer.id));
   if (left.length) {
     // With seats unlimited, what still does not fit is out because of its time window.
     const relaxed = readSolution(await solve(buildProblem(input, settings, candidates, true)));
