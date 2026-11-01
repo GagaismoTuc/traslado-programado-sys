@@ -66,6 +66,18 @@ describe("Oficina alert inbox", () => {
       + "<ul><li>11:00 entrada, Terapia Sintética → Escuela Sintética</li><li>13:00 salida, Escuela Sintética → home</li></ul>");
     expect(renderToStaticMarkup(<AlertList alerts={[alert("absent_on_entrada", { remaining: [] })]} />)).toContain("No other Traslados today.");
   });
+
+  it("lists the Traslados still open when a Chofer could not close a Recorrido", () => {
+    expect(renderToStaticMarkup(<AlertList alerts={[alert("close_refused", {
+      transfers: [
+        { transferId: 3, passengerName: "Pasajero Sintético", direction: "salida", status: "subio" },
+        { transferId: 4, passengerName: "Pasajera Sintética", direction: "entrada", status: "planificado" },
+      ],
+    }, { transferId: null, markId: null, passengerName: null })]} />)).toBe(
+      "<ul><li><time dateTime=\"2026-10-23T12:00:00.000Z\">09:00</time> Chofer Sintético tried to close Recorrido 9 with Traslados still open:"
+      + "<ul><li>Pasajero Sintético: on board without Entregado</li><li>Pasajera Sintética: not marked</li></ul></li></ul>",
+    );
+  });
 });
 
 describe("Autorización puntual in the Plan diario", () => {

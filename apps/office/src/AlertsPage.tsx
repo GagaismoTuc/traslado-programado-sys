@@ -39,13 +39,15 @@ const REASONS: Record<string, string> = {
   authorization_revoked: "the Autorización puntual had been revoked",
 };
 
+type OpenTransfer = { transferId: number; passengerName: string; status: "planificado" | "subio" };
+
 function remainingLabel(transfer: RemainingTransfer) {
   const from = transfer.direction === "salida" ? transfer.destinationName : transfer.originDestinationName ?? "home";
   const to = transfer.direction === "salida" ? "home" : transfer.destinationName;
   return `${transfer.targetTime} ${transfer.direction}, ${from} → ${to}`;
 }
 
-/** One line per alert kind; the absence alert lists the Traslados the Oficina has to decide about. */
+/** One line per alert kind; the absence and refused-close alerts list the Traslados the Oficina has to decide about. */
 export function AlertText({ alert }: { alert: Alert }) {
   const who = alert.passengerName ?? "A Pasajero";
   const by = alert.driverName ? ` (${alert.driverName})` : "";
@@ -66,6 +68,13 @@ export function AlertText({ alert }: { alert: Alert }) {
         {remaining.length
           ? <>Decide about the rest of the day:<ul>{remaining.map((transfer) => <li key={transfer.transferId}>{remainingLabel(transfer)}</li>)}</ul></>
           : "No other Traslados today."}</>;
+    }
+    case "close_refused": {
+      const open = details.transfers as OpenTransfer[];
+      return <>{`${alert.driverName ?? "A Chofer"} tried to close Recorrido ${String(alert.routeId)} with Traslados still open:`}
+        <ul>{open.map((transfer) => <li key={transfer.transferId}>
+          {`${transfer.passengerName}: ${transfer.status === "subio" ? "on board without Entregado" : "not marked"}`}
+        </li>)}</ul></>;
     }
     default:
       return <>{alert.kind}</>;
