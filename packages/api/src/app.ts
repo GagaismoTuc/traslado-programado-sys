@@ -884,7 +884,7 @@ async function chooseVehicle(client: Queryable, driverId: number, requested: unk
  * or when the Chofer already has another Recorrido of the day overlapping its time band. The Chofer is locked as when
  * a Recorrido is created, so two changes cannot both pass the overlap check.
  */
-async function assertDriverCanTake(client: Queryable, route: Record<string, unknown>, driverId: number) {
+async function assertCanChangeDriver(client: Queryable, route: Record<string, unknown>, driverId: number) {
   if (route.status === "en_curso" || route.status === "cerrado") {
     throw new PlanningError(409, "A Recorrido En curso or Cerrado cannot change Chofer");
   }
@@ -2798,7 +2798,7 @@ export function createApp({ db, routing, router, geocoder, solver, travelTime, c
           const before: Record<string, unknown> = await getRouteById(client, id);
           // The Chofer is locked before the Vehículo, as publishing does. The Vehículo and a start or end the Oficina set are
           // kept; the default start and end follow the new Chofer, since "Order" derives them from the Recorrido's Chofer.
-          if (driverId !== undefined && driverId !== before.driverId) await assertDriverCanTake(client, before, driverId);
+          if (driverId !== undefined && driverId !== before.driverId) await assertCanChangeDriver(client, before, driverId);
           if (vehicleId !== undefined) await assertActiveUsualVehicle(client, vehicleId);
           const after: Record<string, unknown> = {
             driverId: driverId ?? before.driverId,

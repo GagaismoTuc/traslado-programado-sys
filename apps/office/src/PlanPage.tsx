@@ -120,7 +120,6 @@ function routeName(routes: Pick<Route, "id" | "driverName" | "startTime" | "endT
   return route ? `${route.driverName} ${route.startTime}-${route.endTime}` : `Recorrido ${routeId}`;
 }
 
-/** A Recorrido may be forced with a reason unless it leaves a Traslado unserved. */
 // The front-seat warning informs and never blocks the change.
 export function driverChangedMessage(route: Pick<Route, "frontSeat">) {
   return route.frontSeat
@@ -146,6 +145,7 @@ export function RouteDriverField({ route, drivers, onChange }: {
   </label>;
 }
 
+/** A Recorrido may be forced with a reason unless it leaves a Traslado unserved. */
 export function canForce(violations: PassengerViolations[]) {
   return violations.every((group) => group.violations.every((violation) => violation.rule !== "unserved_transfer"));
 }

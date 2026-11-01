@@ -152,7 +152,8 @@ describe("changing the Chofer of a Recorrido", () => {
     expect(await answer(request(`/driver/routes/${routeId}/acknowledgements`, "POST", { version: 1 }, second.cookie), 403))
       .toEqual({ error: "This Recorrido belongs to another Chofer" });
 
-    expect((await call(`/routes/${routeId}/publish`, "POST", {})).version).toMatchObject({ version: 2, driverId: second.driverId });
+    // Publishing the whole Plan diario, which keeps an unchanged Recorrido's version, publishes it again.
+    expect((await call(`/daily-plans/${DAY}/publish`, "POST", undefined, 200)).published).toEqual([{ routeId, version: 2 }]);
     expect(await versions()).toEqual([[1, first.driverId], [2, second.driverId]]);
     expect(await dayOf(first.cookie)).toEqual([]);
     expect(await dayOf(second.cookie)).toEqual([[routeId, 2]]);
@@ -208,7 +209,10 @@ describe("changing the Chofer of a Recorrido", () => {
     const second = await chofer();
     const routeId = await route(first.driverId);
     await transfer(routeId, { frontSeat: true });
+    const plain = await route(first.driverId, "10:00", "11:00");
+    await transfer(plain, {}, "11:00");
     expect((await changeDriver(routeId, second.driverId)).route).toMatchObject({ driverId: second.driverId, frontSeat: true });
+    expect((await changeDriver(plain, second.driverId)).route).toMatchObject({ driverId: second.driverId, frontSeat: false });
     expect((await storedRoute(routeId)).driver_id).toBe(second.driverId);
   });
 
