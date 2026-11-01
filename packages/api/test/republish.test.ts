@@ -176,6 +176,23 @@ describe("republishing a Recorrido En curso", () => {
     expect(await h.rows("SELECT status FROM routes WHERE id = $1", [routeId])).toEqual([{ status: "en_curso" }]);
   });
 
+  it("the driver app gets what changed since the version the Chofer acknowledged", async () => {
+    const { s, driver, routeId } = await onBoardDay("changes");
+    await h.answer(h.request(`/driver/routes/${routeId}/acknowledgements`, "POST", { version: 1 }, driver.cookie), 201);
+    const spare = (await s.post("/vehicles", { plate: "CHG900", model: "Furgón Sintético", seats: 8 })).vehicle.id as number;
+    await h.answer(h.request(`/routes/${routeId}`, "PATCH", { vehicleId: spare }, s.office), 200);
+    const d = await s.passenger();
+    const td = await s.transfer(d.passengerId, "salida", "14:00");
+    await s.assign(td, routeId);
+    expect(await s.publish(routeId)).toBe(2);
+
+    const day = await h.answer(h.request(`/driver/days/${TODAY}`, "GET", undefined, driver.cookie), 200);
+    expect(day.routes[0].changes).toEqual({
+      sinceVersion: 1,
+      items: [{ kind: "vehicle", from: "CHA001", to: "CHG900" }, { kind: "added", transferId: td, passengerName: "Pasajero Sintético 4" }],
+    });
+  });
+
   it("Rule 4: a replacement Vehículo for the same Chofer is revalidated for capacity, Adaptaciones and Asiento delantero, and the Pasajero on board stays Subió", async () => {
     const s = await h.setup("rule-4");
     const ramp = (await s.post("/vehicle-features", { name: "Rampa rule-4" })).feature.id as number;

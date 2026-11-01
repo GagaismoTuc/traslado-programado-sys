@@ -67,6 +67,27 @@ describe("Confirmación de versión in the driver app", () => {
       .toContain("<p>You acknowledged version 2.</p><ol>");
   });
 
+  it("shows what changed since the version the Chofer acknowledged", () => {
+    const changed: DriverRoute = {
+      ...route(2, 1),
+      changes: {
+        sinceVersion: 1,
+        items: [
+          { kind: "vehicle", from: "AAA001", to: "BBB002" },
+          { kind: "added", transferId: 5, passengerName: "Pasajero Nuevo" },
+          { kind: "removed", transferId: 6, passengerName: "Pasajero Ausente" },
+          { kind: "time", transferId: 3, stopKind: "pickup", passengerName: "Pasajero Sintético", from: "07:51", to: "07:58" },
+        ],
+      },
+    };
+    expect(renderToStaticMarkup(<RouteView route={changed} sending={false} onAcknowledge={() => undefined} />)).toContain(
+      "<section><p>Changes since version 1:</p><ul><li>Vehicle: AAA001 → BBB002</li><li>New: Pasajero Nuevo</li>"
+      + "<li>Removed: Pasajero Ausente</li><li>Pick up Pasajero Sintético: 07:51 → 07:58</li></ul></section>",
+    );
+    expect(renderToStaticMarkup(<RouteView route={{ ...changed, changes: { sinceVersion: 1, items: [] } }} sending={false} onAcknowledge={() => undefined} />))
+      .not.toContain("Changes since");
+  });
+
   it("sends the version the Chofer saw, not the latest one", async () => {
     const fetchMock = vi.fn(async () => new Response(null, { status: 201 }));
     vi.stubGlobal("fetch", fetchMock);

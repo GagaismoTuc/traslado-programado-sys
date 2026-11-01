@@ -1665,20 +1665,75 @@ async function loadDriverDay(client: Queryable, driverId: number, date: string) 
       companions: Number(leg.companions),
     };
   };
+  // What changed is measured from the version the Chofer acknowledged, or from the previous one once they saw this one.
+  const since = (row: Record<string, unknown>) => {
+    const acknowledged = nullableNumber(row.acknowledged);
+    return acknowledged !== null && acknowledged < Number(row.version) ? acknowledged : Number(row.version) - 1;
+  };
+  const earlier = versions.rows.filter((row) => since(row) >= 1);
+  const bases = (await client.query(
+    `SELECT pv.id, pv.route_id, pv.version, v.plate FROM plan_versions pv JOIN vehicles v ON v.id = pv.vehicle_id
+      WHERE (pv.route_id, pv.version) IN (SELECT * FROM unnest($1::int[], $2::int[]))`,
+    [earlier.map((row) => Number(row.route_id)), earlier.map(since)],
+  ) as QueryResult).rows;
+  const baseLegs = (await client.query(
+    `SELECT l.plan_version_id, l.transfer_id, l.kind, to_char(l.planned_time, 'HH24:MI') AS planned_time, p.name
+       FROM plan_version_legs l JOIN transfers t ON t.id = l.transfer_id JOIN passengers p ON p.id = t.passenger_id
+      WHERE l.plan_version_id = ANY($1::int[]) ORDER BY l.plan_version_id, l.position`,
+    [bases.map((base) => Number(base.id))],
+  ) as QueryResult).rows;
+  const changes = (row: Record<string, unknown>, stops: ReturnType<typeof stop>[]) => {
+    const base = bases.find((item) => Number(item.route_id) === Number(row.route_id));
+    if (!base) return null;
+    const before = baseLegs.filter((leg) => Number(leg.plan_version_id) === Number(base.id));
+    const items: VersionChange[] = [];
+    if (base.plate !== row.plate) items.push({ kind: "vehicle", from: String(base.plate), to: String(row.plate) });
+    for (const current of stops.filter((item) => item.kind === "pickup")) {
+      if (!before.some((leg) => Number(leg.transfer_id) === current.transferId)) {
+        items.push({ kind: "added", transferId: current.transferId, passengerName: current.passenger.name });
+      }
+    }
+    for (const leg of before.filter((item) => item.kind === "pickup")) {
+      if (!stops.some((item) => item.transferId === Number(leg.transfer_id))) {
+        items.push({ kind: "removed", transferId: Number(leg.transfer_id), passengerName: String(leg.name) });
+      }
+    }
+    for (const current of stops) {
+      const old = before.find((leg) => Number(leg.transfer_id) === current.transferId && leg.kind === current.kind);
+      if (old && old.planned_time !== current.plannedTime) {
+        items.push({
+          kind: "time", transferId: current.transferId, stopKind: current.kind, passengerName: current.passenger.name,
+          from: String(old.planned_time), to: current.plannedTime,
+        });
+      }
+    }
+    return { sinceVersion: Number(base.version), items };
+  };
   return {
     date,
-    routes: versions.rows.map((row) => ({
-      routeId: Number(row.route_id),
-      version: Number(row.version),
-      startTime: String(row.start_time),
-      endTime: String(row.end_time),
-      vehiclePlate: String(row.plate),
-      status: String(row.status),
-      acknowledgedVersion: nullableNumber(row.acknowledged),
-      stops: legs.rows.filter((leg) => Number(leg.plan_version_id) === Number(row.id)).map(stop),
-    })),
+    routes: versions.rows.map((row) => {
+      const stops = legs.rows.filter((leg) => Number(leg.plan_version_id) === Number(row.id)).map(stop);
+      const changed = changes(row, stops);
+      return {
+        routeId: Number(row.route_id),
+        version: Number(row.version),
+        startTime: String(row.start_time),
+        endTime: String(row.end_time),
+        vehiclePlate: String(row.plate),
+        status: String(row.status),
+        acknowledgedVersion: nullableNumber(row.acknowledged),
+        stops,
+        // Only from version 2 on: what changed since the version it is measured from.
+        ...(changed ? { changes: changed } : {}),
+      };
+    }),
   };
 }
+
+type VersionChange =
+  | { kind: "vehicle"; from: string; to: string }
+  | { kind: "added" | "removed"; transferId: number; passengerName: string }
+  | { kind: "time"; transferId: number; stopKind: string; passengerName: string; from: string; to: string };
 
 type MarkKind = "subio" | "ausente" | "entregado";
 type MarkReceiver =

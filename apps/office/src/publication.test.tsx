@@ -1,6 +1,6 @@
 import { renderToStaticMarkup } from "react-dom/server";
 import { describe, expect, it } from "vitest";
-import { canForce, CascadeWarnings, DaySummaryView, UnpublishedTransfers, ViolationList, type PassengerViolations } from "./PlanPage";
+import { canForce, canOrder, CascadeWarnings, DaySummaryView, UnpublishedTransfers, ViolationList, type PassengerViolations } from "./PlanPage";
 
 // Synthetic data only.
 const routes = [
@@ -65,5 +65,9 @@ describe("Plan diario publication", () => {
       + " It was not republished.</li></ul>",
     );
     expect(renderToStaticMarkup(<CascadeWarnings routes={routes} cascade={[]} />)).toBe("");
+  });
+
+  it("offers Order on a Borrador or En curso Recorrido, never on a Publicado or Cerrado one", () => {
+    expect(["borrador", "publicado", "en_curso", "cerrado"].map((status) => canOrder({ status }))).toEqual([true, false, true, false]);
   });
 });
