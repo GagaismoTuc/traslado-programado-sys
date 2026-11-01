@@ -39,3 +39,40 @@ jobs:
           name: playwright-results
           path: apps/office/test-results
           retention-days: 7
+
+  commitlint:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - run: sh .github/scripts/test-ci-scripts.sh
+      # On a push to main both SHAs are empty and there is nothing to lint.
+      - run: sh .github/scripts/lint-commits.sh "$BASE_SHA" "$HEAD_SHA"
+        env:
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+
+  gitleaks:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - run: sh .github/scripts/gitleaks.sh "$BASE_SHA" "$HEAD_SHA"
+        env:
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+
+  ci-ok:
+    if: always()
+    needs: [verify, e2e, commitlint, gitleaks]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      # One argument per job result, so $RESULTS is split on purpose.
+      - run: |
+          # shellcheck disable=SC2086
+          sh .github/scripts/ci-ok.sh $RESULTS
+        env:
+          RESULTS: ${{ join(needs.*.result, ' ') }}
