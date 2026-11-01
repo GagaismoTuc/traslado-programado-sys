@@ -199,6 +199,24 @@ describe("Vencimientos of Vehículos and Choferes", () => {
     expect(await response!.json()).toMatchObject({ warnings: [], warningsUnavailable: true });
   });
 
+  it("compares the expiry with the Recorrido's day, not today", async () => {
+    // Human decision on PR #70 (comment 6553137207): today 2026-10-28, a VTV dated 2026-10-28 warns on a Recorrido of 2026-10-29.
+    const { send, vehicle, driver, date } = await setup("r2c");
+    const van = await vehicle();
+    const chofer = await driver(van.id);
+    await date("vehicles", van.id, "VTV", "2026-10-28");
+    const vtvWarning = {
+      owner: "vehicle", ownerLabel: van.plate, document: "VTV", expiresOn: "2026-10-28",
+      message: `Vehículo ${van.plate}: VTV expired on 2026-10-28`,
+    };
+    for (const day of ["2026-10-28", "2026-10-29"]) await ok(send("/daily-plans", "POST", { date: day }));
+
+    const today = await ok(send("/daily-plans/2026-10-28/routes", "POST", { driverId: chofer.id, startTime: "07:00", endTime: "09:00" }));
+    const tomorrow = await ok(send("/daily-plans/2026-10-29/routes", "POST", { driverId: chofer.id, startTime: "07:00", endTime: "09:00" }));
+    expect({ today: today.warnings, tomorrow: tomorrow.warnings })
+      .toEqual({ today: [], tomorrow: [{ routeId: tomorrow.route.id, ...vtvWarning }] });
+  });
+
   it("lists a document as valid through its date and expired from the next day in Tucumán local time", async () => {
     const { vehicle, date, expiries } = await setup("r3");
     const vans = [await vehicle(), await vehicle(), await vehicle(), await vehicle()];
