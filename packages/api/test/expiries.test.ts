@@ -238,6 +238,10 @@ describe("Vencimientos of Vehículos and Choferes", () => {
         expect(await response.json()).toEqual({ error: "Invalid expiry date (expiresOn): use YYYY-MM-DD" });
       }
     }
+    // An edit replaces both fields, so leaving the date out is refused instead of clearing it.
+    const noDate = await send(`/documents/${vtv.id}`, "PATCH", { name: "VTV" });
+    expect(noDate.status).toBe(400);
+    expect(await noDate.json()).toEqual({ error: "Send expiresOn: a date as YYYY-MM-DD, or null for no date" });
     const noName = await send(`/vehicles/${van.id}/documents`, "POST", { name: "  ", expiresOn: "2026-12-01" });
     expect(noName.status).toBe(400);
     expect(await noName.json()).toEqual({ error: "Invalid name: write the document's name" });

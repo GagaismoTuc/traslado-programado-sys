@@ -2143,9 +2143,14 @@ export function createApp({ db, routing, router, geocoder, config }: {
       const actor = await requireOffice(context);
       if (actor instanceof Response) return actor;
       const id = parseId(context.req.param("id"));
-      const fields = parseDocument(await context.req.json().catch(() => null));
+      const body = await context.req.json().catch(() => null);
+      const fields = parseDocument(body);
       if (!id) return context.json({ error: "Invalid request" }, 400);
       if ("error" in fields) return context.json({ error: fields.error }, 400);
+      // Both fields are replaced, so a missing date is refused rather than taken as "no date".
+      if (!isObject(body) || !("expiresOn" in body)) {
+        return context.json({ error: "Send expiresOn: a date as YYYY-MM-DD, or null for no date" }, 400);
+      }
       try {
         const document = await inTransaction(db, async (client) => {
           const locked = await client.query(`${DOCUMENT_SELECT_SQL} WHERE d.id = $1 FOR UPDATE`, [id]) as QueryResult;
