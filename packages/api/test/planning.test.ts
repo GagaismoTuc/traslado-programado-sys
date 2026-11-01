@@ -147,6 +147,7 @@ describe("Plan diario by hand", () => {
     expect(first).toEqual({
       plan: { id: expect.any(Number), date: DAY, timeZone: "America/Argentina/Tucuman" },
       transfers: [],
+      unpublishedTransferIds: [],
       routes: [],
       km: 0,
     });
