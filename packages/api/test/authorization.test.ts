@@ -55,6 +55,9 @@ const authorizationEvidence = new Map([
   ["POST /routes/:id/publish", "lets only the Oficina publish and read Versiones del plan"],
   ["GET /routes/:id/versions", "lets only the Oficina publish and read Versiones del plan"],
   ["POST /daily-plans/:date/publish", "lets only the Oficina publish and read Versiones del plan"],
+  ["GET /daily-plans/:date/acknowledgements", "records the Chofer's acknowledgement once and the Oficina sees who has not acknowledged the latest version"],
+  ["GET /driver/days/:date", "refuses unauthenticated callers and the Oficina on every driver endpoint"],
+  ["POST /driver/routes/:id/acknowledgements", "refuses unauthenticated callers and the Oficina on every driver endpoint"],
 ]);
 
 describe("API route authorization coverage", () => {
@@ -113,6 +116,9 @@ describe("API route authorization coverage", () => {
       ["PATCH", "/routes/1", { vehicleId: 1 }],
       ["PATCH", "/routes/1/stops", { stopIds: [1, 2] }],
       ["POST", "/daily-plans/2026-11-02/driver-days", { driverId: 1, transferIds: [1] }],
+      ["GET", "/daily-plans/2026-11-02/acknowledgements"],
+      ["GET", "/driver/days/2026-11-02"],
+      ["POST", "/driver/routes/1/acknowledgements", { version: 1 }],
     ];
     for (const [method, path, body] of probes) {
       const response = await app.request(path, {
