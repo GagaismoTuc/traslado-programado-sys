@@ -7,7 +7,7 @@ import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { promisify } from "node:util";
 import { PostgreSqlContainer } from "@testcontainers/postgresql";
-import { build, createServer as createViteServer, preview } from "vite";
+import { createServer as createViteServer, preview } from "vite";
 import { startFakeVroom } from "./fake-vroom";
 
 const run = promisify(execFile);
@@ -87,15 +87,12 @@ export default async function globalSetup() {
 
   // The driver app as a phone runs it: the production build with its service worker, so a tab reloads without signal.
   const driverOut = await mkdtemp(join(tmpdir(), "driver-e2e-"));
-  // The dev server above set NODE_ENV to development, which would build without the service worker registration.
-  const nodeEnv = process.env.NODE_ENV;
-  process.env.NODE_ENV = "production";
-  try {
-    await build({ root: driverRoot, logLevel: "warn", build: { outDir: driverOut, emptyOutDir: true } });
-  } finally {
-    if (nodeEnv === undefined) delete process.env.NODE_ENV;
-    else process.env.NODE_ENV = nodeEnv;
-  }
+  // A child process builds it: NODE_ENV=production in this process would switch the Office dev server to the
+  // production JSX runtime, and the dev server above set NODE_ENV to development, which builds without the service worker.
+  await run(process.execPath, [join(driverRoot, "node_modules/vite/bin/vite.js"), "build", "--logLevel", "warn", "--outDir", driverOut, "--emptyOutDir"], {
+    cwd: driverRoot,
+    env: { ...process.env, NODE_ENV: "production" },
+  });
   const driver = await preview({
     root: driverRoot,
     logLevel: "warn",
