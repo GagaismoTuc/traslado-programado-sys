@@ -140,6 +140,8 @@ export function VehiclesPage() {
       <strong>{vehicle.plate}</strong> - {vehicle.model} - {vehicle.seats} seats (front: {vehicle.front})
       {vehicle.features.length > 0 ? ` - Features: ${vehicle.features.join(", ")}` : ""}
       {vehicle.deactivatedAt ? " (deactivated)" : ""}
+      {" "}
+      <a href={`/vehicles/${vehicle.id}`}>Details and documents</a>
       {!vehicle.deactivatedAt && <>
         {" "}
         <button type="button" onClick={() => startEdit(vehicle)}>Edit</button>
