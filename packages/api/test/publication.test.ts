@@ -426,6 +426,7 @@ describe("Publication and Versiones del plan", () => {
         routeId: next, version: 1, fromRouteId: first, ok: false,
         problem: "The Chofer reaches the first Parada at 08:11, after its planned 08:08",
       }],
+      warnings: [],
     });
   });
 
