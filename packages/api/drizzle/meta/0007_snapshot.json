@@ -1,5 +1,5 @@
 {
-  "id": "170b7c7a-93c2-4a5c-92db-0709a466aab2",
+  "id": "7f7a0506-c451-4813-8beb-ccb7db4957d9",
   "prevId": "917d5c4e-e555-40bd-907e-ab8f8dfb483f",
   "version": "7",
   "dialect": "postgresql",
@@ -96,6 +96,102 @@
       "checkConstraints": {},
       "isRLSEnabled": false
     },
+    "public.authorized_adults": {
+      "name": "authorized_adults",
+      "schema": "",
+      "columns": {
+        "id": {
+          "name": "id",
+          "type": "integer",
+          "primaryKey": true,
+          "notNull": true,
+          "identity": {
+            "type": "always",
+            "name": "authorized_adults_id_seq",
+            "schema": "public",
+            "increment": "1",
+            "startWith": "1",
+            "minValue": "1",
+            "maxValue": "2147483647",
+            "cache": "1",
+            "cycle": false
+          }
+        },
+        "passenger_id": {
+          "name": "passenger_id",
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "name": {
+          "name": "name",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "dni": {
+          "name": "dni",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "relation": {
+          "name": "relation",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "phone": {
+          "name": "phone",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "legal_guardian": {
+          "name": "legal_guardian",
+          "type": "boolean",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "created_at": {
+          "name": "created_at",
+          "type": "timestamp with time zone",
+          "primaryKey": false,
+          "notNull": true,
+          "default": "now()"
+        }
+      },
+      "indexes": {},
+      "foreignKeys": {
+        "authorized_adults_passenger_id_passengers_id_fk": {
+          "name": "authorized_adults_passenger_id_passengers_id_fk",
+          "tableFrom": "authorized_adults",
+          "tableTo": "passengers",
+          "columnsFrom": [
+            "passenger_id"
+          ],
+          "columnsTo": [
+            "id"
+          ],
+          "onDelete": "restrict",
+          "onUpdate": "no action"
+        }
+      },
+      "compositePrimaryKeys": {},
+      "uniqueConstraints": {
+        "authorized_adults_id_passenger_unique": {
+          "name": "authorized_adults_id_passenger_unique",
+          "nullsNotDistinct": false,
+          "columns": [
+            "id",
+            "passenger_id"
+          ]
+        }
+      },
+      "policies": {},
+      "checkConstraints": {},
+      "isRLSEnabled": false
+    },
     "public.change_log": {
       "name": "change_log",
       "schema": "",
@@ -178,6 +274,79 @@
           ],
           "columnsTo": [
             "id"
+          ],
+          "onDelete": "restrict",
+          "onUpdate": "no action"
+        }
+      },
+      "compositePrimaryKeys": {},
+      "uniqueConstraints": {},
+      "policies": {},
+      "checkConstraints": {},
+      "isRLSEnabled": false
+    },
+    "public.consents": {
+      "name": "consents",
+      "schema": "",
+      "columns": {
+        "passenger_id": {
+          "name": "passenger_id",
+          "type": "integer",
+          "primaryKey": true,
+          "notNull": true
+        },
+        "signed_by_adult_id": {
+          "name": "signed_by_adult_id",
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "signed_at": {
+          "name": "signed_at",
+          "type": "date",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "other_adult_allowed": {
+          "name": "other_adult_allowed",
+          "type": "boolean",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "recorded_at": {
+          "name": "recorded_at",
+          "type": "timestamp with time zone",
+          "primaryKey": false,
+          "notNull": true,
+          "default": "now()"
+        }
+      },
+      "indexes": {},
+      "foreignKeys": {
+        "consents_passenger_id_passengers_id_fk": {
+          "name": "consents_passenger_id_passengers_id_fk",
+          "tableFrom": "consents",
+          "tableTo": "passengers",
+          "columnsFrom": [
+            "passenger_id"
+          ],
+          "columnsTo": [
+            "id"
+          ],
+          "onDelete": "restrict",
+          "onUpdate": "no action"
+        },
+        "consents_signed_by_adult_fk": {
+          "name": "consents_signed_by_adult_fk",
+          "tableFrom": "consents",
+          "tableTo": "authorized_adults",
+          "columnsFrom": [
+            "signed_by_adult_id",
+            "passenger_id"
+          ],
+          "columnsTo": [
+            "id",
+            "passenger_id"
           ],
           "onDelete": "restrict",
           "onUpdate": "no action"
@@ -714,362 +883,6 @@
         "passengers_medical_alert_length": {
           "name": "passengers_medical_alert_length",
           "value": "char_length(\"passengers\".\"medical_alert\") <= 140"
-        }
-      },
-      "isRLSEnabled": false
-    },
-    "public.plan_version_legs": {
-      "name": "plan_version_legs",
-      "schema": "",
-      "columns": {
-        "plan_version_id": {
-          "name": "plan_version_id",
-          "type": "integer",
-          "primaryKey": false,
-          "notNull": true
-        },
-        "position": {
-          "name": "position",
-          "type": "integer",
-          "primaryKey": false,
-          "notNull": true
-        },
-        "transfer_id": {
-          "name": "transfer_id",
-          "type": "integer",
-          "primaryKey": false,
-          "notNull": true
-        },
-        "kind": {
-          "name": "kind",
-          "type": "text",
-          "primaryKey": false,
-          "notNull": true
-        },
-        "distance_meters": {
-          "name": "distance_meters",
-          "type": "integer",
-          "primaryKey": false,
-          "notNull": true
-        },
-        "duration_seconds": {
-          "name": "duration_seconds",
-          "type": "integer",
-          "primaryKey": false,
-          "notNull": true
-        },
-        "planned_time": {
-          "name": "planned_time",
-          "type": "time",
-          "primaryKey": false,
-          "notNull": true
-        }
-      },
-      "indexes": {},
-      "foreignKeys": {
-        "plan_version_legs_plan_version_id_plan_versions_id_fk": {
-          "name": "plan_version_legs_plan_version_id_plan_versions_id_fk",
-          "tableFrom": "plan_version_legs",
-          "tableTo": "plan_versions",
-          "columnsFrom": [
-            "plan_version_id"
-          ],
-          "columnsTo": [
-            "id"
-          ],
-          "onDelete": "restrict",
-          "onUpdate": "no action"
-        },
-        "plan_version_legs_transfer_id_transfers_id_fk": {
-          "name": "plan_version_legs_transfer_id_transfers_id_fk",
-          "tableFrom": "plan_version_legs",
-          "tableTo": "transfers",
-          "columnsFrom": [
-            "transfer_id"
-          ],
-          "columnsTo": [
-            "id"
-          ],
-          "onDelete": "restrict",
-          "onUpdate": "no action"
-        }
-      },
-      "compositePrimaryKeys": {
-        "plan_version_legs_plan_version_id_position_pk": {
-          "name": "plan_version_legs_plan_version_id_position_pk",
-          "columns": [
-            "plan_version_id",
-            "position"
-          ]
-        }
-      },
-      "uniqueConstraints": {},
-      "policies": {},
-      "checkConstraints": {
-        "plan_version_legs_kind_check": {
-          "name": "plan_version_legs_kind_check",
-          "value": "\"plan_version_legs\".\"kind\" IN ('pickup', 'dropoff')"
-        },
-        "plan_version_legs_distance_check": {
-          "name": "plan_version_legs_distance_check",
-          "value": "\"plan_version_legs\".\"distance_meters\" >= 0"
-        },
-        "plan_version_legs_duration_check": {
-          "name": "plan_version_legs_duration_check",
-          "value": "\"plan_version_legs\".\"duration_seconds\" >= 0"
-        }
-      },
-      "isRLSEnabled": false
-    },
-    "public.plan_version_transfers": {
-      "name": "plan_version_transfers",
-      "schema": "",
-      "columns": {
-        "plan_version_id": {
-          "name": "plan_version_id",
-          "type": "integer",
-          "primaryKey": false,
-          "notNull": true
-        },
-        "transfer_id": {
-          "name": "transfer_id",
-          "type": "integer",
-          "primaryKey": false,
-          "notNull": true
-        },
-        "companions": {
-          "name": "companions",
-          "type": "integer",
-          "primaryKey": false,
-          "notNull": true
-        },
-        "direct_distance_meters": {
-          "name": "direct_distance_meters",
-          "type": "integer",
-          "primaryKey": false,
-          "notNull": true
-        }
-      },
-      "indexes": {},
-      "foreignKeys": {
-        "plan_version_transfers_plan_version_id_plan_versions_id_fk": {
-          "name": "plan_version_transfers_plan_version_id_plan_versions_id_fk",
-          "tableFrom": "plan_version_transfers",
-          "tableTo": "plan_versions",
-          "columnsFrom": [
-            "plan_version_id"
-          ],
-          "columnsTo": [
-            "id"
-          ],
-          "onDelete": "restrict",
-          "onUpdate": "no action"
-        },
-        "plan_version_transfers_transfer_id_transfers_id_fk": {
-          "name": "plan_version_transfers_transfer_id_transfers_id_fk",
-          "tableFrom": "plan_version_transfers",
-          "tableTo": "transfers",
-          "columnsFrom": [
-            "transfer_id"
-          ],
-          "columnsTo": [
-            "id"
-          ],
-          "onDelete": "restrict",
-          "onUpdate": "no action"
-        }
-      },
-      "compositePrimaryKeys": {
-        "plan_version_transfers_plan_version_id_transfer_id_pk": {
-          "name": "plan_version_transfers_plan_version_id_transfer_id_pk",
-          "columns": [
-            "plan_version_id",
-            "transfer_id"
-          ]
-        }
-      },
-      "uniqueConstraints": {},
-      "policies": {},
-      "checkConstraints": {
-        "plan_version_transfers_direct_distance_check": {
-          "name": "plan_version_transfers_direct_distance_check",
-          "value": "\"plan_version_transfers\".\"direct_distance_meters\" >= 0"
-        }
-      },
-      "isRLSEnabled": false
-    },
-    "public.plan_versions": {
-      "name": "plan_versions",
-      "schema": "",
-      "columns": {
-        "id": {
-          "name": "id",
-          "type": "integer",
-          "primaryKey": true,
-          "notNull": true,
-          "identity": {
-            "type": "always",
-            "name": "plan_versions_id_seq",
-            "schema": "public",
-            "increment": "1",
-            "startWith": "1",
-            "minValue": "1",
-            "maxValue": "2147483647",
-            "cache": "1",
-            "cycle": false
-          }
-        },
-        "route_id": {
-          "name": "route_id",
-          "type": "integer",
-          "primaryKey": false,
-          "notNull": true
-        },
-        "version": {
-          "name": "version",
-          "type": "integer",
-          "primaryKey": false,
-          "notNull": true
-        },
-        "vehicle_id": {
-          "name": "vehicle_id",
-          "type": "integer",
-          "primaryKey": false,
-          "notNull": true
-        },
-        "driver_id": {
-          "name": "driver_id",
-          "type": "integer",
-          "primaryKey": false,
-          "notNull": true
-        },
-        "start_time": {
-          "name": "start_time",
-          "type": "time",
-          "primaryKey": false,
-          "notNull": true
-        },
-        "end_time": {
-          "name": "end_time",
-          "type": "time",
-          "primaryKey": false,
-          "notNull": true
-        },
-        "published_at": {
-          "name": "published_at",
-          "type": "timestamp with time zone",
-          "primaryKey": false,
-          "notNull": true,
-          "default": "now()"
-        },
-        "published_by": {
-          "name": "published_by",
-          "type": "integer",
-          "primaryKey": false,
-          "notNull": true
-        },
-        "override_reason": {
-          "name": "override_reason",
-          "type": "text",
-          "primaryKey": false,
-          "notNull": false
-        },
-        "violations": {
-          "name": "violations",
-          "type": "jsonb",
-          "primaryKey": false,
-          "notNull": true,
-          "default": "'[]'::jsonb"
-        }
-      },
-      "indexes": {
-        "plan_versions_route_version_unique": {
-          "name": "plan_versions_route_version_unique",
-          "columns": [
-            {
-              "expression": "route_id",
-              "isExpression": false,
-              "asc": true,
-              "nulls": "last"
-            },
-            {
-              "expression": "version",
-              "isExpression": false,
-              "asc": true,
-              "nulls": "last"
-            }
-          ],
-          "isUnique": true,
-          "concurrently": false,
-          "method": "btree",
-          "with": {}
-        }
-      },
-      "foreignKeys": {
-        "plan_versions_route_id_routes_id_fk": {
-          "name": "plan_versions_route_id_routes_id_fk",
-          "tableFrom": "plan_versions",
-          "tableTo": "routes",
-          "columnsFrom": [
-            "route_id"
-          ],
-          "columnsTo": [
-            "id"
-          ],
-          "onDelete": "restrict",
-          "onUpdate": "no action"
-        },
-        "plan_versions_vehicle_id_vehicles_id_fk": {
-          "name": "plan_versions_vehicle_id_vehicles_id_fk",
-          "tableFrom": "plan_versions",
-          "tableTo": "vehicles",
-          "columnsFrom": [
-            "vehicle_id"
-          ],
-          "columnsTo": [
-            "id"
-          ],
-          "onDelete": "restrict",
-          "onUpdate": "no action"
-        },
-        "plan_versions_driver_id_drivers_id_fk": {
-          "name": "plan_versions_driver_id_drivers_id_fk",
-          "tableFrom": "plan_versions",
-          "tableTo": "drivers",
-          "columnsFrom": [
-            "driver_id"
-          ],
-          "columnsTo": [
-            "id"
-          ],
-          "onDelete": "restrict",
-          "onUpdate": "no action"
-        },
-        "plan_versions_published_by_users_id_fk": {
-          "name": "plan_versions_published_by_users_id_fk",
-          "tableFrom": "plan_versions",
-          "tableTo": "users",
-          "columnsFrom": [
-            "published_by"
-          ],
-          "columnsTo": [
-            "id"
-          ],
-          "onDelete": "restrict",
-          "onUpdate": "no action"
-        }
-      },
-      "compositePrimaryKeys": {},
-      "uniqueConstraints": {},
-      "policies": {},
-      "checkConstraints": {
-        "plan_versions_version_positive": {
-          "name": "plan_versions_version_positive",
-          "value": "\"plan_versions\".\"version\" > 0"
-        },
-        "plan_versions_override_reason_check": {
-          "name": "plan_versions_override_reason_check",
-          "value": "\"plan_versions\".\"override_reason\" IS NULL OR btrim(\"plan_versions\".\"override_reason\") <> ''"
         }
       },
       "isRLSEnabled": false
