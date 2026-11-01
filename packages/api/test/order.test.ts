@@ -3,7 +3,7 @@ import { createApp, type AppConfig, type RoutingHealth } from "../src/app.js";
 import { hashPassword } from "../src/auth.js";
 import { readConfig } from "../src/config.js";
 import { createPool } from "../src/db.js";
-import type { VroomProblem, VroomSolver } from "../src/planner.js";
+import type { LngLat, VroomProblem, VroomSolver } from "../src/planner.js";
 import { getSessionCookie, signInOffice } from "./helpers/office-session.js";
 
 const appPool = createPool(process.env.TEST_DATABASE_URL!);
@@ -38,12 +38,13 @@ type Problem = { vehicles: Vehicle[]; shipments: Shipment[] };
  * Stand-in for VROOM: picks up every Traslado that fits (in input order) and then drops them all off, so capacity matters.
  * Each pickup starts when its window opens and each drop-off when its window closes, plus `lateSeconds`.
  */
-function fakeEngine(options: { lateSeconds?: number; fail?: boolean } = {}) {
+function fakeEngine(options: { lateSeconds?: number; fail?: boolean; whileSolving?: () => Promise<unknown> } = {}) {
   const problems: Problem[] = [];
   const solver: VroomSolver = async (problem: VroomProblem) => {
     const typed = problem as unknown as Problem;
     problems.push(typed);
     if (options.fail) throw new Error("VROOM did not answer");
+    await options.whileSolving?.();
     const capacity = typed.vehicles[0].capacity;
     const load = [0, 0];
     const taken: Shipment[] = [];
@@ -75,8 +76,15 @@ function fakeEngine(options: { lateSeconds?: number; fail?: boolean } = {}) {
   return { problems, solver };
 }
 
+// Stand-in for OSRM's driving time: 10 minutes between any two different points.
+const drives: [LngLat, LngLat][] = [];
+async function travelTime(from: LngLat, to: LngLat) {
+  drives.push([from, to]);
+  return 600;
+}
+
 function appWith(solver?: VroomSolver, config: Partial<AppConfig> = {}) {
-  return createApp({ db: appPool, routing: routingUp, solver, config: { serverEpoch: "order-test", ...config } });
+  return createApp({ db: appPool, routing: routingUp, solver, travelTime, config: { serverEpoch: "order-test", ...config } });
 }
 
 type App = ReturnType<typeof appWith>;
@@ -188,6 +196,34 @@ describe("the engine orders a Recorrido", () => {
     const again = await w.order(routeId);
     expect(again.stops).toEqual(result.stops);
     expect(again.unassigned).toEqual([]);
+  });
+
+  it("builds one window per step: an entrada arrives by T, a salida is picked up from P and dropped off by P + R'", async () => {
+    const engine = fakeEngine();
+    const w = await world("ventanas", appWith(engine.solver));
+    const routeId = await w.route({ startTime: "16:00", endTime: "18:00" });
+    await w.transfer(routeId, { direction: "entrada", targetTime: "16:30" });
+    await w.transfer(routeId, { direction: "salida", targetTime: "17:00" });
+    await w.order(routeId);
+    // R' = 60 − 5 of buffer; drop-off service 5 min.
+    expect(engine.problems[0].shipments.map((shipment) => [shipment.pickup.time_windows, shipment.delivery.time_windows])).toEqual([
+      [[[seconds("15:40"), seconds("16:30")]], [[seconds("16:15"), seconds("16:30")]]],
+      [[[seconds("17:00"), seconds("17:50")]], [[seconds("17:00"), seconds("17:50")]]],
+    ]);
+  });
+
+  it("refuses to apply the engine's answer when the Recorrido changed while it was being ordered", async () => {
+    let changeWhileSolving = async () => undefined as unknown;
+    const engine = fakeEngine({ whileSolving: () => changeWhileSolving() });
+    const w = await world("concurrente", appWith(engine.solver));
+    const routeId = await w.route();
+    const item = await w.transfer(routeId);
+    const before = (await w.view()).routes[0].stops;
+    changeWhileSolving = () => migrationPool.query("UPDATE transfers SET companions = 2 WHERE id = $1", [item]);
+
+    expect(await w.order(routeId, 409)).toEqual({ error: "The Recorrido changed while it was being ordered: order it again" });
+    expect((await w.view()).routes[0].stops).toEqual(before);
+    expect((await changes("route")).map((row) => row.action)).not.toContain("ordered");
   });
 
   it("Rule 2: reads the ride-time buffer and the speed factors per time band from configuration", async () => {
@@ -358,6 +394,11 @@ describe("the engine orders a Recorrido", () => {
     await w.order(routeId);
     // The previous Recorrido's planned end (08:00 + 5 min) bounds the start; travel time is the engine's.
     expect(engine.problems.at(-1)!.vehicles[0]).toMatchObject({ start: SCHOOL, time_window: [seconds("08:05"), expect.any(Number)] });
+    // Starting elsewhere adds the drive from where the previous Recorrido ended (10 min here).
+    await w.call(`/routes/${routeId}`, "PATCH", { startKind: "home" }, 200);
+    await w.order(routeId);
+    expect(engine.problems.at(-1)!.vehicles[0]).toMatchObject({ start: HOME_OF_DRIVER, time_window: [seconds("08:15"), expect.any(Number)] });
+    expect(drives.at(-1)).toEqual([SCHOOL, HOME_OF_DRIVER]);
 
     const reset = await w.call(`/routes/${routeId}`, "PATCH", { startKind: null, endKind: null }, 200);
     expect(reset.route).toMatchObject({ startKind: null, startLat: null, startLng: null, endKind: null });

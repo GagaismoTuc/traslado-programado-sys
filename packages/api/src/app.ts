@@ -15,7 +15,8 @@ import {
   type SessionRow,
 } from "./sessions.js";
 import type { GeocodeResult, Geocoder } from "./geocoding.js";
-import { planRoute, type LngLat, type PlannerSettings, type PlanResult, type PlanTransfer, type VroomSolver } from "./planner.js";
+import type { TravelTime } from "./routing.js";
+import { planRoute, speedFactorAt, type LngLat, type PlannerSettings, type PlanResult, type PlanTransfer, type VroomSolver } from "./planner.js";
 
 type QueryResult = { rows: Record<string, unknown>[]; rowCount: number | null };
 type Queryable = { query: (sql: string, values?: unknown[]) => Promise<unknown> };
@@ -893,7 +894,7 @@ async function resolveRouteEnds(client: Queryable, routeId: number, route: Recor
   else throw new PlanningError(409, "Set where this Recorrido starts: the previous Recorrido has another Vehículo or no Paradas");
 
   const endKind = route.end_kind ?? (nextResult.rows.length ? "open" : "home");
-  return { start, end: endKind === "home" ? home : null, notBeforeMinutes: previousEnd };
+  return { start, end: endKind === "home" ? home : null, previousEnd, previousStop: chained };
 }
 
 function stopLocation(row: Record<string, unknown>, kind: "pickup" | "dropoff"): LngLat {
@@ -955,17 +956,20 @@ function validateOrder(
   });
 }
 
-function routeSettingsKey(route: Record<string, unknown>, transferIds: number[]) {
-  return JSON.stringify([route.status, route.vehicle_id, route.start_time, route.start_kind, route.start_latitude, route.start_longitude,
-    route.end_kind, route.feature_ids, [...transferIds].sort((a, b) => a - b)]);
+// Everything the engine was given; the result is applied only while this is unchanged.
+async function orderInputKey(client: Queryable, routeId: number) {
+  const route = (await client.query(ORDER_ROUTE_SQL, [routeId]) as QueryResult).rows[0];
+  const rows = route ? (await client.query(ORDER_TRANSFERS_SQL, [routeId]) as QueryResult).rows : [];
+  return { route, rows, key: JSON.stringify([route, rows]) };
 }
 
-export function createApp({ db, routing, geocoder, solver, config }: {
+export function createApp({ db, routing, geocoder, solver, travelTime, config }: {
   db: HealthDatabase;
   routing: RoutingHealth;
   geocoder?: Geocoder;
-  // Solves VROOM problems for "Order"; without it ordering answers 503.
+  // Solve VROOM problems and measure driving time for "Order"; without them ordering answers 503.
   solver?: VroomSolver;
+  travelTime?: TravelTime;
   config: AppConfig;
 }) {
   if (!config.serverEpoch.trim()) throw new Error("SERVER_EPOCH is required");
@@ -2008,24 +2012,30 @@ export function createApp({ db, routing, geocoder, solver, config }: {
       if (actor instanceof Response) return actor;
       const id = parseId(context.req.param("id"));
       if (!id) return context.json({ error: "Invalid request" }, 400);
-      if (!solver) return context.json({ error: "The routing engine is not configured" }, 503);
+      if (!solver || !travelTime) return context.json({ error: "The routing engine is not configured" }, 503);
       try {
-        const route = (await db.query(ORDER_ROUTE_SQL, [id]) as QueryResult).rows[0];
+        const { route, rows, key } = await orderInputKey(db, id);
         if (!route) throw new PlanningError(404, "Recorrido not found");
         if (route.status !== "borrador") throw new PlanningError(409, "Only a Borrador Recorrido can be ordered");
-        const rows = (await db.query(ORDER_TRANSFERS_SQL, [id]) as QueryResult).rows;
-        const key = routeSettingsKey(route, rows.map((row) => Number(row.id)));
         let plan: PlanResult = { stops: [], unassigned: [] };
         if (rows.length) {
           const ends = await resolveRouteEnds(db, id, route, routeGapMinutes);
+          const startMinutes = minutesOf(String(route.start_time));
           try {
+            // Not before the previous Recorrido's planned end plus the drive from its last Parada to this start.
+            let notBeforeMinutes = ends.previousEnd;
+            if (notBeforeMinutes !== undefined && ends.previousStop
+              && (ends.previousStop[0] !== ends.start[0] || ends.previousStop[1] !== ends.start[1])) {
+              const drive = await travelTime(ends.previousStop, ends.start);
+              notBeforeMinutes += Math.ceil(drive / 60 / speedFactorAt(plannerSettings.speedFactors, startMinutes));
+            }
             plan = await planRoute({
               transfers: rows.map(toPlanTransfer),
               vehicle: { seats: Number(route.seats), featureIds: (route.feature_ids as number[]).map(Number) },
               start: ends.start,
               end: ends.end,
-              notBeforeMinutes: ends.notBeforeMinutes,
-              startMinutes: minutesOf(String(route.start_time)),
+              notBeforeMinutes,
+              startMinutes,
             }, plannerSettings, solver);
           } catch {
             return context.json({ error: "The routing engine is unavailable: the order was not changed" }, 502);
@@ -2033,12 +2043,7 @@ export function createApp({ db, routing, geocoder, solver, config }: {
         }
         const stops = await inTransaction(db, async (client) => {
           await lockRoute(client, id);
-          const current = (await client.query(ORDER_ROUTE_SQL, [id]) as QueryResult).rows[0];
-          const currentIds = (await client.query(
-            "SELECT transfer_id FROM stops WHERE route_id = $1 AND kind = 'pickup'",
-            [id],
-          ) as QueryResult).rows.map((row) => Number(row.transfer_id));
-          if (routeSettingsKey(current, currentIds) !== key) {
+          if ((await orderInputKey(client, id)).key !== key) {
             throw new PlanningError(409, "The Recorrido changed while it was being ordered: order it again");
           }
           const stopIds = async () => (await client.query("SELECT id FROM stops WHERE route_id = $1 ORDER BY position", [id]) as QueryResult)

@@ -73,7 +73,7 @@ function stopLabel(stop: Stop) {
 }
 
 const UNASSIGNED_REASONS = {
-  capacity: "no seat left in the Vehicle",
+  capacity: "no room left in the Vehicle (seats or front seat)",
   time_window: "cannot make its time window",
   adaptation: "the Vehicle lacks a required feature",
 };
@@ -196,9 +196,13 @@ export function PlanPage() {
     }
   }
 
-  const saveEnds = (route: Route) => submit((values) => {
+  const saveEnds = (route: Route) => submit(async (values) => {
     const startKind = values.get("startKind") || null;
-    return write(`/routes/${route.id}`, "PATCH", {
+    if (startKind === "point" && (!values.get("startLat") || !values.get("startLng"))) {
+      setMessage("Give the latitude and longitude of the start point");
+      return false;
+    }
+    return await write(`/routes/${route.id}`, "PATCH", {
       startKind,
       startLat: startKind === "point" ? Number(values.get("startLat")) : null,
       startLng: startKind === "point" ? Number(values.get("startLng")) : null,

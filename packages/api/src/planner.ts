@@ -68,7 +68,8 @@ export type VroomSolver = (problem: VroomProblem) => Promise<VroomSolution>;
 
 // Objective: kilometres (1 per metre), with a per-hour cost of 1 per minute so the engine does not stretch rides.
 export const VEHICLE_COSTS = { per_km: 1000, per_hour: 60 };
-const DAY_SECONDS = 48 * 3600;
+// A Plan diario covers one day: no Recorrido runs past midnight.
+const DAY_SECONDS = 24 * 3600;
 const RELAXED_CAPACITY = 1_000_000;
 
 export function speedFactorAt(bands: SpeedBand[], minutes: number) {

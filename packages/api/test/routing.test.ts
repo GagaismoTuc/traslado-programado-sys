@@ -6,7 +6,7 @@ import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { createApp } from "../src/app.js";
 import { createPool } from "../src/db.js";
 import { planRoute, type LngLat, type PlanInput, type PlannerSettings, type PlanTransfer } from "../src/planner.js";
-import { createRoutingHealth, createVroomSolver } from "../src/routing.js";
+import { createRoutingHealth, createTravelTime, createVroomSolver, RoutingEngineError } from "../src/routing.js";
 import { validateRoute } from "@traslado/shared";
 import { composeConfig, osrmRecipe, readRecipe, startRoutingStack, type RoutingStack } from "./routing-harness.js";
 
@@ -94,6 +94,12 @@ describe("routing infrastructure", () => {
     const solution = await solve(tinyInstance());
     expect(solution.unassigned).toEqual([]);
     expect(jobStep(solution).arrival).toBeGreaterThan(0);
+  });
+
+  it("measures the driving time between two points with the real OSRM, and fails as a routing error when it does not answer", async () => {
+    const seconds = await createTravelTime({ osrmUrl: stack.osrmUrl })([-65.22, -26.84], [-65.2, -26.82]);
+    expect(seconds).toBeGreaterThan(0);
+    await expect(createTravelTime({ osrmUrl: deadUrl })([-65.22, -26.84], [-65.2, -26.82])).rejects.toBeInstanceOf(RoutingEngineError);
   });
 
   it("applies VROOM time windows to the start of setup, not the start of service", async () => {
