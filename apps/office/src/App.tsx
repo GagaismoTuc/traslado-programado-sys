@@ -3,6 +3,7 @@ import { hc } from "hono/client";
 import type { AppType } from "@traslado/api";
 import { apiUrl, readError, redirectUnauthorized, send } from "./api";
 import { AlertsPage } from "./AlertsPage";
+import { TransferHistoryPage } from "./TransferHistoryPage";
 import { DestinationsPage } from "./DestinationsPage";
 import { DriversPage } from "./DriversPage";
 import { ExpiriesPage } from "./Expiries";
@@ -154,5 +155,7 @@ export function App() {
   if (path === "/passengers") return <PassengersPage />;
   if (path === "/plan") return <PlanPage />;
   if (path === "/alerts") return <AlertsPage />;
+  const transferId = /^\/transfers\/(\d+)\/history$/.exec(path)?.[1];
+  if (transferId) return <TransferHistoryPage id={Number(transferId)} />;
   return path === "/users" ? <UsersPage /> : <SignInPage />;
 }

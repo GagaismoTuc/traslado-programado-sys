@@ -475,6 +475,7 @@ export function PlanPage() {
       <ul>{day.transfers.map((transfer) => <li key={transfer.id}>
         <strong>{transferLabel(transfer)}</strong>
         <div>Companions: {transfer.companions}{transfer.status === "cancelado_ausencia" ? " - Cancelled: absence" : ""}</div>
+        <a href={`/transfers/${transfer.id}/history`}>History</a>
         {transfer.status === "planificado" && <>
           <label>
             Recorrido
