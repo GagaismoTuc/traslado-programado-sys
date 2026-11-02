@@ -93,10 +93,9 @@ describe("session lifetime and responses", () => {
     expect(await me("")).toEqual({ status: 401, body: { error: "Authentication required" } });
   });
 
-  it("answers session_revoked after a disable or break-glass and session_expired after a password reset", async () => {
+  it("answers session_expired after a password reset and session_revoked after a disable", async () => {
     await h.seed("office", "office");
     await h.seed("driver", "driver");
-    await h.seed("other", "office");
     const admin = await office();
     const resetPhone = await h.login("driver", "password", "Reset phone");
     await h.request("/users/2/password", "PATCH", { password: "new-password" }, admin.cookie);
@@ -108,6 +107,10 @@ describe("session lifetime and responses", () => {
     expect(await me(disabledPhone.cookie)).toEqual({ status: 401, body: revoked });
     expect(await me(loggedOutPhone.cookie)).toEqual({ status: 401, body: revoked });
     expect(await me(resetPhone.cookie)).toEqual({ status: 401, body: revoked });
+  });
+
+  it("answers session_revoked after a break-glass", async () => {
+    await h.seed("other", "office");
     const otherBrowser = await office("other");
     await runBreakGlassOffice(h.migrationPool, ["other"], { BREAK_GLASS_OFFICE_PASSWORD: "recovered" });
     expect(await me(otherBrowser.cookie)).toEqual({ status: 401, body: revoked });
