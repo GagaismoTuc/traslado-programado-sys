@@ -1,7 +1,7 @@
 import { randomBytes } from "node:crypto";
-import { expect, test, type Page } from "@playwright/test";
+import { expect, test, type BrowserContext, type Page } from "@playwright/test";
 import { hashSessionToken } from "../../../packages/api/src/auth.js";
-import { database } from "./session";
+import { database, signInOffice } from "./session";
 
 // The driver app's offline queue, on the production build with its service worker that e2e/global-setup.ts serves at
 // E2E_DRIVER_URL. Synthetic data only.
@@ -130,6 +130,48 @@ async function savedAdults(page: Page, transferId: number) {
   }), transferId);
 }
 
+/** How many Marcas the app's IndexedDB holds and whether it keeps a plan, read without creating the database. */
+async function savedOnPhone(page: Page) {
+  return await page.evaluate(async () => await new Promise<{ marks: number; plan: boolean }>((resolve) => {
+    const open = indexedDB.open("driver-app");
+    open.onupgradeneeded = () => open.transaction?.abort();
+    open.onerror = () => resolve({ marks: 0, plan: false });
+    open.onsuccess = () => {
+      const transaction = open.result.transaction(["marks", "plan"]);
+      const marks = transaction.objectStore("marks").count();
+      const plan = transaction.objectStore("plan").get("current");
+      transaction.oncomplete = () => {
+        open.result.close();
+        resolve({ marks: marks.result, plan: plan.result !== undefined });
+      };
+    };
+  }));
+}
+
+async function sessionEnd(token: string) {
+  const pool = database();
+  try {
+    return (await pool.query("SELECT ended_reason FROM sessions WHERE token_hash = $1", [hashSessionToken(token)])).rows[0].ended_reason;
+  } finally {
+    await pool.end();
+  }
+}
+
+/** The Chofer's phone with today's plan saved and a Subió made without signal, still only on the phone. */
+async function markWithoutSignal(context: BrowserContext, page: Page) {
+  const driverUrl = process.env.E2E_DRIVER_URL!;
+  await context.addCookies([{ name: "session", value: seeded.token, url: driverUrl, httpOnly: true, secure: true, sameSite: "Lax" }]);
+  await page.goto(driverUrl);
+  await expect(page.getByText("13:00 Pick up Pasajero Offline E2E")).toBeVisible();
+  await page.evaluate(async () => {
+    await navigator.serviceWorker.ready;
+  });
+  await expect.poll(() => savedAdults(page, seeded.transferId)).toEqual(["Madre Offline E2E"]);
+  await context.setOffline(true);
+  await page.getByRole("button", { name: "Subió" }).click();
+  await expect(page.getByText("Saved on phone", { exact: true })).toHaveCount(2);
+}
+
 test.beforeEach(async () => {
   seeded = await seed();
 });
@@ -175,4 +217,47 @@ test("marks without signal, keeps the Marcas through a reload and confirms each 
   await expect(page.getByText("Confirmed by server", { exact: true })).toHaveCount(2);
   await expect(page.getByText("Marked: Entregado")).toHaveCount(2);
   expect(await storedMarks(seeded.transferId)).toEqual(marks);
+});
+
+test("Cerrar sesión refuses without signal while a Marca is only on the phone, and sends it before ending the session", async ({ context, page }) => {
+  await markWithoutSignal(context, page);
+
+  await page.getByRole("button", { name: "Cerrar sesión" }).click();
+  await expect(page.getByText("No signal: 1 Marca is saved only on this phone. Cerrar sesión once the server confirms them.")).toBeVisible();
+  await expect(page.getByRole("heading", { name: "Driver", exact: true })).toBeVisible();
+  expect(await savedOnPhone(page)).toEqual({ marks: 1, plan: true });
+  expect(await sessionEnd(seeded.token)).toBeNull();
+  expect(await storedMarks(seeded.transferId)).toEqual([]);
+
+  await context.setOffline(false);
+  await page.getByRole("button", { name: "Cerrar sesión" }).click();
+  await expect(page.getByRole("heading", { name: "Driver sign-in" })).toBeVisible();
+  expect((await storedMarks(seeded.transferId)).map((mark) => mark.kind)).toEqual(["subio"]);
+  expect(await sessionEnd(seeded.token)).toBe("logout");
+});
+
+test("Revocar por pérdida o robo wipes the phone without uploading its queue and shows the Oficina the Traslados without a confirmed Marca", async ({ browser, context, page }) => {
+  await markWithoutSignal(context, page);
+
+  const office = await browser.newContext();
+  try {
+    await signInOffice(office);
+    const officePage = await office.newPage();
+    await officePage.goto(`${process.env.E2E_BASE_URL}/users`);
+    const chofer = officePage.getByRole("listitem").filter({ has: officePage.getByText("chofer-offline-e2e", { exact: true }) });
+    await chofer.getByRole("button", { name: "Show devices" }).click();
+    await chofer.getByRole("button", { name: "Revocar por pérdida o robo" }).click();
+    await expect(chofer.getByText(`Traslados of ${today} without a confirmed Marca:`)).toBeVisible();
+    await expect(chofer.getByRole("link", { name: "13:00 Pasajero Offline E2E, salida, Escuela Offline E2E" }))
+      .toHaveAttribute("href", `/transfers/${seeded.transferId}/history`);
+  } finally {
+    await office.close();
+  }
+  expect(await sessionEnd(seeded.token)).toBe("device_revoked");
+
+  // The signal returns: the phone's next request answers revoked and the phone wipes everything.
+  await context.setOffline(false);
+  await expect(page.getByRole("heading", { name: "Driver sign-in" })).toBeVisible();
+  await expect.poll(() => savedOnPhone(page)).toEqual({ marks: 0, plan: false });
+  expect(await storedMarks(seeded.transferId)).toEqual([]);
 });
