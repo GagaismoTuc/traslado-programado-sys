@@ -4,7 +4,7 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import { RouteView, undoneKinds, type DriverRoute, type DriverStop, type Marking } from "./Days";
 import { latestMarks } from "./offline";
 import {
-  CALL_THE_OFFICE, currentLocation, fetchHandover, HandoverView, newMark, otherAdultReceiver, sendMark, startRoute, undoMark,
+  CALL_THE_OFFICE, closeRoute, currentLocation, fetchHandover, HandoverView, newMark, otherAdultReceiver, sendMark, startRoute, undoMark,
   type Handover, type HandoverActions,
 } from "./Marks";
 
@@ -28,8 +28,8 @@ const route = (status: string, stops: DriverStop[]): DriverRoute => ({
   routeId: 9, version: 2, startTime: "07:00", endTime: "18:00", vehiclePlate: "AAA001", status, acknowledgedVersion: 2, stops,
 });
 const marking = (fields: Partial<Marking> = {}): Marking => ({
-  sending: false, marks: {}, undone: {}, planFetchedAt: "2026-10-23T11:00:00.000Z", handover: null, onStart: vi.fn(), onMark: vi.fn(), onFlush: vi.fn(),
-  onUndo: vi.fn(), onOpenHandover: vi.fn(),
+  sending: false, marks: {}, undone: {}, planFetchedAt: "2026-10-23T11:00:00.000Z", handover: null, refusedClose: null, onStart: vi.fn(),
+  onClose: vi.fn(), onMark: vi.fn(), onFlush: vi.fn(), onUndo: vi.fn(), onOpenHandover: vi.fn(),
   onOtherAdult: vi.fn(), onSearch: vi.fn(), ...fields,
 });
 const actions = (): HandoverActions => ({ onReceiver: vi.fn(), onOtherAdult: vi.fn(), onSearch: vi.fn() });
@@ -133,6 +133,74 @@ describe("Marcas in the driver app", () => {
     });
   });
 
+  it("still offers only Start on a published Recorrido", () => {
+    expect(buttons(<RouteView route={route("publicado", [])} sending={false} onAcknowledge={() => undefined} marking={marking()} />).map((item) => item.text))
+      .toEqual(["Start Recorrido"]);
+  });
+
+  it("offers to close a Recorrido en curso and tells the Chofer what to resolve when the server refuses", async () => {
+    const actionsFor = marking();
+    const started = route("en_curso", []);
+    press(<RouteView route={started} sending={false} onAcknowledge={() => undefined} marking={actionsFor} />, "Close Recorrido");
+    expect(actionsFor.onClose).toHaveBeenCalledWith(started);
+    const refused = marking({ refusedClose: { routeId: 9, transfers: [
+      { transferId: 3, passengerName: "Pasajero Sintético", direction: "salida", status: "subio" },
+      { transferId: 4, passengerName: "Pasajera Sintética", direction: "entrada", status: "planificado" },
+    ] } });
+    const listed = route("en_curso", [{ ...stop("dropoff", "subio", null), transferId: 3 }, { ...stop("pickup", "planificado", 4), transferId: 4 }]);
+    expect(renderToStaticMarkup(<RouteView route={listed} sending={false} onAcknowledge={() => undefined} marking={refused} />)).toContain(
+      "<div role=\"alert\"><p>Resolve these Traslados before closing the Recorrido:</p><ul>"
+      + "<li>Pasajero Sintético: on board, mark Entregado</li>"
+      + "<li>Pasajera Sintética: not marked, mark Subió or Ausente, or call the Oficina to reassign or cancel it</li></ul></div>",
+    );
+    // Once the Chofer marks a listed Traslado, the list shows its state now and drops it when it is resolved.
+    const progressed = renderToStaticMarkup(<RouteView route={route("en_curso", [
+      { ...stop("dropoff", "entregado", null), transferId: 3 }, { ...stop("pickup", "subio", 4), transferId: 4 },
+    ])} sending={false} onAcknowledge={() => undefined} marking={refused} />);
+    expect(progressed).toContain("<ul><li>Pasajera Sintética: on board, mark Entregado</li></ul>");
+    const closed = renderToStaticMarkup(<RouteView route={route("cerrado", [])} sending={false} onAcknowledge={() => undefined} marking={marking()} />);
+    expect(closed).toContain("<p>Recorrido closed.</p>");
+    expect(closed).not.toContain("Close Recorrido");
+    const fetchMock = vi.fn(async () => new Response("{}", { status: 200 }));
+    vi.stubGlobal("fetch", fetchMock);
+    await closeRoute("https://api.example", 9);
+    expect(fetchMock).toHaveBeenCalledWith("https://api.example/driver/routes/9/close", {
+      method: "POST", credentials: "include", headers: { "Content-Type": "application/json" }, body: "{}",
+    });
+  });
+
+  it("drops a listed Traslado from the refusal once the Oficina reassigns it out of the Recorrido", () => {
+    const refused = marking({ refusedClose: { routeId: 9, transfers: [
+      { transferId: 3, passengerName: "Pasajero Sintético", direction: "salida", status: "subio" },
+      { transferId: 4, passengerName: "Pasajera Sintética", direction: "entrada", status: "planificado" },
+    ] } });
+    // Transfer 4 was reassigned: its stops left this Recorrido, so the Chofer has nothing left to do about it.
+    const reassigned = renderToStaticMarkup(<RouteView route={route("en_curso", [{ ...stop("dropoff", "subio", null), transferId: 3 }])}
+      sending={false} onAcknowledge={() => undefined} marking={refused} />);
+    expect(reassigned).toContain("<ul><li>Pasajero Sintético: on board, mark Entregado</li></ul>");
+    expect(reassigned).not.toContain("Pasajera Sintética");
+  });
+
+  it("shows a listed Traslado in the refusal with the Marca saved on the phone, as its Parada does", () => {
+    const time = new Date("2026-10-23T12:00:00.000Z");
+    const entregado = newMark({ transferId: 3, kind: "entregado", location: null, version: 2, receiver: { kind: "destination", destinationId: 4 } },
+      time, "00000000-0000-4000-8000-000000000003");
+    const subio = newMark({ transferId: 4, kind: "subio", location: null, version: 2 }, time, "00000000-0000-4000-8000-000000000004");
+    const refused = marking({
+      marks: Object.fromEntries([entregado, subio].map((mark) => [mark.transferId, { id: mark.id, routeId: 9, mark, state: "pending" as const, confirmedAt: null, note: null }])),
+      refusedClose: { routeId: 9, transfers: [
+        { transferId: 3, passengerName: "Pasajero Sintético", direction: "entrada", status: "subio" },
+        { transferId: 4, passengerName: "Pasajera Sintética", direction: "entrada", status: "planificado" },
+      ] },
+    });
+    // Without signal the plan still says Subió and Planificado; the phone holds Entregado for 3 and Subió for 4.
+    const offline = renderToStaticMarkup(<RouteView route={route("en_curso", [
+      { ...stop("dropoff", "subio", 4), transferId: 3 }, { ...stop("pickup", "planificado", 4), transferId: 4 },
+    ])} sending={false} onAcknowledge={() => undefined} marking={refused} />);
+    expect(offline).toContain("<ul><li>Pasajera Sintética: on board, mark Entregado</li></ul>");
+    expect(offline).not.toContain("Pasajero Sintético: on board");
+  });
+
   it("marks Subió or Ausente at a pickup and Entregado to the Destino once on board", () => {
     const actionsFor = marking();
     const entrada = route("en_curso", [stop("pickup", "planificado", 4), stop("dropoff", "subio", 4)]);
@@ -203,7 +271,7 @@ describe("Marcas in the driver app", () => {
     const markup = renderToStaticMarkup(view);
     expect(markup).not.toContain("Marked:");
     expect(markup).toContain("<div>Saved on phone</div>");
-    expect(buttons(view).map((item) => item.text)).toEqual(["Send now", "Subió", "Ausente", "Send now"]);
+    expect(buttons(view).map((item) => item.text)).toEqual(["Close Recorrido", "Send now", "Subió", "Ausente", "Send now"]);
   });
 
   it("targets the newest queued Marca when phone times tie", () => {

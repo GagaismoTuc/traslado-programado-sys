@@ -1596,6 +1596,9 @@ export type CascadeWarning = { routeId: number; version: number; fromRouteId: nu
 
 const PLAN_TIME_ZONE = "America/Argentina/Tucuman";
 const OUT_OF_DRIVER_SCOPE = "Only today's and tomorrow's Recorridos are available";
+const NOT_OWN_ROUTE = "This Recorrido belongs to another Chofer";
+// The Chofer of a Recorrido `r`: the one of its latest Versión del plan, as the Chofer app shows it.
+const ROUTE_OWNER_SQL = "COALESCE((SELECT pv.driver_id FROM plan_versions pv WHERE pv.route_id = r.id ORDER BY pv.version DESC LIMIT 1), r.driver_id)";
 
 /** Today and tomorrow in the Plan diario's zone: the only days a Chofer can read or acknowledge. */
 function driverDays(now: Date) {
@@ -2026,16 +2029,29 @@ export function createApp({ db, routing, router, geocoder, solver, travelTime, c
    */
   async function ownRoute(context: Context, driverId: number, routeId: number, anyDay = false) {
     const route = await db.query(
-      `SELECT COALESCE((SELECT pv.driver_id FROM plan_versions pv WHERE pv.route_id = r.id ORDER BY pv.version DESC LIMIT 1), r.driver_id)
-                AS driver_id, to_char(dp.plan_date, 'YYYY-MM-DD') AS date
+      `SELECT ${ROUTE_OWNER_SQL} AS driver_id, to_char(dp.plan_date, 'YYYY-MM-DD') AS date
          FROM routes r JOIN daily_plans dp ON dp.id = r.daily_plan_id WHERE r.id = $1`,
       [routeId],
     ) as QueryResult;
     const row = route.rows[0];
     if (!row) return context.json({ error: "Recorrido not found" }, 404);
-    if (Number(row.driver_id) !== driverId) return context.json({ error: "This Recorrido belongs to another Chofer" }, 403);
+    if (Number(row.driver_id) !== driverId) return context.json({ error: NOT_OWN_ROUTE }, 403);
     if (!anyDay && !driverDays(now()).includes(String(row.date))) return context.json({ error: OUT_OF_DRIVER_SCOPE }, 403);
     return row;
+  }
+
+  /**
+   * Locks the Recorrido and returns its status, refusing a Chofer who no longer owns its latest Versión del plan. The
+   * check in ownRoute ran before the lock, and the Oficina may have given the Recorrido to another Chofer since; a
+   * publication locks the Recorrido too, so the owner read after the lock holds until the commit.
+   */
+  async function lockOwnRoute(client: Queryable, driverId: number, routeId: number) {
+    const route = (await client.query("SELECT status FROM routes WHERE id = $1 FOR UPDATE", [routeId]) as QueryResult).rows[0];
+    if (!route) throw new PlanningError(404, "Recorrido not found");
+    // A separate statement, so it reads the versions committed while it waited for the lock.
+    const owner = (await client.query(`SELECT ${ROUTE_OWNER_SQL} AS driver_id FROM routes r WHERE r.id = $1`, [routeId]) as QueryResult).rows[0];
+    if (Number(owner.driver_id) !== driverId) throw new PlanningError(403, NOT_OWN_ROUTE);
+    return String(route.status);
   }
 
   /**
@@ -2104,6 +2120,9 @@ export function createApp({ db, routing, router, geocoder, solver, travelTime, c
       [fields.transferId, routeId],
     ) as QueryResult).rows[0];
     if (!placement.assigned || !placement.published) flags.push("transfer_moved");
+    // The close holds this Traslado's lock, so a Marca that waited on it sees the Recorrido Cerrado and the Oficina is told.
+    const routeState = (await client.query("SELECT status FROM routes WHERE id = $1", [routeId]) as QueryResult).rows[0];
+    if (routeState?.status === "cerrado") flags.push("route_closed");
     const receiver = fields.receiver;
     let authorized = false;
     if (receiver?.kind === "authorized_adult") {
@@ -3997,7 +4016,7 @@ export function createApp({ db, routing, router, geocoder, solver, travelTime, c
       if (route instanceof Response) return route;
       try {
         await inTransaction(db, async (client) => {
-          const status = (await client.query("SELECT status FROM routes WHERE id = $1 FOR UPDATE", [id]) as QueryResult).rows[0].status;
+          const status = await lockOwnRoute(client, chofer.driverId, id);
           if (status === "borrador") throw new PlanningError(409, "A Recorrido can be started once it is published");
           if (status === "cerrado") throw new PlanningError(409, "This Recorrido is closed");
           if (status === "publicado") {
@@ -4006,6 +4025,54 @@ export function createApp({ db, routing, router, geocoder, solver, travelTime, c
           }
         });
         return context.json({ route: { routeId: id, status: "en_curso" } });
+      } catch (error) {
+        return planningFailure(context, error);
+      }
+    })
+    // Closes an En curso Recorrido once no Traslado on it is Planificado or Subió without Entregado; closing it again changes
+    // nothing. A refusal lists those Traslados, logs the attempt and raises an alert for the Oficina.
+    .post("/driver/routes/:id/close", async (context) => {
+      const chofer = await requireDriver(context);
+      if (chofer instanceof Response) return chofer;
+      const id = parseId(context.req.param("id"));
+      if (!id) return context.json({ error: "Invalid request" }, 400);
+      const route = await ownRoute(context, chofer.driverId, id);
+      if (route instanceof Response) return route;
+      try {
+        const result = await inTransaction(db, async (client) => {
+          // The Traslados are locked before the Recorrido, the order a Marca, a move and an Ausencia use. Locking them again
+          // after the Recorrido takes one a move added in between; no move can add another while the Recorrido is locked.
+          const lockTransfers = async () => await client.query(
+            "SELECT id FROM transfers WHERE id IN (SELECT transfer_id FROM stops WHERE route_id = $1) ORDER BY id FOR UPDATE",
+            [id],
+          );
+          await lockTransfers();
+          const status = await lockOwnRoute(client, chofer.driverId, id);
+          if (status === "cerrado") return { status: 200 as const, body: { route: { routeId: id, status: "cerrado" } } };
+          if (status !== "en_curso") throw new PlanningError(409, "Only a Recorrido en curso can be closed");
+          await lockTransfers();
+          const open = await client.query(
+            `SELECT t.id, t.direction, t.status, p.name FROM transfers t JOIN passengers p ON p.id = t.passenger_id
+              WHERE t.id IN (SELECT transfer_id FROM stops WHERE route_id = $1) AND t.status IN ('planificado', 'subio')
+              ORDER BY t.target_time, t.id`,
+            [id],
+          ) as QueryResult;
+          if (open.rows.length) {
+            const transfers = open.rows.map((row) => ({
+              transferId: Number(row.id), passengerName: String(row.name), direction: String(row.direction), status: String(row.status),
+            }));
+            await insertAlert(client, { kind: "close_refused", routeId: id, details: { transfers } }, now());
+            await appendChange(client, chofer.user.id, "route", String(id), "close_refused", { status }, { transfers });
+            return {
+              status: 409 as const,
+              body: { error: "Resolve these Traslados before closing the Recorrido", transfers },
+            };
+          }
+          await client.query("UPDATE routes SET status = 'cerrado' WHERE id = $1", [id]);
+          await appendChange(client, chofer.user.id, "route", String(id), "closed", { status }, { status: "cerrado" });
+          return { status: 200 as const, body: { route: { routeId: id, status: "cerrado" } } };
+        });
+        return context.json(result.body, result.status);
       } catch (error) {
         return planningFailure(context, error);
       }

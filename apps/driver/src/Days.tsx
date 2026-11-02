@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import {
-  currentLocation, fetchHandover, HandoverView, newMark, otherAdultReceiver, sendMark, startRoute, undoMark,
+  closeRoute, currentLocation, fetchHandover, HandoverView, newMark, otherAdultReceiver, sendMark, startRoute, undoMark,
   type Handover, type Mark, type MarkKind, type Receiver,
 } from "./Marks";
 import {
@@ -113,6 +113,9 @@ export function ChangesView({ route }: { route: DriverRoute }) {
 
 type Acknowledge = (routeId: number, version: number) => void;
 
+/** A Traslado that keeps the Recorrido from closing, as the server lists it. */
+export type OpenTransfer = { transferId: number; passengerName: string; direction: "entrada" | "salida"; status: "planificado" | "subio" };
+
 const MARKED: Record<string, string> = { subio: "Subió", ausente: "Ausente", entregado: "Entregado", cancelado_ausencia: "Cancelled: absence" };
 
 /** What the Chofer does on a Recorrido: start it, mark its Paradas, hand a Pasajero over at home and send the queue now. */
@@ -126,7 +129,10 @@ export type Marking = {
   planFetchedAt: string | null;
   // The open home drop-off with its downloaded data and the last refusal.
   handover: { transferId: number; data: Handover | null; blocked: string | null; searching: boolean } | null;
+  // The Traslados the server named when it last refused to close a Recorrido.
+  refusedClose: { routeId: number; transfers: OpenTransfer[] } | null;
   onStart: (route: DriverRoute) => void;
+  onClose: (route: DriverRoute) => void;
   onMark: (route: DriverRoute, stop: DriverStop, kind: MarkKind, receiver?: Receiver) => void;
   onFlush: () => void;
   onUndo: (route: DriverRoute, mark: Mark) => void;
@@ -203,6 +209,28 @@ export function StopActions({ route, stop, marking }: { route: DriverRoute; stop
   </>;
 }
 
+/**
+ * The refused list with each Traslado's state as the Chofer sees it now (`stopStatus`, so a Marca saved on the phone counts),
+ * without those resolved since; one no longer in the Recorrido (reassigned) is resolved.
+ */
+export function stillOpen(route: DriverRoute, transfers: OpenTransfer[], marking: Pick<Marking, "marks" | "planFetchedAt" | "undone">): OpenTransfer[] {
+  return transfers.flatMap((transfer) => {
+    const stop = route.stops.find((candidate) => candidate.transferId === transfer.transferId);
+    const status = stop && stopStatus(stop, marking.marks[stop.transferId], marking.planFetchedAt, marking.undone);
+    return status === "planificado" || status === "subio" ? [{ ...transfer, status }] : [];
+  });
+}
+
+/** What the Chofer has to resolve before the Recorrido can close. */
+export function CloseRefusal({ transfers }: { transfers: OpenTransfer[] }) {
+  return <div role="alert">
+    <p>Resolve these Traslados before closing the Recorrido:</p>
+    <ul>{transfers.map((transfer) => <li key={transfer.transferId}>{transfer.status === "subio"
+      ? `${transfer.passengerName}: on board, mark Entregado`
+      : `${transfer.passengerName}: not marked, mark Subió or Ausente, or call the Oficina to reassign or cancel it`}</li>)}</ul>
+  </div>;
+}
+
 export function RouteView({ route, sending, onAcknowledge, marking }: {
   route: DriverRoute; sending: boolean; onAcknowledge: Acknowledge; marking?: Marking;
 }) {
@@ -218,7 +246,12 @@ export function RouteView({ route, sending, onAcknowledge, marking }: {
       </>}
     <ChangesView route={route} />
     {marking && route.status === "publicado" && <button type="button" disabled={marking.sending} onClick={() => marking.onStart(route)}>Start Recorrido</button>}
-    {marking && route.status === "en_curso" && <p>Recorrido en curso.</p>}
+    {marking && route.status === "en_curso" && <>
+      <p>Recorrido en curso.</p>
+      <button type="button" disabled={marking.sending} onClick={() => marking.onClose(route)}>Close Recorrido</button>
+      {marking.refusedClose?.routeId === route.routeId && <CloseRefusal transfers={stillOpen(route, marking.refusedClose.transfers, marking)} />}
+    </>}
+    {marking && route.status === "cerrado" && <p>Recorrido closed.</p>}
     <ol>{route.stops.map((stop) => <li key={stop.position}>
       <StopView stop={stop} />
       {marking && <StopActions route={route} stop={stop} marking={marking} />}
@@ -266,6 +299,7 @@ export function DriverHome({ apiUrl, userId, onSignedOut }: { apiUrl: string; us
   const [sending, setSending] = useState(false);
   const [local, setLocal] = useState<QueuedMark[]>([]);
   const [handover, setHandover] = useState<Marking["handover"]>(null);
+  const [refusedClose, setRefusedClose] = useState<Marking["refusedClose"]>(null);
   const [store] = useState(() => indexedDbStore());
   const [queue] = useState(() => markQueue(store, (routeId, mark) => sendMark(apiUrl, routeId, mark)));
   const latestLoad = useRef(0);
@@ -405,12 +439,29 @@ export function DriverHome({ apiUrl, userId, onSignedOut }: { apiUrl: string; us
     undone: undoneKinds(local),
     planFetchedAt: plan?.fetchedAt ?? null,
     handover,
+    refusedClose,
     onStart: (route) => void (async () => {
       setSending(true);
       try {
         const response = await startRoute(apiUrl, route.routeId);
         if (response.status === 401) return await endSession(response);
         setMessage(response.ok ? "Recorrido started" : "Unable to start the Recorrido");
+        await load();
+      } catch {
+        setMessage("Unable to reach the server");
+      } finally {
+        setSending(false);
+      }
+    })(),
+    onClose: (route) => void (async () => {
+      setSending(true);
+      try {
+        const response = await closeRoute(apiUrl, route.routeId);
+        if (response.status === 401) return await endSession(response);
+        const result = await response.json().catch(() => null) as { transfers?: OpenTransfer[] } | null;
+        setRefusedClose(response.status === 409 && result?.transfers ? { routeId: route.routeId, transfers: result.transfers } : null);
+        setMessage(response.ok ? "Recorrido closed" : response.status === 409 && result?.transfers
+          ? "The Recorrido cannot close yet: the Oficina was alerted" : "Unable to close the Recorrido");
         await load();
       } catch {
         setMessage("Unable to reach the server");

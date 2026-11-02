@@ -1,6 +1,6 @@
 import { randomUUID } from "node:crypto";
 import { afterAll, expect } from "vitest";
-import { createApp, type AppConfig, type Router, type RoutingHealth } from "../../src/app.js";
+import { createApp, type AppConfig, type HealthDatabase, type Router, type RoutingHealth } from "../../src/app.js";
 import { hashPassword } from "../../src/auth.js";
 import { createPool } from "../../src/db.js";
 import type { VroomSolver } from "../../src/planner.js";
@@ -29,14 +29,19 @@ type Direction = "entrada" | "salida";
  * Test app for the execution day: an Oficina, a school, Pasajeros with a Responsable legal and a Consentimiento, Choferes
  * with their own Vehículo, and helpers to plan, publish and mark Recorridos. Synthetic data only.
  */
-export function createExecutionHarness(epoch: string, extra: Partial<AppConfig> = {}, engine: { solver?: VroomSolver; travelTime?: TravelTime } = {}) {
+export function createExecutionHarness(
+  epoch: string,
+  extra: Partial<AppConfig> = {},
+  engine: { solver?: VroomSolver; travelTime?: TravelTime; wrapDb?: (db: HealthDatabase) => HealthDatabase } = {},
+) {
   const appPool = createPool(process.env.TEST_DATABASE_URL!);
   const migrationPool = createPool(process.env.TEST_MIGRATION_DATABASE_URL!);
   afterAll(async () => {
     await Promise.all([appPool.end(), migrationPool.end()]);
   });
   const clock = { now: new Date(NOW) };
-  const app = createApp({ db: appPool, routing: routingUp, router: fakeRouter, ...engine, config: { serverEpoch: epoch, now: () => clock.now, ...extra } });
+  const { wrapDb = (db: HealthDatabase) => db, ...engines } = engine;
+  const app = createApp({ db: wrapDb(appPool), routing: routingUp, router: fakeRouter, ...engines, config: { serverEpoch: epoch, now: () => clock.now, ...extra } });
 
   async function request(path: string, method: string, body?: unknown, cookie?: string) {
     return await app.request(path, {

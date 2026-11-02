@@ -98,6 +98,16 @@ export async function startRoute(apiUrl: string, routeId: number) {
   });
 }
 
+/** Asks the server to close the Recorrido; a 409 lists the Traslados to resolve first. */
+export async function closeRoute(apiUrl: string, routeId: number) {
+  return await fetch(`${apiUrl}/driver/routes/${routeId}/close`, {
+    method: "POST",
+    credentials: "include",
+    headers: { "Content-Type": "application/json" },
+    body: "{}",
+  });
+}
+
 /** Downloads the handover data again, never from a cache: "buscar autorización" uses it to get one just recorded. */
 export async function fetchHandover(apiUrl: string, routeId: number, transferId: number) {
   return await fetch(`${apiUrl}/driver/routes/${routeId}/transfers/${transferId}/handover`, { credentials: "include", cache: "no-store" });
