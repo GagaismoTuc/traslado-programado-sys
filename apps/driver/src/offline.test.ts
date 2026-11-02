@@ -1,7 +1,7 @@
 import { describe, expect, it, vi } from "vitest";
-import { newMark, type Mark } from "./Marks";
+import { newMark, undoMark, type Mark } from "./Marks";
 import {
-  CONFLICT_NOTE, latestMarks, markQueue, requestPersistentStorage, savedPlanFor, signOut, startFlushing, wipeIfRevoked,
+  CONFLICT_NOTE, latestMarks, markQueue, refusedMarks, requestPersistentStorage, savedPlanFor, signOut, startFlushing, wipeIfRevoked,
   type CachedPlan, type LocalStore, type QueuedMark,
 } from "./offline";
 
@@ -12,6 +12,7 @@ function memoryStore() {
   const store: LocalStore = {
     marks: async () => [...marks.values()].map((item) => structuredClone(item)),
     putMark: async (item) => void marks.set(item.id, structuredClone(item)),
+    deleteMark: async (id) => void marks.delete(id),
     plan: async () => plan,
     putPlan: async (value) => void (plan = value),
     clear: async () => {
@@ -128,6 +129,106 @@ describe("Marca queue on the phone", () => {
     await round.flush();
     expect(order).toEqual([low.id, high.id]);
     expect(latestMarks([...other.marks.values()])[3].id).toBe(order.at(-1));
+  });
+
+  it("#81 rule 1: a pending Marca the server refused is never the one in force, even with a later phone time; one not answered yet is", async () => {
+    const { store } = memoryStore();
+    const at = (minute: number, kind: Mark["kind"], n: number) =>
+      newMark({ transferId: 3, kind, location: null, version: 1 }, new Date(`2026-10-23T12:0${minute}:00.000Z`), `00000000-0000-4000-8000-00000000001${n}`);
+    const subio = at(0, "subio", 1);
+    const ausente = at(5, "ausente", 2);
+    const entregado = at(6, "entregado", 3);
+    let answer = async (sent: Mark) => stored(sent);
+    const queue = markQueue(store, async (_routeId, sent) => await answer(sent));
+    await queue.add(9, subio);
+    await queue.flush();
+    answer = async () => json({ error: "This Recorrido is closed" }, 409);
+    await queue.add(9, ausente);
+    await queue.flush();
+
+    let items = await store.marks();
+    expect(latestMarks(items)[3]).toMatchObject({ mark: subio, state: "confirmed" });
+    expect(refusedMarks(items)[3]).toMatchObject({ mark: ausente, state: "pending", note: "This Recorrido is closed" });
+
+    // A Marca saved after the refusal has no answer yet: it is the Chofer's newest, in the order the queue sends it.
+    answer = async () => {
+      throw new TypeError("Failed to fetch");
+    };
+    await queue.add(9, entregado);
+    await queue.flush();
+    items = await store.marks();
+    expect(latestMarks(items)[3]).toMatchObject({ mark: entregado, state: "pending", note: null });
+    expect(refusedMarks(items)[3].mark).toEqual(ausente);
+  });
+
+  it("#81 rule 2: Deshacer of a Marca that never left the phone cancels it, and the API never gets an undo of a Marca it does not hold", async () => {
+    const { store, marks } = memoryStore();
+    const sent: string[] = [];
+    let answer: (body: Mark) => Promise<Response> = async () => {
+      throw new TypeError("Failed to fetch");
+    };
+    let check = async (): Promise<Response> => {
+      throw new TypeError("Failed to fetch");
+    };
+    const queue = markQueue(store, async (_routeId, body) => {
+      sent.push(body.id);
+      return await answer(body);
+    }, async () => await check());
+    const subio = mark(1);
+    const undo = undoMark(subio, 1, null, new Date("2026-10-23T12:02:00.000Z"), "00000000-0000-4000-8000-000000000009");
+
+    // Without signal the session check fails first, so the Subió never left the phone.
+    await queue.add(9, subio);
+    await queue.flush();
+    expect(await queue.undo(9, undo)).toBe("cancelled");
+    expect(marks.size).toBe(0);
+    // A second tap finds nothing left to undo and queues nothing.
+    expect(await queue.undo(9, undo)).toBe("cancelled");
+    expect(marks.size).toBe(0);
+    check = async () => json({ user: { id: 7, role: "driver" } }, 200);
+    answer = async (body) => stored(body);
+    expect(await queue.flush()).toEqual({ result: "done", confirmed: 0 });
+    expect(sent).toEqual([]);
+
+    // A Marca whose send was tried may have reached the server: Deshacer queues the undo, sent only once the server
+    // confirms that Marca, never after a refusal of it.
+    answer = async () => {
+      throw new TypeError("Failed to fetch");
+    };
+    await queue.add(9, subio);
+    await queue.flush();
+    expect(sent).toEqual([subio.id]);
+    expect(await queue.undo(9, undo)).toBe("queued");
+    answer = async () => json({ error: "This Recorrido is closed" }, 409);
+    await queue.flush();
+    expect(sent).toEqual([subio.id, subio.id]);
+    expect(marks.get(undo.id)).toMatchObject({ state: "pending", note: null });
+    answer = async (body) => stored(body);
+    expect(await queue.flush()).toEqual({ result: "done", confirmed: 2 });
+    expect(sent).toEqual([subio.id, subio.id, subio.id, undo.id]);
+  });
+
+  it("#81: Deshacer still works without signal within the 2 minutes: the undo of a confirmed Marca waits on the phone and is sent later", async () => {
+    const { store, marks } = memoryStore();
+    const sent: string[] = [];
+    let online = true;
+    const queue = markQueue(store, async (_routeId, body) => {
+      if (!online) throw new TypeError("Failed to fetch");
+      sent.push(body.id);
+      return stored(body);
+    });
+    const subio = mark(1);
+    await queue.add(9, subio);
+    await queue.flush();
+    online = false;
+    const undo = undoMark(subio, 1, null, new Date("2026-10-23T12:02:30.000Z"), "00000000-0000-4000-8000-000000000009");
+    expect(await queue.undo(9, undo)).toBe("queued");
+    expect(await queue.flush()).toEqual({ result: "offline", confirmed: 0 });
+    expect(latestMarks([...marks.values()])[1]).toMatchObject({ mark: undo, state: "pending" });
+    online = true;
+    expect(await queue.flush()).toEqual({ result: "done", confirmed: 1 });
+    expect(sent).toEqual([subio.id, undo.id]);
+    expect(marks.get(subio.id)).toMatchObject({ state: "confirmed" });
   });
 
   it("rule 1: a 401 when the app opens or loads the plan keeps the queue on an expired session and wipes it only on a revoked device", async () => {
