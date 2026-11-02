@@ -1974,11 +1974,21 @@ function formatMarkReceiver(row: Record<string, unknown>): MarkReceiver | null {
   }
 }
 
-/** The Receptor as the history shows it: an Adulto autorizado or a Destino also by name, the adult with their relation. */
+/** Only the last 3 digits of a DNI, without its dots and spaces; a DNI with fewer than 4 digits gives none of them. */
+function maskDni(dni: string) {
+  const digits = normalizeDni(dni);
+  return digits.length < 4 ? "***" : `***${digits.slice(-3)}`;
+}
+
+/**
+ * The Receptor as the history shows it: an Adulto autorizado or a Destino also by name, the adult with their relation,
+ * another adult with a masked DNI. The Marca keeps the whole DNI, and the alerts still show it.
+ */
 function historyReceiver(receiver: MarkReceiver | null, row: Record<string, unknown>) {
   switch (receiver?.kind) {
     case "authorized_adult": return { ...receiver, name: String(row.receiver_adult_name), relation: String(row.receiver_relation) };
     case "destination": return { ...receiver, name: String(row.receiver_destination_name) };
+    case "other_adult": return { ...receiver, dni: maskDni(receiver.dni) };
     default: return receiver;
   }
 }

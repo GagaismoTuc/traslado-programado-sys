@@ -258,7 +258,7 @@ describe("Correcciones", () => {
       .marks.filter((item: { kind: string }) => item.kind === "entregado").map((item: { receiver: unknown }) => item.receiver);
     expect(await receivers(salida.transferId)).toEqual([
       { kind: "authorized_adult", adultId: guardian, name: "Madre Sintética", relation: "madre" },
-      { kind: "other_adult", name: "Tía Sintética", dni: "-3000001", authorizationId: null },
+      { kind: "other_adult", name: "Tía Sintética", dni: "***001", authorizationId: null },
       { kind: "base_staff" },
     ]);
     expect(await receivers(entrada.transferId)).toEqual([{ kind: "destination", destinationId: school, name: "Escuela receptor" }]);

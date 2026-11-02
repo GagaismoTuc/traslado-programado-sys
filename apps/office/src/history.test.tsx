@@ -44,19 +44,36 @@ describe("Traslado history", () => {
     expect(renderToStaticMarkup(<App />)).toContain("<h1>Traslado 3 history</h1>");
   });
 
-  it("Rule 3 (#83): shows who received the Pasajero in each Entregado, never their DNI", () => {
-    const entregado = (id: string, receiver: HistoryMark["receiver"]) => mark(id, "entregado", "2026-10-23T12:05:00.000Z", { receiver });
-    const markup = renderToStaticMarkup(<TransferHistoryView history={{ ...history, status: "entregado", marks: [
+  const entregado = (id: string, receiver: HistoryMark["receiver"]) => mark(id, "entregado", "2026-10-23T12:05:00.000Z", { receiver });
+  const otherAdult = (id: string, dni: string | null) => entregado(id, { kind: "other_adult", name: "Tía Sintética", dni, authorizationId: null });
+  const receivers = (marks: HistoryMark[]) => renderToStaticMarkup(<TransferHistoryView history={{ ...history, status: "entregado", marks }} onCorrect={() => undefined} />);
+
+  it("Rule 3 (#95): shows an Adulto autorizado by name and relation without a DNI, and a Destino by name", () => {
+    const markup = receivers([
       entregado("00000000-0000-4000-8000-000000000011", { kind: "authorized_adult", adultId: 7, name: "Madre Sintética", relation: "madre" }),
-      entregado("00000000-0000-4000-8000-000000000012", { kind: "other_adult", name: "Tía Sintética", dni: "-3000001", authorizationId: null }),
       entregado("00000000-0000-4000-8000-000000000013", { kind: "destination", destinationId: 2, name: "Escuela Sintética" }),
       entregado("00000000-0000-4000-8000-000000000014", { kind: "base_staff" }),
-    ] }} onCorrect={() => undefined} />);
+    ]);
     expect(markup).toContain("Entregado, Receptor: Madre Sintética (madre) by chofer-sintetico");
-    expect(markup).toContain("Entregado, Receptor: Tía Sintética (another adult) by chofer-sintetico");
     expect(markup).toContain("Entregado, Receptor: Escuela Sintética (Destino) by chofer-sintetico");
     expect(markup).toContain("Entregado, Receptor: company staff at the base by chofer-sintetico");
-    expect(markup).not.toContain("3000001");
+    expect(markup).not.toContain("DNI");
+  });
+
+  it("Rule 1 (#95): shows another adult's masked DNI as the digits it ends in", () => {
+    expect(receivers([otherAdult("00000000-0000-4000-8000-000000000012", "***456")]))
+      .toContain("Entregado, Receptor: Tía Sintética (another adult), DNI terminado en 456 by chofer-sintetico");
+  });
+
+  it("Rule 2 (#95): says the DNI was recorded when too short to mask, and shows no DNI line when it is empty or null", () => {
+    const markup = receivers([
+      otherAdult("00000000-0000-4000-8000-000000000015", "***"),
+      otherAdult("00000000-0000-4000-8000-000000000016", ""),
+      otherAdult("00000000-0000-4000-8000-000000000017", null),
+    ]);
+    expect(markup).toContain("Entregado, Receptor: Tía Sintética (another adult), DNI registrado by chofer-sintetico");
+    expect(markup.match(/Entregado, Receptor: Tía Sintética \(another adult\) by chofer-sintetico/g)).toHaveLength(2);
+    expect(markup.match(/DNI/g)).toHaveLength(1);
   });
 
   it("#33: keeps the receiving driver visible in a Trasbordo's Entregado", () => {
