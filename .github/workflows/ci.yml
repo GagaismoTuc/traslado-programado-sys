@@ -40,6 +40,18 @@ jobs:
           path: apps/office/test-results
           retention-days: 7
 
+  deploy-tests:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version-file: .nvmrc
+      - run: docker run --rm -v "$PWD:/work" -w /work docker:cli sh deploy/tests/test-deploy.sh
+      - run: docker run --rm -v "$PWD:/work" -w /work docker:cli sh deploy/tests/test-seed.sh
+      - run: node --test deploy/tests/compose.test.mjs
+      - run: sh .github/scripts/test-deploy-images.sh
+
   commitlint:
     runs-on: ubuntu-latest
     steps:
@@ -66,7 +78,7 @@ jobs:
 
   ci-ok:
     if: always()
-    needs: [verify, e2e, commitlint, gitleaks]
+    needs: [verify, e2e, deploy-tests, commitlint, gitleaks]
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
