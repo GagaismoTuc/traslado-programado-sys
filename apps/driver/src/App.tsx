@@ -81,15 +81,9 @@ export function App() {
     }
   }
 
-  async function logout() {
-    await fetch(`${apiUrl}/auth/logout`, { method: "POST", credentials: "include" });
-    setSignedIn(null);
-  }
-
   if (signedIn) {
     return <main>
       <h1>Driver</h1>
-      <button type="button" onClick={() => void logout()}>Sign out</button>
       <DriverHome apiUrl={apiUrl} userId={signedIn} onSignedOut={() => setSignedIn(null)} />
     </main>;
   }
