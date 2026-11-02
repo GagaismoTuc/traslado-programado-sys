@@ -27,6 +27,8 @@ export type TransferHistory = {
   status: string;
   versions: { routeId: number; version: number; publishedAt: string; publishedBy: string; driverName: string; pickupTime: string | null; dropoffTime: string | null }[];
   marks: HistoryMark[];
+  // A leg of a Trasbordo: every leg of the chain, first to last, with its Marcas.
+  chain?: { transferId: number; marks: HistoryMark[] }[];
   changes: { action: string; before: unknown; after: unknown; occurredAt: string; actor: { userId: number | null; name: string | null } }[];
 };
 
@@ -95,6 +97,13 @@ export function TransferHistoryView({ history, onCorrect }: {
         {mark.flags.length > 0 && <div>{`Flagged: ${mark.flags.join(", ")}`}</div>}
       </li>)}</ul>
       : <p>No Marcas.</p>}
+    {history.chain && <>
+      <h2>Trasbordo chain</h2>
+      <ol>{history.chain.map((leg, index) => <li key={leg.transferId}>
+        {`Leg ${index + 1}: Traslado ${leg.transferId}${leg.transferId === history.transferId ? " (this one)" : ""}`}
+        <ul>{leg.marks.map((mark) => <li key={mark.id}>{markLine(mark)}</li>)}</ul>
+      </li>)}</ol>
+    </>}
     {current && <form onSubmit={submit}>
       <h3>{`Correct the Marca in force (${KINDS[current.kind]})`}</h3>
       <label>
