@@ -79,8 +79,17 @@ export interface Transfer {
   targetWindow?: TargetTimeWindow;
   earlyToleranceMinutes?: number;
   lateToleranceMinutes?: number;
+  // A leg after a Trasbordo rides since the first pickup of its chain (the original Subió, or leg A's planned pickup):
+  // its ride time counts from this minute, not from its own pickup.
+  rideStartMinutes?: number;
+  // The end of a Trasbordo leg at the Trasbordo point, held to a hard window [earliest, latest]. When that end is the
+  // stop that carries the target time, the window replaces the target time.
+  trasbordo?: { stop: "pickup" | "dropoff"; earliest: number; latest: number };
 }
 export type Traslado = Transfer;
+
+// Minutes after the planned time t that the Trasbordo point stays open: the hard window is [t, t + 5] (inferido).
+export const TRASBORDO_WINDOW_MINUTES = 5;
 
 export type StopType = "pickup" | "dropoff" | "subio" | "entregado" | "subida" | "bajada";
 
@@ -116,7 +125,8 @@ export type RouteRuleViolationType =
   | "missing_adaptation"
   | "target_time_window_broken"
   | "unserved_transfer"
-  | "dropoff_before_pickup";
+  | "dropoff_before_pickup"
+  | "trasbordo_window_broken";
 
 export interface RouteViolation {
   rule: RouteRuleViolationType;
@@ -332,7 +342,7 @@ export function validateRoute(
       const passenger = passengerMap.get(transfer.passengerId);
       const maxRide = passenger?.maxRideTimeMinutes ?? passenger?.tiempoMaximoABordoMinutos;
       if (maxRide !== undefined && maxRide !== null) {
-        const pStart = parseTimeToMinutes(pickupStop.plannedTime ?? pickupStop.horaPlanificada);
+        const pStart = transfer.rideStartMinutes ?? parseTimeToMinutes(pickupStop.plannedTime ?? pickupStop.horaPlanificada);
         const dArr = parseTimeToMinutes(dropoffStop.plannedTime ?? dropoffStop.horaPlanificada);
         if (pStart !== undefined && dArr !== undefined) {
           const dServ = dropoffStop.serviceDurationMinutes ?? passenger?.dropoffDurationMinutes ?? defaultServiceDur;
@@ -355,6 +365,7 @@ export function validateRoute(
   for (const transfer of transfers) {
     const dir = transfer.direction ?? transfer.sentido ?? "inbound";
     const isInbound = dir === "inbound" || dir === "entrada";
+    if (transfer.trasbordo?.stop === (isInbound ? "dropoff" : "pickup")) continue;
     const targetStop = isInbound
       ? stops.find((s) => s.transferId === transfer.id && isDropoff(s.type))
       : stops.find((s) => s.transferId === transfer.id && isPickup(s.type));
@@ -396,6 +407,23 @@ export function validateRoute(
           });
         }
       }
+    }
+  }
+
+  // 7. Trasbordo point window: the leg's end at the point happens within its hard window
+  for (const transfer of transfers) {
+    if (!transfer.trasbordo) continue;
+    const { stop: kind, earliest, latest } = transfer.trasbordo;
+    const stop = stops.find((s) => s.transferId === transfer.id && (kind === "pickup" ? isPickup(s.type) : isDropoff(s.type)));
+    const plannedMins = stop ? parseTimeToMinutes(stop.plannedTime ?? stop.horaPlanificada) : undefined;
+    if (plannedMins !== undefined && (plannedMins < earliest - 1e-4 || plannedMins > latest + 1e-4)) {
+      violations.push({
+        rule: "trasbordo_window_broken",
+        passengerId: transfer.passengerId,
+        transferId: transfer.id,
+        message: `Trasbordo ${kind} at ${plannedMins} min is outside its window (${earliest}-${latest} min)`,
+        details: { plannedMinutes: plannedMins, earliestMinutes: earliest, latestMinutes: latest, stop: kind },
+      });
     }
   }
 
