@@ -75,7 +75,7 @@ export function AlertText({ alert }: { alert: Alert }) {
       const remaining = details.remaining as RemainingTransfer[];
       return <>{`${who} was marked Ausente on an entrada${by}. `}
         {remaining.length
-          ? <>Decide about the rest of the day:<ul>{remaining.map((transfer) => <li key={transfer.transferId}>{remainingLabel(transfer)}</li>)}</ul></>
+          ? <>{alert.resolution ? "The rest of the day when it was raised:" : "Decide about the rest of the day:"}<ul>{remaining.map((transfer) => <li key={transfer.transferId}>{remainingLabel(transfer)}</li>)}</ul></>
           : "No other Traslados today."}</>;
     }
     case "close_refused": {

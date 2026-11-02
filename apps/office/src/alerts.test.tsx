@@ -80,6 +80,8 @@ describe("Oficina alert inbox", () => {
     const resolved = renderToStaticMarkup(<AlertList alerts={[alert("absent_on_entrada", { remaining }, { resolution })]} />);
     expect(resolved).toContain("Pasajero Sintético was marked Ausente on an entrada (Chofer Sintético).");
     expect(resolved).toContain("<div>Resolved by a Corrección to Subió by oficina-sintetica (office) at 09:30. Reason: La escuela confirmó que viajó</div>");
+    expect(resolved).not.toContain("Decide about the rest of the day");
+    expect(resolved).toContain("The rest of the day when it was raised:<ul><li>");
     const undone = renderToStaticMarkup(<AlertList alerts={[alert("absent_on_entrada", { remaining }, {
       resolution: { ...resolution, kind: "undo", at: "2026-10-23T12:01:00.000Z", reason: null, author: { userId: 4, username: "chofer-sintetico", role: "driver" } },
     })]} />);
