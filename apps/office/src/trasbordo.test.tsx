@@ -1,5 +1,6 @@
 import { renderToStaticMarkup } from "react-dom/server";
 import { describe, expect, it } from "vitest";
+import { AlertList } from "./AlertsPage";
 import { UnpublishedTransfers } from "./PlanPage";
 import { TrasbordoForm, trasbordoMessage, trasbordoMode } from "./TrasbordoPanel";
 
@@ -40,5 +41,16 @@ describe("Trasbordo in the Plan diario", () => {
     expect(trasbordoMessage({ version: { version: 2 } })).toBe("Trasbordo recorded. The receiving Recorrido is published as version 2");
     expect(trasbordoMessage({ error: "The Recorrido breaks limits: fix it or publish it with a reason" }))
       .toBe("Trasbordo recorded, but the receiving Recorrido was not published: The Recorrido breaks limits: fix it or publish it with a reason");
+  });
+
+  // Regla 1: a Chofer's own Marca at a Trasbordo point reaches the inbox with what to do about it.
+  it("tells the Oficina to correct a Chofer's Marca at a Trasbordo point and record the Trasbordo", () => {
+    const markup = renderToStaticMarkup(<AlertList alerts={[{
+      id: 1, kind: "mark_flagged", createdAt: "2026-10-23T11:02:00.000Z", transferId: 3, routeId: 9, markId: "00000000-0000-4000-8000-000000000001",
+      passengerName: "Pasajero Sintético", driverName: "Chofer Sintético", details: { reasons: ["trasbordo_unlinked"] },
+    }]} />);
+    expect(markup).toContain(
+      "Marca accepted with a warning for Pasajero Sintético (Chofer Sintético): the Chofer marked it at a Trasbordo point: correct it and record the Trasbordo",
+    );
   });
 });
