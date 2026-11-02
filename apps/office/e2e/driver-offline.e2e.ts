@@ -167,9 +167,31 @@ async function markWithoutSignal(context: BrowserContext, page: Page) {
     await navigator.serviceWorker.ready;
   });
   await expect.poll(() => savedAdults(page, seeded.transferId)).toEqual(["Madre Offline E2E"]);
-  await context.setOffline(true);
+  await loseSignal(context);
   await page.getByRole("button", { name: "Subió" }).click();
   await expect(page.getByText("Saved on phone", { exact: true })).toHaveCount(2);
+}
+
+/**
+ * The phone loses its signal: every request the page or its service worker sends is dropped before it leaves the
+ * browser. `setOffline` alone is not enough: under load Chromium has let a request reach the server and only then failed
+ * it in the page with ERR_INTERNET_DISCONNECTED (#82). It stays on so the app reads `navigator.onLine` and gets the
+ * `online` event when the signal returns. The returned function records the URLs of the dropped requests.
+ */
+async function loseSignal(context: BrowserContext) {
+  const dropped: string[] = [];
+  await context.route("**/*", async (route) => {
+    dropped.push(route.request().url());
+    await route.abort("internetdisconnected");
+  });
+  await context.setOffline(true);
+  return () => dropped;
+}
+
+/** The signal returns: requests reach the network again, then the app gets its `online` event. */
+async function regainSignal(context: BrowserContext) {
+  await context.unrouteAll({ behavior: "ignoreErrors" });
+  await context.setOffline(false);
 }
 
 test.beforeEach(async () => {
@@ -191,7 +213,7 @@ test("marks without signal, keeps the Marcas through a reload and confirms each 
   });
   await expect.poll(() => savedAdults(page, seeded.transferId)).toEqual(["Madre Offline E2E"]);
 
-  await context.setOffline(true);
+  const dropped = await loseSignal(context);
   await page.getByRole("button", { name: "Subió" }).click();
   await expect(page.getByText("Saved on phone", { exact: true })).toHaveCount(2);
 
@@ -205,8 +227,10 @@ test("marks without signal, keeps the Marcas through a reload and confirms each 
   await expect(page.getByText("Marked: Entregado")).toHaveCount(2);
   await expect(page.getByText("Saved on phone", { exact: true })).toHaveCount(2);
   expect(await storedMarks(seeded.transferId)).toEqual([]);
+  // The app did try to send the Marcas, and the lost signal is what kept them on the phone.
+  expect(dropped()).toContain(`${driverUrl}/api/driver/routes/${seeded.routeId}/marks`);
 
-  await context.setOffline(false);
+  await regainSignal(context);
   await expect(page.getByText("Confirmed by server", { exact: true })).toHaveCount(2);
   const marks = await storedMarks(seeded.transferId);
   expect(marks.map((mark) => mark.kind)).toEqual(["subio", "entregado"]);
@@ -229,7 +253,7 @@ test("Cerrar sesión refuses without signal while a Marca is only on the phone, 
   expect(await sessionEnd(seeded.token)).toBeNull();
   expect(await storedMarks(seeded.transferId)).toEqual([]);
 
-  await context.setOffline(false);
+  await regainSignal(context);
   await page.getByRole("button", { name: "Cerrar sesión" }).click();
   await expect(page.getByRole("heading", { name: "Driver sign-in" })).toBeVisible();
   expect((await storedMarks(seeded.transferId)).map((mark) => mark.kind)).toEqual(["subio"]);
@@ -261,10 +285,26 @@ test("Revocar por pérdida o robo wipes the phone without uploading its queue an
     if (request.method() === "POST" && request.url().includes("/marks")) sentMarks.push(request.url());
   });
   const asked = page.waitForRequest((request) => request.url().endsWith("/auth/me"));
-  await context.setOffline(false);
+  await regainSignal(context);
   await asked;
   await expect(page.getByRole("heading", { name: "Driver sign-in" })).toBeVisible();
   await expect.poll(() => savedOnPhone(page)).toEqual({ marks: 0, plan: false });
   expect(sentMarks).toEqual([]);
   expect(await storedMarks(seeded.transferId)).toEqual([]);
+});
+
+test("drops the requests the service worker sends itself while the phone has no signal", async ({ context, page }) => {
+  const driverUrl = process.env.E2E_DRIVER_URL!;
+  await page.goto(driverUrl);
+  await expect.poll(() => page.evaluate(() => navigator.serviceWorker.controller !== null)).toBe(true);
+  // Without its precached copy, the service worker asks the network for the icon itself.
+  await page.evaluate(async () => {
+    for (const key of await caches.keys()) await (await caches.open(key)).delete("/icon-192.png");
+  });
+
+  const dropped = await loseSignal(context);
+  const fromWorker = context.waitForEvent("requestfailed", (request) => request.serviceWorker() !== null && request.url() === `${driverUrl}/icon-192.png`);
+  expect(await page.evaluate(async () => await fetch("/icon-192.png").then(() => "loaded", () => "failed"))).toBe("failed");
+  await fromWorker;
+  expect(dropped()).toContain(`${driverUrl}/icon-192.png`);
 });
