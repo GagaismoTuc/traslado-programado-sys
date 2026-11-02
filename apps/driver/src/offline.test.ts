@@ -1,8 +1,8 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { newMark, undoMark, type Mark } from "./Marks";
+import { newIncident, newMark, undoMark, type Incident, type Mark } from "./Marks";
 import {
   CONFLICT_NOTE, endedData, latestMarks, markQueue, refusedMarks, requestPersistentStorage, savedPlanFor, signOut, startFlushing, wipeIfRevoked,
-  type CachedPlan, type LocalStore, type QueuedMark,
+  type CachedPlan, type LocalStore, type QueuedItem, type QueuedMark,
 } from "./offline";
 
 // The Marcas below are made on 2026-10-23; the phone's clock stays on that day unless a test moves it.
@@ -16,7 +16,7 @@ afterEach(() => {
 
 /** The store contract in memory; the IndexedDB one is exercised by the C3 test in apps/office/e2e/driver-offline.e2e.ts. */
 function memoryStore() {
-  const marks = new Map<string, QueuedMark>();
+  const marks = new Map<string, QueuedItem>();
   let plan: CachedPlan | null = null;
   let epoch: string | null = null;
   const store: LocalStore = {
@@ -529,5 +529,56 @@ describe("Server epoch and the end-of-day wipe", () => {
     expect([...marks.values()].map((item) => item.state)).toEqual(["confirmed", "confirmed"]);
     expect(await reopened.flush()).toEqual({ result: "done", confirmed: 0 });
     expect(sent).toHaveLength(4);
+  });
+  it("queues an Incidente through the same queue as Marcas in chronological order, works offline, and keeps sign-out safe", async () => {
+    const { store, marks } = memoryStore();
+    const sent: string[] = [];
+    let online = false;
+    const sendMark = vi.fn(async (_routeId: number, body: Mark) => {
+      if (!online) throw new TypeError("Failed to fetch");
+      sent.push(body.id);
+      return stored(body);
+    });
+    const sendInc = vi.fn(async (_routeId: number, inc: Incident) => {
+      if (!online) throw new TypeError("Failed to fetch");
+      sent.push(inc.id);
+      return json({ incident: { id: inc.id, routeId: 9 } }, 201);
+    });
+    const queue = markQueue(store, sendMark, undefined, sendInc);
+
+    // Chofer marks Subió at 12:01, then reports an Incidente at 12:02
+    const subio = mark(1);
+    const incident = newIncident(
+      { kind: "delay", note: "Corte de calle", location: null },
+      new Date("2026-10-23T12:02:00.000Z"),
+      "00000000-0000-4000-8000-000000000099",
+    );
+
+    await queue.add(9, subio);
+    await queue.addIncident(9, incident);
+
+    // Without signal: both remain pending in the queue
+    expect(await queue.flush()).toEqual({ result: "offline", confirmed: 0 });
+    expect(marks.get(subio.id)?.state).toBe("pending");
+    expect(marks.get(incident.id)?.state).toBe("pending");
+
+    // Cerrar sesión refuses while items are unconfirmed
+    const session = async () => json({ user: { id: 1 } }, 200);
+    const logout = vi.fn(async () => json({}, 200));
+    const signOutResult = await signOut(store, queue, { session, logout });
+    expect(signOutResult).toEqual({ result: "refused", pending: 2, offline: true });
+    expect(logout).not.toHaveBeenCalled();
+
+    // Signal returns: queue flushes in chronological phoneTime order (Subió first, then Incidente)
+    online = true;
+    expect(await queue.flush()).toEqual({ result: "done", confirmed: 2 });
+    expect(sent).toEqual([subio.id, incident.id]);
+    expect(marks.get(subio.id)?.state).toBe("confirmed");
+    expect(marks.get(incident.id)?.state).toBe("confirmed");
+
+    // Once confirmed, Cerrar sesión succeeds
+    const finalSignOut = await signOut(store, queue, { session, logout });
+    expect(finalSignOut).toEqual({ result: "signed_out" });
+    expect(logout).toHaveBeenCalled();
   });
 });

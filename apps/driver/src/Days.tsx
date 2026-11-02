@@ -1,11 +1,11 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import {
-  closeRoute, currentLocation, fetchHandover, HandoverView, newMark, otherAdultReceiver, sendMark, startRoute, undoMark,
-  type Handover, type Mark, type MarkKind, type Receiver,
+  closeRoute, currentLocation, fetchHandover, HandoverView, newIncident, newMark, otherAdultReceiver, sendIncident, sendMark, startRoute, undoMark,
+  type Handover, type IncidentKind, type Mark, type MarkKind, type Receiver,
 } from "./Marks";
 import {
   indexedDbStore, latestMarks, markQueue, refusedMarks, requestPersistentStorage, savedPlanFor, signOut, startFlushing, wipeIfRevoked, type CachedPlan,
-  type QueuedMark, type SignOutOutcome,
+  type QueuedItem, type QueuedMark, type SignOutOutcome,
 } from "./offline";
 
 export type DriverStop = {
@@ -143,6 +143,7 @@ export type Marking = {
   onOpenHandover: (route: DriverRoute, stop: DriverStop) => void;
   onOtherAdult: (route: DriverRoute, stop: DriverStop, typed: { name: string; dni: string; adultConfirmed: boolean }) => void;
   onSearch: (route: DriverRoute, stop: DriverStop) => void;
+  onIncident?: (route: DriverRoute, kind: IncidentKind, note: string) => void;
 };
 
 /**
@@ -166,10 +167,11 @@ function markState(local: QueuedMark, undone: Record<string, MarkKind>) {
 }
 
 /** For each undo on the phone, by its UUID, the kind of the Marca it undoes. */
-export function undoneKinds(items: QueuedMark[]) {
+export function undoneKinds(items: QueuedItem[]) {
   const kinds: Record<string, MarkKind> = {};
   for (const item of items) {
-    const target = item.mark.kind === "undo" ? items.find((other) => other.id === item.mark.corrects) : undefined;
+    if (!("mark" in item)) continue;
+    const target = item.mark.kind === "undo" ? items.find((other): other is QueuedMark => "mark" in other && other.id === item.mark.corrects) : undefined;
     if (target) kinds[item.id] = target.mark.kind;
   }
   return kinds;
@@ -239,6 +241,45 @@ export function CloseRefusal({ transfers }: { transfers: OpenTransfer[] }) {
   </div>;
 }
 
+export function IncidentForm({
+  route,
+  sending,
+  onIncident,
+}: {
+  route: DriverRoute;
+  sending: boolean;
+  onIncident: (kind: IncidentKind, note: string) => void;
+}) {
+  return <details>
+    <summary>Report incident</summary>
+    <form
+      aria-label="Report incident"
+      onSubmit={(event) => {
+        event.preventDefault();
+        const data = new FormData(event.currentTarget);
+        const kind = String(data.get("kind") ?? "delay") as IncidentKind;
+        const note = String(data.get("note") ?? "").trim();
+        if (!note) return;
+        onIncident(kind, note);
+        event.currentTarget.reset();
+      }}
+    >
+      <h4>Report incident</h4>
+      <label htmlFor={`incident-type-${route.routeId}`}>Type:</label>
+      <select id={`incident-type-${route.routeId}`} name="kind" defaultValue="delay">
+        <option value="delay">Delay</option>
+        <option value="vehicle_fault">Vehicle fault</option>
+        <option value="accident">Accident</option>
+        <option value="health_crisis">Pasajero health crisis</option>
+        <option value="other">Other</option>
+      </select>
+      <label htmlFor={`incident-note-${route.routeId}`}>Note:</label>
+      <textarea id={`incident-note-${route.routeId}`} name="note" required />
+      <button type="submit" disabled={sending}>Submit incident</button>
+    </form>
+  </details>;
+}
+
 export function RouteView({ route, sending, onAcknowledge, marking }: {
   route: DriverRoute; sending: boolean; onAcknowledge: Acknowledge; marking?: Marking;
 }) {
@@ -259,6 +300,9 @@ export function RouteView({ route, sending, onAcknowledge, marking }: {
       <button type="button" disabled={marking.sending} onClick={() => marking.onClose(route)}>Close Recorrido</button>
       {marking.refusedClose?.routeId === route.routeId && <CloseRefusal transfers={stillOpen(route, marking.refusedClose.transfers, marking)} />}
     </>}
+    {marking && marking.onIncident && route.status === "en_curso" && (
+      <IncidentForm route={route} sending={marking.sending} onIncident={(kind, note) => marking.onIncident!(route, kind, note)} />
+    )}
     {marking && route.status === "cerrado" && <p>Recorrido closed.</p>}
     <ol>{route.stops.map((stop) => <li key={stop.position}>
       <StopView stop={stop} />
@@ -315,12 +359,17 @@ export function DriverHome({ apiUrl, userId, onSignedOut }: { apiUrl: string; us
   // A failed load is shown until a later load succeeds, apart from the acknowledgement message.
   const [loadError, setLoadError] = useState("");
   const [sending, setSending] = useState(false);
-  const [local, setLocal] = useState<QueuedMark[]>([]);
+  const [local, setLocal] = useState<QueuedItem[]>([]);
   const [handover, setHandover] = useState<Marking["handover"]>(null);
   const [refusedClose, setRefusedClose] = useState<Marking["refusedClose"]>(null);
   const [store] = useState(() => indexedDbStore());
   const [session] = useState(() => () => fetch(`${apiUrl}/auth/me`, { credentials: "include" }));
-  const [queue] = useState(() => markQueue(store, (routeId, mark) => sendMark(apiUrl, routeId, mark), session));
+  const [queue] = useState(() => markQueue(
+    store,
+    (routeId, mark) => sendMark(apiUrl, routeId, mark),
+    session,
+    (routeId, incident) => sendIncident(apiUrl, routeId, incident),
+  ));
   const latestLoad = useRef(0);
   const signedOut = useRef(onSignedOut);
   signedOut.current = onSignedOut;
@@ -477,6 +526,24 @@ export function DriverHome({ apiUrl, userId, onSignedOut }: { apiUrl: string; us
     await flush();
   }
 
+  async function saveIncident(route: DriverRoute, kind: IncidentKind, note: string) {
+    const tappedAt = new Date();
+    setSending(true);
+    try {
+      const location = await currentLocation(navigator.geolocation);
+      const incident = newIncident({ kind, note, location }, tappedAt);
+      await queue.addIncident(route.routeId, incident);
+      setMessage("Incidente saved on phone");
+      await refreshLocal();
+    } catch {
+      setMessage("The phone could not save the Incidente: report it again");
+      return;
+    } finally {
+      setSending(false);
+    }
+    await flush();
+  }
+
   const marking: Marking = {
     sending,
     marks: latestMarks(local),
@@ -529,6 +596,7 @@ export function DriverHome({ apiUrl, userId, onSignedOut }: { apiUrl: string; us
       else setHandover({ ...handover, blocked: result.message });
     },
     onSearch: (route, stop) => void downloadHandover(route, stop, true),
+    onIncident: (route, kind, note) => void saveIncident(route, kind, note),
   };
 
   const [today] = driverDays();

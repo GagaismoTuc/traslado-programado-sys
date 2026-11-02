@@ -450,7 +450,31 @@ export const alerts = pgTable("alerts", {
   uniqueIndex("alerts_dedupe_key_unique").on(table.dedupeKey),
   check(
     "alerts_kind_check",
-    sql`${table.kind} IN ('other_adult_handover', 'mark_flagged', 'mark_conflict', 'authorization_conflict', 'absent_on_entrada', 'close_refused')`,
+    sql`${table.kind} IN ('other_adult_handover', 'mark_flagged', 'mark_conflict', 'authorization_conflict', 'absent_on_entrada', 'close_refused', 'incident')`,
+  ),
+]);
+
+// Append-only (the app role has no UPDATE or DELETE). An Incidente reported by a Chofer during a Recorrido.
+export const incidents = pgTable("incidents", {
+  id: integer().generatedAlwaysAsIdentity().primaryKey(),
+  clientId: uuid("client_id").notNull(),
+  routeId: integer("route_id").notNull().references(() => routes.id, { onDelete: "restrict" }),
+  driverId: integer("driver_id").notNull().references(() => drivers.id, { onDelete: "restrict" }),
+  sessionId: integer("session_id").notNull().references(() => sessions.id, { onDelete: "restrict" }),
+  kind: text().notNull(),
+  note: text().notNull(),
+  phoneTime: timestamp("phone_time", { withTimezone: true, mode: "string" }).notNull(),
+  serverTime: timestamp("server_time", { withTimezone: true, mode: "string" }).defaultNow().notNull(),
+  latitude: doublePrecision(),
+  longitude: doublePrecision(),
+}, (table) => [
+  uniqueIndex("incidents_client_id_unique").on(table.clientId),
+  index("incidents_route_id_index").on(table.routeId),
+  check("incidents_kind_check", sql`${table.kind} IN ('delay', 'vehicle_fault', 'accident', 'health_crisis', 'other')`),
+  check(
+    "incidents_location_check",
+    sql`(${table.latitude} IS NULL AND ${table.longitude} IS NULL)
+      OR (${table.latitude} BETWEEN -90 AND 90 AND ${table.longitude} BETWEEN -180 AND 180)`,
   ),
 ]);
 

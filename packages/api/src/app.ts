@@ -2084,6 +2084,44 @@ function parseAuthorization(body: unknown): { legalGuardianId: number; call: "ou
   return { legalGuardianId, call: body.call, name, dni };
 }
 
+type IncidentKind = "delay" | "vehicle_fault" | "accident" | "health_crisis" | "other";
+const INCIDENT_KINDS: IncidentKind[] = ["delay", "vehicle_fault", "accident", "health_crisis", "other"];
+type IncidentFields = {
+  id: string;
+  kind: IncidentKind;
+  note: string;
+  phoneTime: string;
+  location: MarkLocation;
+};
+
+function parseIncident(body: unknown): IncidentFields | null {
+  if (!isObject(body)) return null;
+  const id = typeof body.id === "string" && UUID_PATTERN.test(body.id) ? body.id.toLowerCase() : null;
+  const kind = typeof body.kind === "string" && INCIDENT_KINDS.includes(body.kind as IncidentKind) ? (body.kind as IncidentKind) : null;
+  const note = boundedText(body.note, 2000);
+  const phoneTime = typeof body.phoneTime === "string" && /T.*(Z|[+-]\d{2}:\d{2})$/.test(body.phoneTime) ? new Date(body.phoneTime) : null;
+  const location = body.location === null ? null : isObject(body.location)
+    && typeof body.location.lat === "number" && Math.abs(body.location.lat) <= 90
+    && typeof body.location.lng === "number" && Math.abs(body.location.lng) <= 180
+    ? { lat: body.location.lat, lng: body.location.lng }
+    : undefined;
+  if (!id || !kind || !note || !phoneTime || Number.isNaN(phoneTime.getTime()) || location === undefined) return null;
+  return { id, kind, note, phoneTime: phoneTime.toISOString(), location };
+}
+
+function formatIncident(row: Record<string, unknown>) {
+  return {
+    id: String(row.client_id),
+    routeId: Number(row.route_id),
+    driverId: Number(row.driver_id),
+    kind: String(row.kind) as IncidentKind,
+    note: String(row.note),
+    phoneTime: new Date(String(row.phone_time)).toISOString(),
+    serverTime: new Date(String(row.server_time)).toISOString(),
+    location: row.latitude === null ? null : { lat: Number(row.latitude), lng: Number(row.longitude) },
+  };
+}
+
 export function createApp({ db, routing, router, geocoder, solver, travelTime, config }: {
   db: HealthDatabase;
   routing: RoutingHealth;
@@ -2373,6 +2411,63 @@ export function createApp({ db, routing, router, geocoder, solver, travelTime, c
       }, serverTime);
     }
     return { status: 201 as const, mark: formatMark((await stored())!) };
+  }
+
+  async function recordIncident(
+    client: Queryable, chofer: { user: AuthenticatedUser; driverId: number }, routeId: number, fields: IncidentFields,
+  ) {
+    const existing = (await client.query("SELECT * FROM incidents WHERE client_id = $1", [fields.id]) as QueryResult).rows[0];
+    if (existing) {
+      if (Number(existing.driver_id) !== chofer.driverId) throw new PlanningError(403, "This Incidente belongs to another Chofer");
+      return { status: 200 as const, incident: formatIncident(existing) };
+    }
+    const onBoardQuery = await client.query(
+      `SELECT t.id, p.name FROM transfers t JOIN passengers p ON p.id = t.passenger_id
+        WHERE t.id IN (SELECT transfer_id FROM stops WHERE route_id = $1) AND t.status = 'subio'
+        ORDER BY t.target_time, t.id`,
+      [routeId],
+    ) as QueryResult;
+    const onBoard = onBoardQuery.rows.map((row) => ({
+      transferId: Number(row.id),
+      passengerName: String(row.name),
+    }));
+    const serverTime = now();
+    const inserted = await client.query(
+      `INSERT INTO incidents (client_id, route_id, driver_id, session_id, kind, note, phone_time, server_time, latitude, longitude)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
+       ON CONFLICT (client_id) DO NOTHING RETURNING *`,
+      [
+        fields.id, routeId, chofer.driverId, chofer.user.session_id, fields.kind, fields.note, fields.phoneTime, serverTime,
+        fields.location?.lat ?? null, fields.location?.lng ?? null,
+      ],
+    ) as QueryResult;
+    if (!inserted.rows[0]) {
+      const stored = (await client.query("SELECT * FROM incidents WHERE client_id = $1", [fields.id]) as QueryResult).rows[0];
+      return { status: 200 as const, incident: formatIncident(stored!) };
+    }
+    const incidentRow = inserted.rows[0];
+    const incidentId = Number(incidentRow.id);
+    await insertAlert(client, {
+      kind: "incident",
+      routeId,
+      details: {
+        incidentId,
+        clientId: fields.id,
+        kind: fields.kind,
+        note: fields.note,
+        phoneTime: fields.phoneTime,
+        location: fields.location,
+        onBoard,
+      },
+      dedupeKey: `incident:${fields.id}`,
+    }, serverTime);
+    await appendChange(client, chofer.user.id, "route", String(routeId), "incident_reported", null, {
+      incidentId,
+      clientId: fields.id,
+      kind: fields.kind,
+      note: fields.note,
+    });
+    return { status: 201 as const, incident: formatIncident(incidentRow) };
   }
 
   async function listDocuments(context: Context, kind: DocumentOwner["kind"]) {
@@ -4560,6 +4655,22 @@ export function createApp({ db, routing, router, geocoder, solver, travelTime, c
       if (route instanceof Response) return route;
       try {
         const { status, ...result } = await inTransaction(db, async (client) => await recordMark(client, chofer, id, fields));
+        return context.json(result, status);
+      } catch (error) {
+        return planningFailure(context, error);
+      }
+    })
+    // An Incidente reported by the Chofer; lists children currently on board in the alert and logs to change_log.
+    .post("/driver/routes/:id/incidents", async (context) => {
+      const chofer = await requireDriver(context);
+      if (chofer instanceof Response) return chofer;
+      const id = parseId(context.req.param("id"));
+      const fields = parseIncident(await context.req.json().catch(() => null));
+      if (!id || !fields) return context.json({ error: "Invalid request" }, 400);
+      const route = await ownRoute(context, chofer.driverId, id, true);
+      if (route instanceof Response) return route;
+      try {
+        const { status, ...result } = await inTransaction(db, async (client) => await recordIncident(client, chofer, id, fields));
         return context.json(result, status);
       } catch (error) {
         return planningFailure(context, error);
