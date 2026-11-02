@@ -3,7 +3,7 @@ import qrcode from "qrcode-generator";
 import { describe, expect, it } from "vitest";
 import { readError } from "./api";
 import { CodeForm, EnrolmentDetails, SecondFactorPage } from "./SecondFactor";
-import { DeviceSessionList, PersistentSessionToggle } from "./UserAccess";
+import { DeviceSessionList, PersistentSessionToggle, UnconfirmedTransferList } from "./UserAccess";
 
 const enrolment = {
   secret: "A4DQOBYHA4DQOBYHA4DQOBYHA4DQOBYH",
@@ -37,12 +37,22 @@ describe("office access screens", () => {
     ]} />);
     expect(sessions).toContain("Van phone");
     expect(sessions).toContain("Office laptop (this device)");
-    expect(sessions.match(/>Revoke<\/button>/g)).toHaveLength(2);
+    expect(sessions.match(/>Revocar por pérdida o robo<\/button>/g)).toHaveLength(2);
 
     expect(renderToStaticMarkup(<PersistentSessionToggle userId={2} persistent />)).toContain('type="checkbox" checked=""');
     expect(renderToStaticMarkup(<PersistentSessionToggle userId={2} persistent={false} />)).not.toContain("checked");
 
     const lastOffice = new Response(JSON.stringify({ error: "The last active Oficina account cannot be disabled" }), { status: 409 });
     expect(await readError(lastOffice, "Unable to disable user")).toBe("The last active Oficina account cannot be disabled");
+  });
+
+  it("shows after a revocation the Chofer's Traslados of today without a confirmed Marca, each linked to its history", () => {
+    const markup = renderToStaticMarkup(<UnconfirmedTransferList date="2026-10-23" transfers={[
+      { transferId: 7, routeId: 3, passengerName: "Pasajero Sintético", direction: "entrada", targetTime: "08:00", destinationName: "Escuela Sintética" },
+    ]} />);
+    expect(markup).toContain("<p>Traslados of 2026-10-23 without a confirmed Marca:</p>");
+    expect(markup).toContain('<a href="/transfers/7/history">08:00 Pasajero Sintético, entrada, Escuela Sintética</a>');
+    expect(renderToStaticMarkup(<UnconfirmedTransferList date="2026-10-23" transfers={[]} />))
+      .toBe("<p>Every Traslado of 2026-10-23 has a confirmed Marca.</p>");
   });
 });
