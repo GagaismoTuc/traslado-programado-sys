@@ -201,17 +201,31 @@ finish() {
 
 TOTAL_STAGES=9
 
-CONTRACT_SECRETS=(
-  "DEPLOY_HOST"
-  "DEPLOY_USER"
-  "DEPLOY_SSH_KEY"
-  "DEPLOY_KNOWN_HOSTS"
-  "PRODUCTION_HOST"
-  "STAGING_HOST"
-  "SCW_ACCESS_KEY"
-  "SCW_SECRET_KEY"
-  "SCW_BUCKET"
-)
+get_contract_secrets() {
+  local script_file="${BASH_SOURCE[0]:-$0}"
+  if [[ -f "$script_file" ]]; then
+    grep -E '^[[:space:]]*set_secret "[A-Z0-9_]+"' "$script_file" | sed -E 's/.*set_secret "([A-Z0-9_]+)".*/\1/'
+  fi
+}
+
+CONTRACT_SECRETS=()
+while IFS= read -r _s; do
+  [[ -n "$_s" ]] && CONTRACT_SECRETS+=("$_s")
+done < <(get_contract_secrets)
+
+if (( ${#CONTRACT_SECRETS[@]} == 0 )); then
+  CONTRACT_SECRETS=(
+    "DEPLOY_HOST"
+    "DEPLOY_USER"
+    "DEPLOY_SSH_KEY"
+    "DEPLOY_KNOWN_HOSTS"
+    "PRODUCTION_HOST"
+    "STAGING_HOST"
+    "SCW_ACCESS_KEY"
+    "SCW_SECRET_KEY"
+    "SCW_BUCKET"
+  )
+fi
 
 STAGE_TITLES=(
   "Hetzner Cloud: project, SSH key, CX33 in Germany (fsn1/nbg1), IPv4"
@@ -231,9 +245,51 @@ WIZARD_TMP_DIR=""
 cleanup_tmp() {
   if [[ -n "$WIZARD_TMP_DIR" && -d "$WIZARD_TMP_DIR" ]]; then
     rm -rf "$WIZARD_TMP_DIR"
+    WIZARD_TMP_DIR=""
   fi
 }
-trap cleanup_tmp EXIT INT TERM
+trap cleanup_tmp EXIT
+trap 'exit 130' INT
+trap 'exit 143' TERM
+
+# Override set_secret below STAGES to enforce contract and fail explicitly on error
+set_secret() {
+  local name="$1" value="$2"
+  if command -v gh >/dev/null 2>&1 && gh auth status >/dev/null 2>&1; then
+    if printf '%s' "$value" | gh secret set "$name" >/dev/null 2>&1; then
+      WRITTEN_SECRET+=("$name")
+      printf '  %s✓ set%s GitHub secret %s\n' "$GREEN" "$RESET" "$name"
+      return 0
+    fi
+  fi
+  SKIPPED+=("GitHub secret $name (set it manually: gh secret set $name)")
+  warn "failed to set GitHub secret $name: gh not ready or write rejected"
+  return 1
+}
+
+_create_secure_tmp_dir() {
+  local repo_root
+  repo_root=$(git rev-parse --show-toplevel 2>/dev/null || pwd -P)
+  local current_pwd
+  current_pwd=$(pwd -P 2>/dev/null || pwd)
+  local safe_base=""
+  local candidates=("${TMPDIR:-}" "/tmp" "/var/tmp" "$HOME/.cache" "$HOME/.config" "$HOME")
+  for c in "${candidates[@]}"; do
+    [[ -n "$c" && -d "$c" ]] || continue
+    local canon
+    canon=$(cd "$c" 2>/dev/null && pwd -P || true)
+    [[ -n "$canon" ]] || continue
+    if [[ "$canon" == "$repo_root" || "$canon" == "$repo_root"/* || "$canon" == "$current_pwd" || "$canon" == "$current_pwd"/* ]]; then
+      continue
+    fi
+    safe_base="$canon"
+    break
+  done
+  if [[ -z "$safe_base" ]]; then
+    safe_base="/tmp"
+  fi
+  TMPDIR="$safe_base" mktemp -d
+}
 
 # State helpers - only non-secret metadata is stored, outside repository root.
 is_stage_confirmed() {
@@ -280,7 +336,7 @@ get_state_var() {
 validate_vps_region() {
   local reg="$1"
   case "$reg" in
-    fsn1*|nbg1*|[Ff]alkenstein*|[Nn]uremberg*)
+    fsn1|nbg1|[Ff]alkenstein|[Nn]uremberg)
       return 0
       ;;
     *)
@@ -294,7 +350,7 @@ validate_vps_region() {
 validate_bucket_region() {
   local reg="$1"
   case "$reg" in
-    fr-par*|[Pp]aris*)
+    fr-par|[Pp]aris)
       return 0
       ;;
     *)
@@ -533,19 +589,36 @@ run_wizard() {
 
     while true; do
       say "Verifying password login is refused on deploy@$HETZNER_IPV4..."
-      local pass_accepted=false
+      local ssh_auth_out=""
       if command -v ssh >/dev/null 2>&1; then
-        if ssh -o BatchMode=yes -o PasswordAuthentication=yes -o PubkeyAuthentication=no -o ConnectTimeout=5 "deploy@$HETZNER_IPV4" exit >/dev/null 2>&1; then
-          pass_accepted=true
-        fi
+        ssh_auth_out=$(ssh -o BatchMode=yes -o PubkeyAuthentication=no -o PreferredAuthentications=none -o ConnectTimeout=5 "deploy@$HETZNER_IPV4" true 2>&1 || true)
       fi
 
-      if [[ "$pass_accepted" == "true" ]]; then
+      if [[ "$ssh_auth_out" == *"password"* || "$ssh_auth_out" == *"keyboard-interactive"* ]]; then
         halt_verification 3 \
           "Password login was accepted on deploy@$HETZNER_IPV4!" \
           "Set 'PasswordAuthentication no' and 'PermitRootLogin no' in sshd_config and restart sshd."
         continue
       fi
+
+      if [[ "$ssh_auth_out" != *"Permission denied"* ]]; then
+        halt_verification 3 \
+          "Could not verify SSH authentication methods on deploy@$HETZNER_IPV4 (SSH response: ${ssh_auth_out:-no response})." \
+          "Ensure sshd is running and reachable on port 22, and check network connectivity."
+        continue
+      fi
+
+      local root_auth_out=""
+      if command -v ssh >/dev/null 2>&1; then
+        root_auth_out=$(ssh -o BatchMode=yes -o PubkeyAuthentication=no -o PreferredAuthentications=none -o ConnectTimeout=5 "root@$HETZNER_IPV4" true 2>&1 || true)
+      fi
+      if [[ "$root_auth_out" == *"password"* || "$root_auth_out" == *"keyboard-interactive"* ]]; then
+        halt_verification 3 \
+          "Root password login was accepted on root@$HETZNER_IPV4!" \
+          "Set 'PermitRootLogin no' in sshd_config and restart sshd."
+        continue
+      fi
+
       note "✓ Password login successfully refused"
 
       say "Verifying SSH key login works for deploy user..."
@@ -560,14 +633,9 @@ run_wizard() {
         note "✓ SSH key login and Docker Engine verified for user deploy"
         break
       else
-        if confirm "Could not auto-verify SSH key login from this client. Did deploy user key login and docker test succeed on the server?"; then
-          note "✓ Deploy hardening confirmed manually"
-          break
-        else
-          halt_verification 3 \
-            "SSH key login or Docker verification failed." \
-            "Verify /home/deploy/.ssh/authorized_keys and check that docker is running."
-        fi
+        halt_verification 3 \
+          "SSH key login or Docker verification failed on deploy@$HETZNER_IPV4." \
+          "Verify /home/deploy/.ssh/authorized_keys and check that docker is running."
       fi
     done
 
@@ -669,6 +737,27 @@ run_wizard() {
       break
     done
 
+    while true; do
+      say "Verifying Scaleway Object Storage bucket '$SCW_BUCKET' in region $SCW_REGION..."
+      local scw_check_ok=false
+      local http_code=""
+      if command -v curl >/dev/null 2>&1; then
+        http_code=$(curl -s -o /dev/null -w '%{http_code}' --connect-timeout 5 "https://${SCW_BUCKET}.s3.${SCW_REGION}.scw.cloud" || true)
+        if [[ "$http_code" == "403" || "$http_code" == "200" ]]; then
+          scw_check_ok=true
+        fi
+      fi
+
+      if [[ "$scw_check_ok" == "true" ]]; then
+        note "✓ Scaleway bucket '$SCW_BUCKET' verified in region $SCW_REGION"
+        break
+      else
+        halt_verification 5 \
+          "Scaleway bucket '$SCW_BUCKET' could not be verified in region $SCW_REGION (HTTP response: ${http_code:-error})." \
+          "Ensure the bucket exists in Paris ($SCW_REGION) with Private visibility at console.scaleway.com."
+      fi
+    done
+
     save_state_var "SCW_BUCKET" "$SCW_BUCKET"
     confirm_stage 5
     note "✓ Scaleway configuration captured in memory (credentials kept off-disk)"
@@ -711,18 +800,13 @@ run_wizard() {
       say "  $PRODUCTION_HOST -> ${prod_ip:-not resolved}"
       say "  $STAGING_HOST -> ${staging_ip:-not resolved}"
 
-      if [[ "$prod_ip" == "$HETZNER_IPV4" && "$staging_ip" == "$HETZNER_IPV4" ]]; then
+      if [[ -n "$prod_ip" && "$prod_ip" == "$HETZNER_IPV4" && -n "$staging_ip" && "$staging_ip" == "$HETZNER_IPV4" ]]; then
         note "✓ DNS resolution verified for both hosts"
         break
       else
-        if confirm "DNS records may take time to propagate. Skip strict IP match and accept current records?"; then
-          note "✓ DNS confirmed manually"
-          break
-        else
-          halt_verification 6 \
-            "DNS did not resolve to $HETZNER_IPV4." \
-            "Check DNS provider records and wait for TTL expiration."
-        fi
+        halt_verification 6 \
+          "DNS did not resolve to $HETZNER_IPV4 (production resolved to '${prod_ip:-none}', staging resolved to '${staging_ip:-none}')." \
+          "Check DNS provider records and wait for TTL propagation."
       fi
     done
 
@@ -791,8 +875,8 @@ run_wizard() {
       ask_secret SCW_SECRET_KEY "Enter Scaleway Secret Key:"
     fi
 
-    # Generate dedicated deploy SSH keypair in isolated temporary directory
-    WIZARD_TMP_DIR=$(mktemp -d)
+    # Generate dedicated deploy SSH keypair in isolated temporary directory outside repo
+    WIZARD_TMP_DIR=$(_create_secure_tmp_dir)
     chmod 700 "$WIZARD_TMP_DIR"
     local deploy_key_file="$WIZARD_TMP_DIR/deploy_id_ed25519"
     ssh-keygen -t ed25519 -N "" -f "$deploy_key_file" -C "github-actions-deploy" >/dev/null 2>&1
@@ -821,18 +905,26 @@ run_wizard() {
     rm -rf "$WIZARD_TMP_DIR"
     WIZARD_TMP_DIR=""
 
-    say "Writing contract secrets to GitHub repository via 'gh secret set'..."
-    set_secret "DEPLOY_HOST" "$HETZNER_IPV4"
-    set_secret "DEPLOY_USER" "$DEPLOY_USER"
-    set_secret "DEPLOY_SSH_KEY" "$deploy_private_key"
-    set_secret "DEPLOY_KNOWN_HOSTS" "$deploy_known_hosts"
-    set_secret "PRODUCTION_HOST" "$PRODUCTION_HOST"
-    set_secret "STAGING_HOST" "$STAGING_HOST"
-    set_secret "SCW_ACCESS_KEY" "$SCW_ACCESS_KEY"
-    set_secret "SCW_SECRET_KEY" "$SCW_SECRET_KEY"
-    set_secret "SCW_BUCKET" "$SCW_BUCKET"
-
     while true; do
+      say "Writing contract secrets to GitHub repository via 'gh secret set'..."
+      local failed_writes=()
+      set_secret "DEPLOY_HOST" "$HETZNER_IPV4" || failed_writes+=("DEPLOY_HOST")
+      set_secret "DEPLOY_USER" "$DEPLOY_USER" || failed_writes+=("DEPLOY_USER")
+      set_secret "DEPLOY_SSH_KEY" "$deploy_private_key" || failed_writes+=("DEPLOY_SSH_KEY")
+      set_secret "DEPLOY_KNOWN_HOSTS" "$deploy_known_hosts" || failed_writes+=("DEPLOY_KNOWN_HOSTS")
+      set_secret "PRODUCTION_HOST" "$PRODUCTION_HOST" || failed_writes+=("PRODUCTION_HOST")
+      set_secret "STAGING_HOST" "$STAGING_HOST" || failed_writes+=("STAGING_HOST")
+      set_secret "SCW_ACCESS_KEY" "$SCW_ACCESS_KEY" || failed_writes+=("SCW_ACCESS_KEY")
+      set_secret "SCW_SECRET_KEY" "$SCW_SECRET_KEY" || failed_writes+=("SCW_SECRET_KEY")
+      set_secret "SCW_BUCKET" "$SCW_BUCKET" || failed_writes+=("SCW_BUCKET")
+
+      if (( ${#failed_writes[@]} > 0 )); then
+        halt_verification 8 \
+          "Failed to write GitHub secrets: ${failed_writes[*]}" \
+          "Ensure gh CLI is authenticated with repository write access, then retry."
+        continue
+      fi
+
       say "Verifying secrets exist in repository via 'gh secret list'..."
       local gh_secrets
       gh_secrets=$(gh secret list 2>/dev/null || true)
@@ -844,12 +936,13 @@ run_wizard() {
       done
 
       if (( ${#missing_secrets[@]} == 0 )); then
-        note "✓ All 9 contract secrets verified in repository"
+        note "✓ All ${#CONTRACT_SECRETS[@]} contract secrets verified in repository"
         break
       else
         halt_verification 8 \
           "Missing GitHub secrets: ${missing_secrets[*]}" \
           "Ensure gh CLI is authenticated with repository write access, then retry."
+        continue
       fi
     done
 

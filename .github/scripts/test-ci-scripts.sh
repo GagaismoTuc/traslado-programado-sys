@@ -131,12 +131,22 @@ SCW_SECRET_KEY
 SCW_BUCKET"
 actual_secrets=$(printf '%s\n' "$out" | awk '/^SECRETS:/{flag=1; next} flag && NF {print $1}')
 [ "$actual_secrets" = "$expected_secrets" ] || ok=1
+mutated_wiz=$tmp/mutated_wizard.sh
+sed 's/set_secret "SCW_BUCKET"/set_secret "WRONG_BUCKET"/' "$wizard" > "$mutated_wiz"
+mutated_out=$(bash "$mutated_wiz" --check 2>&1)
+mutated_secrets=$(printf '%s\n' "$mutated_out" | awk '/^SECRETS:/{flag=1; next} flag && NF {print $1}')
+if [ "$mutated_secrets" = "$actual_secrets" ] || ! printf '%s\n' "$mutated_secrets" | grep -q 'WRONG_BUCKET'; then
+  ok=1
+fi
 check "$t" $ok
 
 t="hosting.sh region validation permits Germany and Paris and rejects others citing Ley 25.326"
 ok=0
 bash "$wizard" --validate-vps-region nbg1 > /dev/null 2>&1 || ok=1
 bash "$wizard" --validate-vps-region fsn1 > /dev/null 2>&1 || ok=1
+out_fsn_hel=$(bash "$wizard" --validate-vps-region fsn1-hel1 2>&1)
+res_fsn_hel=$?
+[ $res_fsn_hel -ne 0 ] && printf '%s' "$out_fsn_hel" | grep -q 'Ley 25.326' || ok=1
 out_hel=$(bash "$wizard" --validate-vps-region hel1 2>&1)
 res_hel=$?
 [ $res_hel -ne 0 ] && printf '%s' "$out_hel" | grep -q 'Ley 25.326' || ok=1
@@ -144,6 +154,9 @@ out_ash=$(bash "$wizard" --validate-vps-region ash 2>&1)
 res_ash=$?
 [ $res_ash -ne 0 ] && printf '%s' "$out_ash" | grep -q 'Ley 25.326' || ok=1
 bash "$wizard" --validate-bucket-region fr-par > /dev/null 2>&1 || ok=1
+out_fr_ams=$(bash "$wizard" --validate-bucket-region fr-par-nl-ams 2>&1)
+res_fr_ams=$?
+[ $res_fr_ams -ne 0 ] && printf '%s' "$out_fr_ams" | grep -q 'Ley 25.326' || ok=1
 out_scw=$(bash "$wizard" --validate-bucket-region nl-ams 2>&1)
 res_scw=$?
 [ $res_scw -ne 0 ] && printf '%s' "$out_scw" | grep -q 'Ley 25.326' || ok=1
@@ -151,19 +164,55 @@ check "$t" $ok
 
 t="hosting.sh maintains clean repository status and leaves no secrets on disk"
 ok=0
+test_home=$tmp/clean_home
+test_tmp=$tmp/clean_tmp
+test_state=$tmp/clean_state
+mkdir -p "$test_home" "$test_tmp"
 git_status_before=$(git status --porcelain)
-bash "$wizard" --check > /dev/null 2>&1 || ok=1
+printf 'STAGE_1_CONFIRMED=true\nHETZNER_IPV4=192.0.2.1\nSTAGE_2_CONFIRMED=true\nSTAGE_3_CONFIRMED=true\nSTAGE_4_CONFIRMED=true\n' > "$test_state"
+printf '\ny\ny\ny\ny\nfr-par\nbkt\nAKSENTINEL\nSKSENTINEL\n' | HOME="$test_home" TMPDIR="$test_tmp" WIZARD_STATE_FILE="$test_state" bash "$wizard" > /dev/null 2>&1 || true
+if grep -rq 'SENTINEL' "$test_state" "$test_home" "$test_tmp"; then ok=1; fi
 git_status_after=$(git status --porcelain)
 [ "$git_status_before" = "$git_status_after" ] || ok=1
 [ ! -f "$scripts/../../.env" ] || ok=1
 check "$t" $ok
 
-t="hosting.sh resumes from unconfirmed stages and halts on verification failure"
+t="hosting.sh halts on verification failure and does not continue to next stage"
 ok=0
-test_state=$tmp/test_hosting.state
-printf 'STAGE_1_CONFIRMED=true\nHETZNER_IPV4=192.0.2.1\n' > "$test_state"
-grep -q '^STAGE_1_CONFIRMED=true' "$test_state" || ok=1
-! grep -q '^STAGE_2_CONFIRMED=true' "$test_state" || ok=1
+test_halt_state=$tmp/halt_state
+test_halt_home=$tmp/halt_home
+mkdir -p "$test_halt_home"
+printf 'STAGE_1_CONFIRMED=true\nHETZNER_IPV4=192.0.2.1\nSTAGE_2_CONFIRMED=true\nSTAGE_3_CONFIRMED=true\nSTAGE_4_CONFIRMED=true\nSTAGE_5_CONFIRMED=true\nSCW_BUCKET=bkt\n' > "$test_halt_state"
+halt_out=$(printf '\ny\ny\ny\ny\ny\nnope.invalid\n\n\n\nn\n' | HOME="$test_halt_home" WIZARD_STATE_FILE="$test_halt_state" bash "$wizard" 2>&1 || true)
+if grep -q '^STAGE_6_CONFIRMED=true' "$test_halt_state"; then ok=1; fi
+if printf '%s' "$halt_out" | grep -q 'Stage 7/9'; then ok=1; fi
+if ! printf '%s' "$halt_out" | grep -q 'Verification failed'; then ok=1; fi
+check "$t" $ok
+
+t="hosting.sh resumes from unconfirmed stages and cleans up on interruption"
+ok=0
+test_resume_state=$tmp/resume_state
+test_resume_home=$tmp/resume_home
+mkdir -p "$test_resume_home"
+printf 'STAGE_1_CONFIRMED=true\nHETZNER_IPV4=192.0.2.1\nSTAGE_2_CONFIRMED=true\n' > "$test_resume_state"
+resume_out=$(printf '\ny\ny\n' | HOME="$test_resume_home" WIZARD_STATE_FILE="$test_resume_state" bash "$wizard" 2>&1 || true)
+if ! printf '%s' "$resume_out" | grep -q 'Stage 3/9'; then ok=1; fi
+test_sigint_dir=$tmp/sigint_test
+mkdir -p "$test_sigint_dir"
+mkfifo "$test_sigint_dir/fifo" 2>/dev/null || true
+if [ -p "$test_sigint_dir/fifo" ]; then
+  perl -e '$SIG{INT}="DEFAULT"; exec @ARGV' bash "$wizard" < "$test_sigint_dir/fifo" > "$test_sigint_dir/out" 2>&1 &
+  sig_pid=$!
+  exec 9>"$test_sigint_dir/fifo"
+  sleep 0.5
+  kill -INT "$sig_pid" 2>/dev/null || true
+  sleep 0.5
+  if kill -0 "$sig_pid" 2>/dev/null; then
+    kill -9 "$sig_pid" 2>/dev/null || true
+    ok=1
+  fi
+  exec 9>&-
+fi
 check "$t" $ok
 
 [ $failures -eq 0 ] || { echo "$failures test(s) failed" >&2; exit 1; }
