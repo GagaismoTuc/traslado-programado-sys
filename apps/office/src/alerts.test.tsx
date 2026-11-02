@@ -88,6 +88,20 @@ describe("Oficina alert inbox", () => {
     expect(undone).toContain("<div>Resolved by a Corrección that undid it by chofer-sintetico (driver) at 09:01</div>");
   });
 
+  it("Rule 4 (#96): shows a resolved handover or flagged-Marca alert with who undid or corrected the Marca, when and why", () => {
+    const resolution = {
+      markId: "00000000-0000-4000-8000-000000000002", kind: "undo", at: "2026-10-23T12:30:00.000Z", reason: "El Chofer eligió al Receptor equivocado",
+      author: { userId: 1, username: "oficina-sintetica", role: "office" },
+    };
+    const line = "<div>Resolved by a Corrección that undid it by oficina-sintetica (office) at 09:30. Reason: El Chofer eligió al Receptor equivocado</div>";
+    const handover = { authorized: false, name: "Tía Sintética", dni: "-3000001" };
+    const flagged = { reasons: ["consent_mismatch"] };
+    expect(renderToStaticMarkup(<AlertList alerts={[alert("other_adult_handover", handover, { resolution })]} />)).toContain(line);
+    expect(renderToStaticMarkup(<AlertList alerts={[alert("mark_flagged", flagged, { resolution })]} />)).toContain(line);
+    expect(renderToStaticMarkup(<AlertList alerts={[alert("other_adult_handover", handover), alert("mark_flagged", flagged, { id: 2 })]} />))
+      .not.toContain("Resolved");
+  });
+
   it("lists the Traslados still open when a Chofer could not close a Recorrido", () => {
     expect(renderToStaticMarkup(<AlertList alerts={[alert("close_refused", {
       transfers: [

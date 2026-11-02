@@ -19,7 +19,8 @@ export type Alert = {
   passengerName: string | null;
   driverName: string | null;
   details: Record<string, unknown>;
-  // The Corrección that resolved the alert, while it replaces the Marca the alert is about; only an Ausente on an entrada.
+  // The Corrección that resolved the alert, while it replaces the Marca the alert is about; only an Ausente on an entrada,
+  // a flagged Marca or a handover to another adult.
   resolution: {
     markId: string;
     kind: string;

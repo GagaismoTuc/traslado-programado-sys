@@ -2000,19 +2000,21 @@ async function insertAlert(client: Queryable, alert: {
   );
 }
 
-// A Marca uses an Autorización puntual only when it names it on that Traslado with the authorised DNI: a Marca naming it
-// with another DNI, or on another Traslado, is flagged and leaves it unused.
-const AUTHORIZATION_USE_SQL = `m.authorization_id = oa.id AND m.transfer_id = oa.transfer_id
-  AND regexp_replace(m.receiver_dni, '[.[:space:]]', '', 'g') = regexp_replace(oa.dni, '[.[:space:]]', '', 'g')`;
+// A Marca (alias e) uses an Autorización puntual only when it names it on that Traslado with the authorised DNI and is in
+// force: a Marca naming it with another DNI, or on another Traslado, is flagged and leaves it unused, and an Entregado
+// undone or replaced by a Corrección no longer uses it. Undoing that Corrección uses it again.
+const AUTHORIZATION_USE_SQL = `e.authorization_id = oa.id AND e.transfer_id = oa.transfer_id
+  AND regexp_replace(e.receiver_dni, '[.[:space:]]', '', 'g') = regexp_replace(oa.dni, '[.[:space:]]', '', 'g')
+  AND ${MARK_IN_FORCE_SQL}`;
 
 /**
- * An Autorización puntual with its state: used once a Marca uses it (even after a revocation), revoked, expired once its
- * Traslado closed unused, otherwise valid.
+ * An Autorización puntual with its state: used while a Marca in force uses it (even after a revocation), revoked, expired
+ * once its Traslado closed unused, otherwise valid.
  */
 const AUTHORIZATION_SELECT_SQL = `
   SELECT oa.id, oa.transfer_id, oa.authorized_by_adult_id, a.name AS authorized_by_name, oa.called_phone, oa.name, oa.dni,
          oa.recorded_by, oa.recorded_at, r.revoked_by, r.revoked_at,
-         CASE WHEN EXISTS (SELECT 1 FROM marks m WHERE ${AUTHORIZATION_USE_SQL}) THEN 'used'
+         CASE WHEN EXISTS (SELECT 1 FROM marks e WHERE ${AUTHORIZATION_USE_SQL}) THEN 'used'
               WHEN r.authorization_id IS NOT NULL THEN 'revoked'
               WHEN t.status = ANY('{entregado,ausente,cancelado_ausencia}'::text[]) THEN 'expired'
               ELSE 'valid' END AS status
@@ -4647,8 +4649,8 @@ export function createApp({ db, routing, router, geocoder, solver, travelTime, c
           if (current.status === "expired") throw new PlanningError(409, "The Autorización puntual expired when its Traslado closed");
           if (current.status === "used") {
             const use = (await client.query(
-              `SELECT m.id, pv.route_id FROM marks m JOIN plan_versions pv ON pv.id = m.plan_version_id
-                 JOIN one_off_authorizations oa ON oa.id = $1 WHERE ${AUTHORIZATION_USE_SQL} ORDER BY m.id LIMIT 1`,
+              `SELECT e.id, pv.route_id FROM marks e JOIN plan_versions pv ON pv.id = e.plan_version_id
+                 JOIN one_off_authorizations oa ON oa.id = $1 WHERE ${AUTHORIZATION_USE_SQL} ORDER BY e.id LIMIT 1`,
               [id],
             ) as QueryResult).rows[0];
             await insertAlert(client, {
@@ -4761,8 +4763,9 @@ export function createApp({ db, routing, router, geocoder, solver, travelTime, c
         })),
       });
     })
-    // The Oficina's alert inbox, newest first; the office app polls it. An Ausente on an entrada is resolved while a
-    // Corrección replaces its Marca: undoing that Corrección puts the Ausente back in force and its alert back to pending.
+    // The Oficina's alert inbox, newest first; the office app polls it. An Ausente on an entrada, a flagged Marca and a
+    // handover to another adult are resolved while a Corrección replaces their Marca: undoing that Corrección puts the Marca
+    // back in force and its alert back to pending.
     .get("/alerts", async (context) => {
       const actor = await requireOffice(context);
       if (actor instanceof Response) return actor;
@@ -4778,7 +4781,8 @@ export function createApp({ db, routing, router, geocoder, solver, travelTime, c
            LEFT JOIN LATERAL (
              SELECT c.client_id, c.kind, c.server_time, c.reason, ru.id AS user_id, ru.username, ru.role
                FROM marks c JOIN sessions rs ON rs.id = c.session_id JOIN users ru ON ru.id = rs.user_id
-              WHERE al.kind = 'absent_on_entrada' AND c.corrects_mark_id = al.mark_id AND ${REPLACES_SQL}
+              WHERE al.kind = ANY('{absent_on_entrada,mark_flagged,other_adult_handover}'::text[])
+                AND c.corrects_mark_id = al.mark_id AND ${REPLACES_SQL}
               ORDER BY c.id DESC LIMIT 1
            ) rc ON true
           ORDER BY al.id DESC LIMIT 200`,

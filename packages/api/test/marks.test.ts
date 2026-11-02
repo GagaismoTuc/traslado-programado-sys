@@ -353,4 +353,55 @@ describe("Alert inbox", () => {
     });
     expect(await answer(request("/alerts", "GET", undefined, driver.cookie), 403)).toEqual({ error: "Office role required" });
   });
+
+  it("Rule 4 (#96): undoing or correcting a flagged handover to another adult resolves its two alerts, and undoing that Corrección puts them back to pending", async () => {
+    const { passenger, served, office } = await setup("handover-resolved");
+    const { passengerId } = await passenger(false);
+    const { driver, routeId, transferId } = await served(passengerId, "salida");
+    const resolutions = async (markId: string) => ((await answer(request("/alerts", "GET", undefined, office), 200)).alerts as
+      { kind: string; markId: string; resolution: unknown }[]).filter((alert) => alert.markId === markId).map((alert) => [alert.kind, alert.resolution]);
+    const handed = markBody(transferId, "entregado", { receiver: { kind: "other_adult", name: "Tía Sintética", dni: "-3000001" } });
+    await answer(mark(driver.cookie, routeId, handed), 201);
+    expect(await resolutions(handed.id)).toEqual([["mark_flagged", null], ["other_adult_handover", null]]);
+
+    // The Chofer corrects it to Subió: both alerts are resolved by that Corrección.
+    clock.now = new Date("2026-10-23T12:01:00.000Z");
+    const subio = markBody(transferId, "subio", { corrects: handed.id });
+    await answer(mark(driver.cookie, routeId, subio), 201);
+    const byChofer = {
+      markId: subio.id, kind: "subio", at: "2026-10-23T12:01:00.000Z", reason: null,
+      author: { userId: driver.userId, username: "chofer-handover-resolved-1", role: "driver" },
+    };
+    expect(await resolutions(handed.id)).toEqual([["mark_flagged", byChofer], ["other_adult_handover", byChofer]]);
+
+    // Undoing that Corrección puts the Entregado back in force, and its alerts back to pending.
+    await answer(mark(driver.cookie, routeId, markBody(transferId, "undo", { corrects: subio.id })), 201);
+    expect(await transferStatus(transferId)).toBe("entregado");
+    expect(await resolutions(handed.id)).toEqual([["mark_flagged", null], ["other_adult_handover", null]]);
+
+    // The Oficina undoes the Entregado, with a reason.
+    clock.now = new Date("2026-10-23T12:30:00.000Z");
+    const reason = "El Chofer eligió al Receptor equivocado";
+    const byOffice = (await answer(request(`/marks/${handed.id}/corrections`, "POST", { kind: "undo", reason }, office), 201)).mark;
+    const officeResolution = {
+      markId: byOffice.id, kind: "undo", at: "2026-10-23T12:30:00.000Z", reason,
+      author: { userId: expect.any(Number), username: "oficina-handover-resolved", role: "office" },
+    };
+    expect(await resolutions(handed.id)).toEqual([["mark_flagged", officeResolution], ["other_adult_handover", officeResolution]]);
+  });
+
+  it("Rule 5 (#96): resolving a flagged handover's alerts never deletes them", async () => {
+    const { passenger, served, office } = await setup("handover-kept");
+    const { passengerId } = await passenger(false);
+    const { driver, routeId, transferId } = await served(passengerId, "salida");
+    const handed = markBody(transferId, "entregado", { receiver: { kind: "other_adult", name: "Tía Sintética", dni: "-3000001" } });
+    await answer(mark(driver.cookie, routeId, handed), 201);
+    const raised = await alerts();
+    expect(raised.map((alert) => alert.kind)).toEqual(["other_adult_handover", "mark_flagged"]);
+
+    await answer(mark(driver.cookie, routeId, markBody(transferId, "undo", { corrects: handed.id })), 201);
+    expect(await alerts()).toEqual(raised);
+    const inbox = (await answer(request("/alerts", "GET", undefined, office), 200)).alerts as { kind: string; resolution: unknown }[];
+    expect(inbox.map((alert) => [alert.kind, alert.resolution === null])).toEqual([["mark_flagged", false], ["other_adult_handover", false]]);
+  });
 });
