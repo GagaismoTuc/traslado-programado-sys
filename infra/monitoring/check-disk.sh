@@ -19,8 +19,8 @@ if [ "$DISK_ALERT_THRESHOLD_PERCENT" -lt 1 ] || [ "$DISK_ALERT_THRESHOLD_PERCENT
   exit 2
 fi
 
-if [ -z "$DISK_ALERT_WEBHOOK_URL" ] && [ -z "$GLITCHTIP_DSN" ]; then
-  echo "check-disk: set DISK_ALERT_WEBHOOK_URL or GLITCHTIP_DSN" >&2
+if [ -z "$DISK_ALERT_WEBHOOK_URL" ]; then
+  echo "check-disk: DISK_ALERT_WEBHOOK_URL is required for off-host alerting" >&2
   exit 2
 fi
 
@@ -38,14 +38,12 @@ fi
 
 escaped_mount=$(printf '%s' "$DISK_MOUNT" | sed 's/\\/\\\\/g; s/"/\\"/g')
 
-if [ -n "$DISK_ALERT_WEBHOOK_URL" ]; then
-  webhook_payload=$(printf '{"alert":"disk_usage_high","mount":"%s","usedPercent":%s,"thresholdPercent":%s}' \
-    "$escaped_mount" "$used_percent" "$DISK_ALERT_THRESHOLD_PERCENT")
-  curl -fsS -m 10 -X POST \
-    -H "Content-Type: application/json" \
-    --data "$webhook_payload" \
-    "$DISK_ALERT_WEBHOOK_URL" >/dev/null
-fi
+webhook_payload=$(printf '{"alert":"disk_usage_high","mount":"%s","usedPercent":%s,"thresholdPercent":%s}' \
+  "$escaped_mount" "$used_percent" "$DISK_ALERT_THRESHOLD_PERCENT")
+curl -fsS -m 10 -X POST \
+  -H "Content-Type: application/json" \
+  --data "$webhook_payload" \
+  "$DISK_ALERT_WEBHOOK_URL" >/dev/null
 
 if [ -n "$GLITCHTIP_DSN" ]; then
   scheme=${GLITCHTIP_DSN%%://*}
@@ -68,5 +66,5 @@ if [ -n "$GLITCHTIP_DSN" ]; then
     -H "Content-Type: application/x-sentry-envelope" \
     -H "X-Sentry-Auth: Sentry sentry_version=7, sentry_key=${sentry_key}, sentry_client=traslado-disk-alert/1.0" \
     --data-binary @- \
-    "$envelope_url" >/dev/null
+    "$envelope_url" >/dev/null || echo "check-disk: warning: secondary GlitchTip delivery failed" >&2
 fi

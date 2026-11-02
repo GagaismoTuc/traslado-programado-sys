@@ -1,5 +1,6 @@
 # Self-hosted GlitchTip error tracker behind a private Caddy admin path.
 # Only Caddy binds a host port, and only on 127.0.0.1 so edge TLS (#36) or an SSH tunnel fronts it.
+# Measured RSS across all 3 containers under C2 ingest: ~252-336 MiB (glitchtip ~176-259 MiB, postgres ~61-63 MiB, caddy ~14 MiB).
 name: traslado-glitchtip
 
 x-logging: &default-logging
@@ -49,6 +50,7 @@ services:
       ENABLE_ORGANIZATION_CREATION: "false"
       GLITCHTIP_ENABLE_MCP: "false"
       GLITCHTIP_MAX_EVENT_LIFE_DAYS: "${GLITCHTIP_RETENTION_DAYS:-30}"
+      EMAIL_URL: "${GLITCHTIP_EMAIL_URL:-consolemail://}"
     logging: *default-logging
     deploy:
       resources:

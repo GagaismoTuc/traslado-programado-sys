@@ -76,7 +76,7 @@ describe("disk usage alert", () => {
       const dsn = `http://${dsnKey}@127.0.0.1:${port}/_glitchtip/7`;
 
       await withFakeDf(90, async (binDir) => {
-        await expect(runCheckDisk(binDir, { DISK_ALERT_THRESHOLD_PERCENT: "80" })).rejects.toThrow(/DISK_ALERT_WEBHOOK_URL or GLITCHTIP_DSN/);
+        await expect(runCheckDisk(binDir, { DISK_ALERT_THRESHOLD_PERCENT: "80", GLITCHTIP_DSN: dsn })).rejects.toThrow(/DISK_ALERT_WEBHOOK_URL/);
       });
 
       await withFakeDf(62, async (binDir) => {

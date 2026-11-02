@@ -17,7 +17,11 @@
 			path_regexp ingest ^/api/[0-9]+/(envelope|store)/?$
 		}
 		handle @ingest {
-			reverse_proxy glitchtip:8000
+			reverse_proxy glitchtip:8000 {
+				header_up -X-Forwarded-For
+				header_up -X-Real-IP
+				header_up -Forwarded
+			}
 		}
 
 		# GlitchTip API tokens authenticate directly against GlitchTip.

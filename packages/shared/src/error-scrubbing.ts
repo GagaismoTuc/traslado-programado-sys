@@ -46,6 +46,7 @@ export type ScrubbableErrorEvent = {
 };
 
 const SAFE_KEYS = new Set(["filename", "abspath", "dirname", "basename", "pathname", "typename", "function"]);
+const URL_DATA_KEYS = new Set(["url", "from", "to", "referrer"]);
 
 const SENSITIVE_KEYS = new Set([
   "name", "fullname", "firstname", "lastname", "passengername", "drivername", "adultname", "guardianname", "receivername",
@@ -80,22 +81,22 @@ function isCoordinatePair(value: unknown): boolean {
 }
 
 export function stripUrlQueryAndFragment(url: string): string {
-  return url.replace(/([?#]).*$/, "").replace(/\/-?\d{1,3}\.\d+\s*,\s*-?\d{1,3}\.\d+/g, `/${REDACTED}`);
+  return url.replace(/([?#]).*$/, "").replace(/([/;])-?\d{1,3}\.\d+\s*,\s*-?\d{1,3}\.\d+/g, `$1${REDACTED}`);
 }
 
 export function scrubString(input: string): string {
   return input
     .replace(/otpauth:\/\/[^\s"']+/gi, REDACTED)
     .replace(/https?:\/\/[^\s"']+/gi, (match) => stripUrlQueryAndFragment(match))
-    .replace(/(^|[\s"'(])(\/[A-Za-z0-9._~/%-]+)\?[^\s"')]+/g, (_, prefix: string, path: string) => `${prefix}${stripUrlQueryAndFragment(path)}`)
+    .replace(/(^|[\s"'(])(\/[A-Za-z0-9._~/%-;,-]*)[?#][^\s"')]+/g, (_, prefix: string, path: string) => `${prefix}${stripUrlQueryAndFragment(path)}`)
     .replace(/Key\s*\([^)]+\)=\([^)]*\)/gi, `Key (${REDACTED})=(${REDACTED})`)
-    .replace(/"([a-zA-Z0-9_-]+)"\s*:\s*("[^"\\]*(?:\\.[^"\\]*)*"|-?\d+(?:\.\d+)?|true|false)/g, (full, key: string) =>
+    .replace(/"([a-zA-Z0-9_-]+)"\s*:\s*("[^"\\]*(?:\\.[^"\\]*)*"|-?\d+(?:\.\d+)?|true|false|null|\[\s*-?\d+(?:\.\d+)?(?:\s*,\s*-?\d+(?:\.\d+)?)+\s*\])/g, (full, key: string) =>
       isSensitiveKey(key) ? `"${key}":"${REDACTED}"` : full)
     .replace(/\b([a-zA-Z0-9_-]+)\s*=\s*("[^"]*"|'[^']*'|[^\s,&;]+)/g, (full, key: string) =>
       isSensitiveKey(key) ? `${key}=${REDACTED}` : full)
     .replace(/\b(Bearer|Basic)\s+[A-Za-z0-9._~+/-]+=*/gi, `$1 ${REDACTED}`)
     .replace(/(?<!\w)\+\d[\d\s().-]{7,}\d(?!\w)/g, REDACTED)
-    .replace(/-?\d{1,3}\.\d{3,}\s*,\s*-?\d{1,3}\.\d{3,}/g, REDACTED)
+    .replace(/-?\d{1,3}\.\d{2,}\s*,\s*-?\d{1,3}\.\d{2,}/g, REDACTED)
     .replace(/(?<![0-9a-zA-Z.])\d{1,2}\.\d{3}\.\d{3}(?![0-9a-zA-Z.])/g, REDACTED)
     .replace(/(?<![0-9a-zA-Z.-])\d{7,8}(?![0-9a-zA-Z.-])/g, REDACTED);
 }
@@ -131,7 +132,9 @@ export function scrubBreadcrumb<T extends ScrubbableBreadcrumb>(breadcrumb: T): 
     const cleanedData: Record<string, unknown> = {};
     for (const [key, value] of Object.entries(next.data)) {
       if (isSensitiveKey(key)) continue;
-      cleanedData[key] = key === "url" && typeof value === "string" ? stripUrlQueryAndFragment(value) : scrubValue(value, seen);
+      cleanedData[key] = URL_DATA_KEYS.has(key.toLowerCase()) && typeof value === "string"
+        ? stripUrlQueryAndFragment(value)
+        : scrubValue(value, seen);
     }
     next.data = cleanedData;
   }
@@ -142,7 +145,7 @@ export function scrubErrorEvent<T extends ScrubbableErrorEvent>(event: T): T {
   const seen = new WeakSet<object>();
   const next = { ...event, user: undefined, server_name: undefined } as T;
   if (typeof next.message === "string") next.message = scrubString(next.message);
-  if (typeof next.transaction === "string") next.transaction = scrubString(next.transaction);
+  if (typeof next.transaction === "string") next.transaction = scrubString(stripUrlQueryAndFragment(next.transaction));
   if (next.logentry && typeof next.logentry === "object") next.logentry = scrubValue(next.logentry, seen) as ScrubbableErrorEvent["logentry"];
 
   if (next.request && typeof next.request === "object") {

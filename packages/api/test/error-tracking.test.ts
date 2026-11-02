@@ -16,6 +16,7 @@ const stubDb: HealthDatabase = { query: async () => ({ rows: [], rowCount: 0 }) 
 
 type ComposePort = { host_ip?: string; published?: string | number; target?: number };
 type ComposeServiceConfig = {
+  image?: string;
   logging?: { driver?: string; options?: Record<string, string> };
   ports?: ComposePort[];
 };
@@ -81,7 +82,14 @@ describe("error tracking and container log rotation", () => {
     const port = await freePort();
     const adminUser = "ops-admin";
     const adminPassword = `synthetic-admin-${id}`;
-    const caddyImage = "caddy:2.11.7-alpine@sha256:e70b164da81ef698b3ad19af799ea6086ce6d9e48ed4079eb9fe26f6fbf14ee5";
+    const placeholderEnv = {
+      ...process.env,
+      GLITCHTIP_POSTGRES_PASSWORD: "x",
+      GLITCHTIP_SECRET_KEY: "x",
+      GLITCHTIP_ADMIN_USER: adminUser,
+      GLITCHTIP_ADMIN_PASSWORD_HASH: ["$2a$14$", "0".repeat(53)].join(""),
+    };
+    const caddyImage = (await inspectCompose(glitchtipComposeFile, placeholderEnv)).caddy!.image!;
     const { stdout: hashOut } = await run("docker", ["run", "--rm", caddyImage, "caddy", "hash-password", "--plaintext", adminPassword]);
 
     const composeEnv: NodeJS.ProcessEnv = {
@@ -137,7 +145,37 @@ describe("error tracking and container log rotation", () => {
       const tracker = createApiErrorTracker({ dsn: `http://${publicKey}@127.0.0.1:${port}/_glitchtip/${projectId}`, serverEpoch: "glitchtip-c2" });
       trackerClose = tracker.close;
 
-      const syntheticPasajero = {
+      // Browser SDK CORS preflight and cross-origin envelope ingestion succeed without Basic Auth and strip client IPs.
+      const preflight = await fetch(`${baseUrl}/_glitchtip/api/${projectId}/envelope/`, {
+        method: "OPTIONS",
+        headers: {
+          Origin: "https://oficina.example",
+          "Access-Control-Request-Method": "POST",
+          "Access-Control-Request-Headers": "content-type",
+        },
+      });
+      expect(preflight.status).toBeLessThan(400);
+      expect(preflight.headers.get("access-control-allow-origin")).toBeTruthy();
+
+      const browserEventId = randomBytes(16).toString("hex");
+      const browserEnvelope = [
+        JSON.stringify({ event_id: browserEventId, dsn: `http://${publicKey}@127.0.0.1:${port}/_glitchtip/${projectId}` }),
+        JSON.stringify({ type: "event" }),
+        JSON.stringify({ event_id: browserEventId, platform: "javascript", message: "Browser SDK smoke event", tags: { app: "office" } }),
+      ].join("\n");
+      const browserPost = await fetch(`${baseUrl}/_glitchtip/api/${projectId}/envelope/?sentry_key=${publicKey}&sentry_version=7`, {
+        method: "POST",
+        headers: {
+          Origin: "https://oficina.example",
+          "Content-Type": "text/plain;charset=UTF-8",
+          "X-Forwarded-For": "198.51.100.77",
+        },
+        body: browserEnvelope,
+      });
+      expect(browserPost.status).toBeLessThan(300);
+      expect(browserPost.headers.get("access-control-allow-origin")).toBeTruthy();
+
+      const syntheticPassenger = {
         name: "Pasajero Sintético GlitchTip",
         dni: "43.456.789",
         homeAddress: "Calle Inventada 101",
@@ -165,36 +203,42 @@ describe("error tracking and container log rotation", () => {
           Cookie: "session=synthetic-live-cookie; remember_device=synthetic-live-device",
           Authorization: "Bearer synthetic-live-bearer",
         },
-        body: JSON.stringify(syntheticPasajero),
+        body: JSON.stringify(syntheticPassenger),
       });
       expect(crashResponse.status).toBe(500);
       await tracker.flush(5000);
 
-      let storedEvents: Array<{ eventID?: string; id?: string }> = [];
+      let storedEvents: Array<{ eventID?: string; id?: string; title?: string }> = [];
       const deadline = Date.now() + 30_000;
       while (Date.now() < deadline) {
         const eventsResponse = await fetch(`${baseUrl}/_glitchtip/api/0/projects/traslado-test/traslado-app/events/`, {
           headers: { Authorization: `Bearer ${apiToken}` },
         });
         expect(eventsResponse.status).toBe(200);
-        storedEvents = (await eventsResponse.json()) as Array<{ eventID?: string; id?: string }>;
-        if (storedEvents.length > 0) break;
+        storedEvents = (await eventsResponse.json()) as Array<{ eventID?: string; id?: string; title?: string }>;
+        if (storedEvents.length >= 2) break;
         await new Promise((resolveDelay) => setTimeout(resolveDelay, 500));
       }
 
-      expect(storedEvents.length).toBeGreaterThanOrEqual(1);
-      const eventId = storedEvents[0]!.eventID ?? storedEvents[0]!.id;
-      const detailResponse = await fetch(`${baseUrl}/_glitchtip/api/0/projects/traslado-test/traslado-app/events/${eventId}/`, {
-        headers: { Authorization: `Bearer ${apiToken}` },
-      });
-      expect(detailResponse.status).toBe(200);
-      const storedDetailText = await detailResponse.text();
+      expect(storedEvents.length).toBeGreaterThanOrEqual(2);
+      const allDetails = await Promise.all(
+        storedEvents.map(async (item) => {
+          const eventId = item.eventID ?? item.id;
+          const res = await fetch(`${baseUrl}/_glitchtip/api/0/projects/traslado-test/traslado-app/events/${eventId}/`, {
+            headers: { Authorization: `Bearer ${apiToken}` },
+          });
+          expect(res.status).toBe(200);
+          return await res.text();
+        }),
+      );
+      const storedDetailText = allDetails.join("\n");
 
       expect(storedDetailText).toContain("Database crash while saving");
+      expect(storedDetailText).toContain("Browser SDK smoke event");
       for (const forbidden of [
         "Pasajero Sintético GlitchTip", "Adulto Sintético Legal", "43.456.789", "43456789", "30.111.222", "30111222",
         "3815550177", "Calle Inventada 101", "Portón azul sintético", "epilepsia fotosensible", "-26.8302", "-65.2101",
-        "synthetic-live-cookie", "synthetic-live-device", "synthetic-live-bearer",
+        "synthetic-live-cookie", "synthetic-live-device", "synthetic-live-bearer", "198.51.100.77",
       ]) {
         expect(storedDetailText).not.toContain(forbidden);
       }

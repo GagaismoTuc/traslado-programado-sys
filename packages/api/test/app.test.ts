@@ -167,7 +167,7 @@ describe("API test seam", () => {
       },
     });
 
-    const pasajeroBody = {
+    const passengerBody = {
       name: "Pasajero Sintético API",
       dni: "42.345.678",
       homeAddress: "Calle Inventada 101",
@@ -195,7 +195,7 @@ describe("API test seam", () => {
         Cookie: "session=synthetic-api-session",
         Authorization: "Bearer synthetic-api-bearer",
       },
-      body: JSON.stringify(pasajeroBody),
+      body: JSON.stringify(passengerBody),
     });
 
     expect(response.status).toBe(500);

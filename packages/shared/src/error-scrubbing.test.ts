@@ -108,4 +108,31 @@ describe("scrubErrorEvent", () => {
     }
     expect(scrubbed.transaction).toBe("GET /geocode");
   });
+
+  it("strips OSRM multi-stop coordinates, short-decimal coords arrays, root-relative queries and navigation breadcrumbs", () => {
+    const scrubbed = scrubErrorEvent({
+      transaction: "GET /?q=Calle+Inventada+202#Pasajero+Uno",
+      message: 'Failed routing {"coords":[-65.22,-26.8]} via http://127.0.0.1:5000/route/v1/driving/-65.22,-26.84;-65.2,-26.82?overview=false',
+      breadcrumbs: [
+        {
+          category: "navigation",
+          data: { from: "/?name=Pasajero Uno", to: "/passengers#Pasajero+Uno" },
+        },
+        {
+          category: "fetch",
+          data: { url: "http://127.0.0.1:5000/route/v1/driving/-65.2036,-26.8241;-65.2101,-26.8302?steps=false" },
+        },
+      ],
+    });
+
+    const serialized = JSON.stringify(scrubbed);
+    for (const forbidden of [
+      "Calle+Inventada+202", "Pasajero+Uno", "Pasajero Uno",
+      "-65.22", "-26.8", "-26.84", "-65.2", "-26.82", "-65.2036", "-26.8241", "-65.2101", "-26.8302",
+    ]) {
+      expect(serialized).not.toContain(forbidden);
+    }
+    expect(scrubbed.transaction).toBe("GET /");
+    expect(scrubbed.breadcrumbs?.[0]?.data).toEqual({ from: "/", to: "/passengers" });
+  });
 });

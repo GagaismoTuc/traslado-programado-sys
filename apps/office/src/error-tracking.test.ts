@@ -20,7 +20,7 @@ describe("office error tracking SDK", () => {
       },
     });
 
-    const pasajeroPayload = {
+    const passengerPayload = {
       name: "Pasajero Sintético Oficina",
       dni: "41234567",
       homeAddress: "Pasaje de Prueba 202",
@@ -36,17 +36,17 @@ describe("office error tracking SDK", () => {
       message: "POST https://office.example/api/passengers?name=Pasajero+Sint%C3%A9tico+Oficina",
       data: {
         url: "https://office.example/api/passengers?name=Pasajero+Sint%C3%A9tico+Oficina",
-        request_body: pasajeroPayload,
+        request_body: passengerPayload,
         headers: { Cookie: "session=synthetic-office-cookie", Authorization: "Bearer synthetic-office-token" },
       },
     });
 
-    tracker.captureError(new Error(`Office save failed: ${JSON.stringify(pasajeroPayload)} at -26.8241, -65.2036`), {
-      passenger: pasajeroPayload,
+    tracker.captureError(new Error(`Office save failed: ${JSON.stringify(passengerPayload)} at -26.8241, -65.2036`), {
+      passenger: passengerPayload,
       request: {
         url: "https://office.example/passengers?dni=41234567",
         query_string: "dni=41234567",
-        data: pasajeroPayload,
+        data: passengerPayload,
         cookies: { session: "synthetic-office-cookie" },
         headers: { Cookie: "session=synthetic-office-cookie", Authorization: "Bearer synthetic-office-token" },
       },

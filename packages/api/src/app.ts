@@ -14,6 +14,7 @@ import {
   type SecondFactorStep,
   type SessionRow,
 } from "./sessions.js";
+import type { ApiRequestMetadata } from "./error-tracking.js";
 import type { GeocodeResult, Geocoder } from "./geocoding.js";
 import type { TravelTime } from "./routing.js";
 import { planRoute, speedFactorAt, type LngLat, type PlannerSettings, type PlanResult, type PlanTransfer, type VroomSolver } from "./planner.js";
@@ -34,7 +35,7 @@ export type RoutingHealth = {
 export type RouteLeg = { distanceMeters: number; durationSeconds: number };
 /** Road legs between consecutive points, in order: n points give n - 1 legs. */
 export type Router = (points: { lat: number; lng: number }[]) => Promise<RouteLeg[]>;
-export type ErrorReporter = (error: unknown, request: { method: string; url: string; headers: Record<string, string> }) => void;
+export type ErrorReporter = (error: unknown, request: ApiRequestMetadata) => void;
 
 export type AppConfig = {
   serverEpoch: ServerEpoch;
