@@ -188,6 +188,28 @@ export function latestMarks(items: QueuedMark[]) {
   return latest;
 }
 
+export type SignOutOutcome =
+  | { result: "signed_out" | "expired" | "revoked" | "unreachable" }
+  | { result: "refused"; pending: number; offline: boolean };
+
+/**
+ * "Cerrar sesión": sends the queue first and ends the session only when no Marca is left unconfirmed on the phone. Without
+ * signal, or with a Marca the server did not take, it refuses and keeps everything. An expired session keeps the queue for
+ * the next sign-in; a revoked device was wiped by the flush, which sent nothing more.
+ */
+export async function signOut(store: LocalStore, queue: { flush: () => Promise<FlushOutcome> }, logout: () => Promise<Response>): Promise<SignOutOutcome> {
+  const outcome = await queue.flush();
+  if (outcome.result === "revoked") return { result: "revoked" };
+  if (outcome.result === "signed_out") return { result: "expired" };
+  const pending = (await store.marks()).filter((item) => item.state === "pending").length;
+  if (pending) return { result: "refused", pending, offline: outcome.result === "offline" };
+  try {
+    return (await logout()).ok ? { result: "signed_out" } : { result: "unreachable" };
+  } catch {
+    return { result: "unreachable" };
+  }
+}
+
 type Listener = Pick<EventTarget, "addEventListener" | "removeEventListener">;
 
 /** Flushes now (the app was opened), when the connection returns and when the app becomes visible; returns the cleanup. */

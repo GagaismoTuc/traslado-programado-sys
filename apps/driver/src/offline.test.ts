@@ -1,7 +1,7 @@
 import { describe, expect, it, vi } from "vitest";
 import { newMark, type Mark } from "./Marks";
 import {
-  CONFLICT_NOTE, latestMarks, markQueue, requestPersistentStorage, savedPlanFor, startFlushing, wipeIfRevoked,
+  CONFLICT_NOTE, latestMarks, markQueue, requestPersistentStorage, savedPlanFor, signOut, startFlushing, wipeIfRevoked,
   type CachedPlan, type LocalStore, type QueuedMark,
 } from "./offline";
 
@@ -178,5 +178,69 @@ describe("Marca queue on the phone", () => {
     expect(granted.persist).not.toHaveBeenCalled();
     expect(await requestPersistentStorage({ persisted: async () => false, persist: async () => false })).toBe(false);
     expect(await requestPersistentStorage(undefined)).toBe(false);
+  });
+});
+
+describe("Cerrar sesión", () => {
+  const offline = async (): Promise<Response> => {
+    throw new TypeError("Failed to fetch");
+  };
+
+  it("sends the queue first and refuses to end the session while a Marca is unconfirmed, without signal or refused by the server", async () => {
+    const { store, marks, getPlan } = memoryStore();
+    await store.putPlan(savedPlan(7));
+    await markQueue(store, offline).add(9, mark(1));
+    const logout = vi.fn(async () => new Response(null, { status: 204 }));
+
+    expect(await signOut(store, markQueue(store, offline), logout)).toEqual({ result: "refused", pending: 1, offline: true });
+    expect(await signOut(store, markQueue(store, async () => json({ error: "This Recorrido is closed" }, 409)), logout))
+      .toEqual({ result: "refused", pending: 1, offline: false });
+    expect(logout).not.toHaveBeenCalled();
+    expect(marks.get(mark(1).id)).toMatchObject({ state: "pending", mark: mark(1) });
+    expect(getPlan()).toEqual(savedPlan(7));
+
+    const sent: string[] = [];
+    const online = markQueue(store, async (_routeId, sentMark) => {
+      sent.push(sentMark.id);
+      return stored(sentMark);
+    });
+    const order: string[] = [];
+    expect(await signOut(store, { flush: () => (order.push("flush"), online.flush()) }, async () => {
+      order.push("logout");
+      return new Response(null, { status: 204 });
+    })).toEqual({ result: "signed_out" });
+    expect(order).toEqual(["flush", "logout"]);
+    expect(sent).toEqual([mark(1).id]);
+    expect(marks.get(mark(1).id)).toMatchObject({ state: "confirmed" });
+  });
+
+  it("keeps the session and the queue when the sign-out request does not reach the server", async () => {
+    const { store, marks } = memoryStore();
+    await markQueue(store, offline).add(9, mark(1));
+    const queue = markQueue(store, async (_routeId, sentMark) => stored(sentMark));
+    expect(await signOut(store, queue, offline)).toEqual({ result: "unreachable" });
+    expect(await signOut(store, queue, async () => new Response("Bad gateway", { status: 502 }))).toEqual({ result: "unreachable" });
+    expect(marks.get(mark(1).id)).toMatchObject({ state: "confirmed" });
+  });
+
+  it("keeps the queue for the next sign-in on an expired session and reports a revoked device the flush wiped", async () => {
+    const { store, marks } = memoryStore();
+    await markQueue(store, offline).add(9, mark(1));
+    const logout = vi.fn(async () => new Response(null, { status: 204 }));
+    const expired = markQueue(store, async () => json({ error: "Authentication required", code: "session_expired" }, 401));
+    expect(await signOut(store, expired, logout)).toEqual({ result: "expired" });
+    expect(marks.get(mark(1).id)).toMatchObject({ state: "pending", mark: mark(1) });
+
+    const sent: string[] = [];
+    const revoked = markQueue(store, async (_routeId, sentMark) => {
+      sent.push(sentMark.id);
+      return json({ error: "Authentication required", code: "session_revoked" }, 401);
+    });
+    await markQueue(store, offline).add(9, mark(2));
+    expect(await signOut(store, revoked, logout)).toEqual({ result: "revoked" });
+    // The first send learnt the device was revoked: nothing else was sent and the phone holds nothing.
+    expect(sent).toEqual([mark(1).id]);
+    expect(marks.size).toBe(0);
+    expect(logout).not.toHaveBeenCalled();
   });
 });
