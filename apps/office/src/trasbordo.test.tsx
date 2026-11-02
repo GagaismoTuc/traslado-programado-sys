@@ -48,6 +48,7 @@ describe("Trasbordo in the Plan diario", () => {
     const markup = renderToStaticMarkup(<AlertList alerts={[{
       id: 1, kind: "mark_flagged", createdAt: "2026-10-23T11:02:00.000Z", transferId: 3, routeId: 9, markId: "00000000-0000-4000-8000-000000000001",
       passengerName: "Pasajero Sintético", driverName: "Chofer Sintético", details: { reasons: ["trasbordo_unlinked"] },
+      resolution: null,
     }]} />);
     expect(markup).toContain(
       "Marca accepted with a warning for Pasajero Sintético (Chofer Sintético): the Chofer marked it at a Trasbordo point: correct it and record the Trasbordo",

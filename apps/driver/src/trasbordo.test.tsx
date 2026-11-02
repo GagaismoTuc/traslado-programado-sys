@@ -12,7 +12,7 @@ const route = (stops: DriverStop[]): DriverRoute => ({
   routeId: 9, version: 1, startTime: "06:00", endTime: "18:00", vehiclePlate: "AAA001", status: "en_curso", acknowledgedVersion: 1, stops,
 });
 const marking = (): Marking => ({
-  sending: false, marks: {}, undone: {}, planFetchedAt: "2026-10-23T11:00:00.000Z", handover: null, refusedClose: null, onStart: vi.fn(),
+  sending: false, marks: {}, refused: {}, undone: {}, planFetchedAt: "2026-10-23T11:00:00.000Z", handover: null, refusedClose: null, onStart: vi.fn(),
   onClose: vi.fn(), onMark: vi.fn(), onFlush: vi.fn(), onUndo: vi.fn(), onOpenHandover: vi.fn(), onOtherAdult: vi.fn(), onSearch: vi.fn(),
 });
 const render = (item: DriverStop) => renderToStaticMarkup(<StopActions route={route([item])} stop={item} marking={marking()} />);
