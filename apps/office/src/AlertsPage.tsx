@@ -19,6 +19,14 @@ export type Alert = {
   passengerName: string | null;
   driverName: string | null;
   details: Record<string, unknown>;
+  // The Corrección that resolved the alert, while it replaces the Marca the alert is about; only an Ausente on an entrada.
+  resolution: {
+    markId: string;
+    kind: string;
+    at: string;
+    reason: string | null;
+    author: { userId: number; username: string; role: string };
+  } | null;
 };
 
 // The inbox asks the server again every 15 seconds.
@@ -85,11 +93,19 @@ export function AlertText({ alert }: { alert: Alert }) {
 // Local time of the Plan diario's zone, as "HH:MM".
 const CLOCK = new Intl.DateTimeFormat("en-GB", { timeZone: "America/Argentina/Tucuman", hour: "2-digit", minute: "2-digit", hourCycle: "h23" });
 
+const CORRECTED_TO: Record<string, string> = { undo: "that undid it", subio: "to Subió", ausente: "to Ausente", entregado: "to Entregado" };
+
+function resolutionLine({ kind, author, at, reason }: NonNullable<Alert["resolution"]>) {
+  return `Resolved by a Corrección ${CORRECTED_TO[kind] ?? kind} by ${author.username} (${author.role}) at ${CLOCK.format(new Date(at))}`
+    + (reason ? `. Reason: ${reason}` : "");
+}
+
 export function AlertList({ alerts }: { alerts: Alert[] }) {
   if (!alerts.length) return <p>No alerts.</p>;
   return <ul>{alerts.map((alert) => <li key={alert.id}>
     <time dateTime={alert.createdAt}>{CLOCK.format(new Date(alert.createdAt))}</time>
     {" "}<AlertText alert={alert} />
+    {alert.resolution && <div>{resolutionLine(alert.resolution)}</div>}
   </li>)}</ul>;
 }
 

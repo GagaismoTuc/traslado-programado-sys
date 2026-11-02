@@ -128,6 +128,22 @@ describe("republishing a Recorrido En curso", () => {
     expect(v2.legs.slice(0, 3)).toEqual(v1.legs.slice(0, 3));
   });
 
+  it("Rule 1 (#83): the planner takes the Subió time from the Marca in force, not from a Subió that was undone", async () => {
+    const { s, driver, routeId, tb } = await onBoardDay("boarded-in-force");
+    // A second Subió by mistake at 13:17, undone at 13:18: the Pasajero is still on board since 13:16.
+    at("13:17");
+    const mistaken = h.markBody(tb, "subio");
+    await h.answer(h.mark(driver.cookie, routeId, mistaken), 201);
+    at("13:18");
+    await h.answer(h.mark(driver.cookie, routeId, h.markBody(tb, "undo", { corrects: mistaken.id })), 201);
+    expect(await h.rows("SELECT status FROM transfers WHERE id = $1", [tb])).toEqual([{ status: "subio" }]);
+
+    engine.dropJobs = false;
+    await order(s, routeId);
+    // Subió 13:16 + 60 min − 5 min margin − 5 min drop-off service, as if the undone Subió never happened.
+    expect(engine.problems.at(-1)!.jobs!.map((job) => [job.id, job.time_windows])).toEqual([[tb, [[(13 * 60 + 16) * 60, (14 * 60 + 6) * 60]]]]);
+  });
+
   it("Rule 2: an on-board child stays in their Recorrido and Vehículo: moving them is refused and the engine never drops them", async () => {
     const { s, routeId, tb } = await onBoardDay("rule-2");
     const other = await s.route((await s.chofer()).driverId);
