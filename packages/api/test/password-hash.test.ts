@@ -3,7 +3,7 @@ import { describe, expect, it, vi } from "vitest";
 import { hashPassword, verifyPassword } from "../src/auth.js";
 
 describe("password hash cost", () => {
-  it("asks Argon2id for m=64 MiB, t=3, p=1 and only the test environment derives with a lower cost", async () => {
+  it("asks Argon2id for the production cost m=64 MiB, t=3, p=1", async () => {
     const derive = vi.mocked(argon2);
     derive.mockClear();
 
