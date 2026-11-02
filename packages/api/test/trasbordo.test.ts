@@ -326,11 +326,14 @@ describe("Trasbordo", () => {
 
 /**
  * #87: the receiving Vehículo breaks down too. The Pasajero got on at 07:00 (leg A), was handed over at 07:50 near the
- * school to the second Chofer (leg B), and a third Chofer has a published Recorrido with their own entrada at 08:45.
+ * school to the second Chofer (leg B), who had picked up their own Pasajero at 07:45; a third Chofer has a published
+ * Recorrido with their own entrada at 08:45.
  */
 async function secondBreakdownDay(name: string) {
   const { s, giving, receiving, legA } = await breakdownDay(name);
   const third = await s.served((await s.passenger()).passengerId, "entrada", "08:45");
+  at("07:45");
+  await h.answer(h.mark(receiving.driver.cookie, receiving.routeId, h.markBody(receiving.transferId, "subio")), 201);
   at("07:50");
   const first = await trasbordo(s, legA, { routeId: receiving.routeId, ...NEAR_SCHOOL, overrideReason: "Breakdown" });
   return { s, giving, receiving, third, legA, legB: first.legB.id as number, first };
@@ -366,6 +369,9 @@ describe("A second Trasbordo when the receiving Vehículo breaks down too (#87)"
     const republished = await s.post(`/routes/${receiving.routeId}/publish`, { overrideReason: "After the second breakdown" });
     expect(republished.version.legs.filter((leg: { transferId: number }) => leg.transferId === legB)
       .map((leg: { kind: string; plannedTime: string }) => [leg.kind, leg.plannedTime])).toEqual([["pickup", "07:50"], ["dropoff", "07:55"]]);
+    // Ordered again, the broken Recorrido goes on from the second Trasbordo point, where the middle leg ended.
+    await h.answer(h.request(`/routes/${receiving.routeId}/order`, "POST", undefined, s.office), 200);
+    expect((engine.problems.at(-1) as unknown as { vehicles: { start: number[] }[] }).vehicles[0].start).toEqual([FAR.lng, FAR.lat]);
     // A repeated Trasbordo returns the recorded one instead of a fourth leg.
     const again = await trasbordo(s, legB, { routeId: third.routeId, ...FAR }, 200);
     expect([again.legB.id, again.marks]).toEqual([legC, result.marks]);
@@ -375,8 +381,8 @@ describe("A second Trasbordo when the receiving Vehículo breaks down too (#87)"
     const { s, third, legB } = await secondBreakdownDay("chain-rule-2");
     at("07:55");
     const result = await trasbordo(s, legB, { routeId: third.routeId, ...FAR });
-    // The third leg's drop-off service ends at 08:16:40: 76.7 min since the Subió at 07:00, over the 60-minute limit.
-    // From the second leg's Subió (07:50) it would be 26.7 minutes, from its own (07:55) 21.7.
+    // The third leg's drop-off service ends at 08:16:40: 76.67 min since the Subió at 07:00, over the 60-minute limit.
+    // From the second leg's Subió (07:50) it would be 26.67 minutes, from its own (07:55) 21.67.
     expect(result.publication).toMatchObject({ error: "The Recorrido breaks limits: fix it or publish it with a reason" });
     expect(result.publication.violations).toContainEqual(expect.objectContaining({
       violations: expect.arrayContaining([
