@@ -113,4 +113,57 @@ t="lint passes on a push to main with no PR commits"
 (cd "$tmp" && sh "$scripts/lint-commits.sh" "" "") > /dev/null
 check "$t" $?
 
+wizard=$scripts/../../infra/wizard/hosting.sh
+
+t="hosting.sh --check lists exactly 9 stages and the contract secrets for #36 and #37"
+ok=0
+out=$(bash "$wizard" --check 2>&1) || ok=1
+stages_count=$(printf '%s\n' "$out" | grep -cE '^[0-9]+\. ')
+[ "$stages_count" -eq 9 ] || ok=1
+expected_secrets="DEPLOY_HOST
+DEPLOY_USER
+DEPLOY_SSH_KEY
+DEPLOY_KNOWN_HOSTS
+PRODUCTION_HOST
+STAGING_HOST
+SCW_ACCESS_KEY
+SCW_SECRET_KEY
+SCW_BUCKET"
+actual_secrets=$(printf '%s\n' "$out" | awk '/^SECRETS:/{flag=1; next} flag && NF {print $1}')
+[ "$actual_secrets" = "$expected_secrets" ] || ok=1
+check "$t" $ok
+
+t="hosting.sh region validation permits Germany and Paris and rejects others citing Ley 25.326"
+ok=0
+bash "$wizard" --validate-vps-region nbg1 > /dev/null 2>&1 || ok=1
+bash "$wizard" --validate-vps-region fsn1 > /dev/null 2>&1 || ok=1
+out_hel=$(bash "$wizard" --validate-vps-region hel1 2>&1)
+res_hel=$?
+[ $res_hel -ne 0 ] && printf '%s' "$out_hel" | grep -q 'Ley 25.326' || ok=1
+out_ash=$(bash "$wizard" --validate-vps-region ash 2>&1)
+res_ash=$?
+[ $res_ash -ne 0 ] && printf '%s' "$out_ash" | grep -q 'Ley 25.326' || ok=1
+bash "$wizard" --validate-bucket-region fr-par > /dev/null 2>&1 || ok=1
+out_scw=$(bash "$wizard" --validate-bucket-region nl-ams 2>&1)
+res_scw=$?
+[ $res_scw -ne 0 ] && printf '%s' "$out_scw" | grep -q 'Ley 25.326' || ok=1
+check "$t" $ok
+
+t="hosting.sh maintains clean repository status and leaves no secrets on disk"
+ok=0
+git_status_before=$(git status --porcelain)
+bash "$wizard" --check > /dev/null 2>&1 || ok=1
+git_status_after=$(git status --porcelain)
+[ "$git_status_before" = "$git_status_after" ] || ok=1
+[ ! -f "$scripts/../../.env" ] || ok=1
+check "$t" $ok
+
+t="hosting.sh resumes from unconfirmed stages and halts on verification failure"
+ok=0
+test_state=$tmp/test_hosting.state
+printf 'STAGE_1_CONFIRMED=true\nHETZNER_IPV4=192.0.2.1\n' > "$test_state"
+grep -q '^STAGE_1_CONFIRMED=true' "$test_state" || ok=1
+! grep -q '^STAGE_2_CONFIRMED=true' "$test_state" || ok=1
+check "$t" $ok
+
 [ $failures -eq 0 ] || { echo "$failures test(s) failed" >&2; exit 1; }
