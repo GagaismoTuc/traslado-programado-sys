@@ -234,6 +234,36 @@ describe("Correcciones", () => {
       .toEqual([["subio", null, null], ["ausente", subio.id, null], ["subio", ausente.id, reason]]);
   });
 
+  it("Rule 3 (#83): the history gives the Receptor of each Entregado by name, and an Adulto autorizado's relation with the Pasajero", async () => {
+    const { office, passenger, served, school } = await setup("receptor");
+    const { passengerId, guardian } = await passenger(true);
+    const salida = await served(passengerId, "salida");
+    const entrada = await served(passengerId, "entrada");
+    const send = async (on: typeof salida, time: string, kind: "subio" | "entregado" | "undo", fields: Record<string, unknown> = {}) => {
+      at(time);
+      const body = markBody(on.transferId, kind, fields);
+      await answer(mark(on.driver.cookie, on.routeId, body), 201);
+      return body.id;
+    };
+    await send(salida, "12:00:00", "subio");
+    const toGuardian = await send(salida, "12:01:00", "entregado", { receiver: { kind: "authorized_adult", adultId: guardian } });
+    await send(salida, "12:01:30", "undo", { corrects: toGuardian });
+    const toOther = await send(salida, "12:02:00", "entregado", { receiver: { kind: "other_adult", name: "Tía Sintética", dni: "-3000001" } });
+    await send(salida, "12:02:30", "undo", { corrects: toOther });
+    await send(salida, "12:03:00", "entregado", { receiver: { kind: "base_staff" } });
+    await send(entrada, "12:04:00", "subio");
+    await send(entrada, "12:05:00", "entregado", { receiver: { kind: "destination", destinationId: school } });
+
+    const receivers = async (transferId: number) => (await answer(request(`/transfers/${transferId}/history`, "GET", undefined, office), 200))
+      .marks.filter((item: { kind: string }) => item.kind === "entregado").map((item: { receiver: unknown }) => item.receiver);
+    expect(await receivers(salida.transferId)).toEqual([
+      { kind: "authorized_adult", adultId: guardian, name: "Madre Sintética", relation: "madre" },
+      { kind: "other_adult", name: "Tía Sintética", dni: "-3000001", authorizationId: null },
+      { kind: "base_staff" },
+    ]);
+    expect(await receivers(entrada.transferId)).toEqual([{ kind: "destination", destinationId: school, name: "Escuela receptor" }]);
+  });
+
   it("lets only the Oficina correct a Marca and read a Traslado's history", async () => {
     const { passenger, served } = await setup("access");
     const { passengerId } = await passenger();

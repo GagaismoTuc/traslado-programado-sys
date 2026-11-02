@@ -10,7 +10,12 @@ export type HistoryMark = {
   kind: "subio" | "ausente" | "entregado" | "undo";
   phoneTime: string;
   serverTime: string;
-  receiver: { kind: string } | null;
+  receiver:
+    | { kind: "authorized_adult"; adultId: number; name: string; relation: string }
+    | { kind: "destination"; destinationId: number; name: string }
+    | { kind: "other_adult"; name: string; dni: string; authorizationId: number | null }
+    | { kind: "base_staff" }
+    | null;
   flags: string[];
   corrects?: string;
   reason?: string;
@@ -40,9 +45,19 @@ export function markInForce(marks: HistoryMark[]) {
     .sort(markOrder(({ mark }) => mark.phoneTime, (a, b) => a.stored - b.stored)).at(-1)?.mark ?? null;
 }
 
+/** Who received the Pasajero, by name; never their DNI. */
+function receiverLabel(receiver: NonNullable<HistoryMark["receiver"]>) {
+  switch (receiver.kind) {
+    case "authorized_adult": return `${receiver.name} (${receiver.relation})`;
+    case "other_adult": return `${receiver.name} (another adult)`;
+    case "destination": return `${receiver.name} (Destino)`;
+    case "base_staff": return "company staff at the base";
+  }
+}
+
 function markLine(mark: HistoryMark) {
   const corrects = mark.corrects ? ` - Corrección of ${mark.corrects}` : "";
-  const receiver = mark.receiver ? `, Receptor: ${mark.receiver.kind}` : "";
+  const receiver = mark.receiver ? `, Receptor: ${receiverLabel(mark.receiver)}` : "";
   return `${KINDS[mark.kind]}${receiver} by ${mark.author.username} (${mark.author.role}), phone ${when.format(new Date(mark.phoneTime))}, `
     + `server ${when.format(new Date(mark.serverTime))}${corrects}`;
 }

@@ -1039,9 +1039,18 @@ function parseRouteEnds(body: Record<string, unknown>) {
   return result;
 }
 
-// The local minute of the Traslado's (alias t) latest Subió: when the Pasajero actually got on.
-const BOARDED_MINUTES_SQL = `(SELECT EXTRACT(EPOCH FROM (m.phone_time AT TIME ZONE '${LOCAL_TIME_ZONE}')::time) / 60
-    FROM marks m WHERE m.transfer_id = t.id AND m.kind = 'subio' ORDER BY m.phone_time DESC, m.id DESC LIMIT 1)`;
+// A Marca in force: not an undo and not replaced by a Corrección. The Traslado's state is its latest one in force.
+// A Marca is in force unless it is an undo or a Corrección replaced it: an undo, or a corrected outcome nobody undid. Undoing
+// a Corrección so puts back the Marca it replaced. REPLACES_SQL is that test on a Corrección (alias c).
+const REPLACES_SQL = "(c.kind = 'undo' OR NOT EXISTS (SELECT 1 FROM marks u WHERE u.corrects_mark_id = c.id AND u.kind = 'undo'))";
+const MARK_IN_FORCE_SQL = `e.kind <> 'undo' AND NOT EXISTS (SELECT 1 FROM marks c WHERE c.corrects_mark_id = e.id AND ${REPLACES_SQL})`;
+// Marcas (alias e) newest first in `markOrder` of @traslado/shared: by phone time, then by arrival at the server.
+const LATEST_MARK_FIRST_SQL = "ORDER BY e.phone_time DESC, e.id DESC";
+
+// The local minute of the Traslado's (alias t) latest Subió in force: when the Pasajero actually got on. A Subió that was
+// undone or corrected does not count.
+const BOARDED_MINUTES_SQL = `(SELECT EXTRACT(EPOCH FROM (e.phone_time AT TIME ZONE '${LOCAL_TIME_ZONE}')::time) / 60
+    FROM marks e WHERE e.transfer_id = t.id AND e.kind = 'subio' AND ${MARK_IN_FORCE_SQL} ${LATEST_MARK_FIRST_SQL} LIMIT 1)`;
 
 const ORDER_ROUTE_SQL = `
   SELECT r.daily_plan_id, r.driver_id, r.vehicle_id, r.status, to_char(r.start_time, 'HH24:MI') AS start_time,
@@ -1764,11 +1773,6 @@ const MARK_KINDS: MarkKind[] = ["subio", "ausente", "entregado", "undo"];
 const CHOFER_CORRECTION_WINDOW_MS = 2 * 60 * 1000;
 const CALL_THE_OFFICE_TO_CORRECT = "More than 2 minutes have passed since this Marca: call the Oficina to correct it";
 const REASON_REQUIRED = "A Corrección by the Oficina requires a reason";
-// A Marca in force: not an undo and not replaced by a Corrección. The Traslado's state is its latest one in force.
-// A Marca is in force unless it is an undo or a Corrección replaced it: an undo, or a corrected outcome nobody undid. Undoing
-// a Corrección so puts back the Marca it replaced.
-const MARK_IN_FORCE_SQL = `e.kind <> 'undo' AND NOT EXISTS (SELECT 1 FROM marks c WHERE c.corrects_mark_id = e.id
-  AND (c.kind = 'undo' OR NOT EXISTS (SELECT 1 FROM marks u WHERE u.corrects_mark_id = c.id AND u.kind = 'undo')))`;
 const UUID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 const RECEIVER_REQUIRED = "Entregado requires a Receptor";
 // A Traslado in one of these states is closed: an Autorización puntual on it has expired.
@@ -1840,6 +1844,15 @@ function formatMarkReceiver(row: Record<string, unknown>): MarkReceiver | null {
     };
     case "base_staff": return { kind: "base_staff" };
     default: return null;
+  }
+}
+
+/** The Receptor as the history shows it: an Adulto autorizado or a Destino also by name, the adult with their relation. */
+function historyReceiver(receiver: MarkReceiver | null, row: Record<string, unknown>) {
+  switch (receiver?.kind) {
+    case "authorized_adult": return { ...receiver, name: String(row.receiver_adult_name), relation: String(row.receiver_relation) };
+    case "destination": return { ...receiver, name: String(row.receiver_destination_name) };
+    default: return receiver;
   }
 }
 
@@ -2097,7 +2110,7 @@ export function createApp({ db, routing, router, geocoder, solver, travelTime, c
     if (fields.corrects) {
       const target = (await client.query(
         `SELECT m.id, m.driver_id, m.phone_time,
-                m.id = (SELECT e.id FROM marks e WHERE e.transfer_id = $2 AND ${MARK_IN_FORCE_SQL} ORDER BY e.phone_time DESC, e.id DESC LIMIT 1) AS latest
+                m.id = (SELECT e.id FROM marks e WHERE e.transfer_id = $2 AND ${MARK_IN_FORCE_SQL} ${LATEST_MARK_FIRST_SQL} LIMIT 1) AS latest
            FROM marks m WHERE m.client_id = $1 AND m.transfer_id = $2`,
         [fields.corrects, fields.transferId],
       ) as QueryResult).rows[0];
@@ -2174,7 +2187,7 @@ export function createApp({ db, routing, router, geocoder, solver, travelTime, c
     // Corrección puts back the state of the Marca it replaced.
     await client.query(
       `UPDATE transfers t SET status = COALESCE(
-         (SELECT e.kind FROM marks e WHERE e.transfer_id = $1 AND ${MARK_IN_FORCE_SQL} ORDER BY e.phone_time DESC, e.id DESC LIMIT 1),
+         (SELECT e.kind FROM marks e WHERE e.transfer_id = $1 AND ${MARK_IN_FORCE_SQL} ${LATEST_MARK_FIRST_SQL} LIMIT 1),
          CASE WHEN EXISTS (SELECT 1 FROM absences a WHERE a.transfer_id = $1) THEN 'cancelado_ausencia' ELSE 'planificado' END)
         WHERE t.id = $1`,
       [fields.transferId],
@@ -4322,7 +4335,13 @@ export function createApp({ db, routing, router, geocoder, solver, travelTime, c
           WHERE pvt.transfer_id = $1 ORDER BY pv.published_at, pv.id`,
         [id],
       ) as QueryResult;
-      const marks = await db.query(`${MARK_SELECT_SQL} WHERE m.transfer_id = $1 ORDER BY m.id`, [id]) as QueryResult;
+      const marks = await db.query(
+        `SELECT h.*, ra.name AS receiver_adult_name, ra.relation AS receiver_relation, rd.name AS receiver_destination_name
+           FROM (${MARK_SELECT_SQL} WHERE m.transfer_id = $1) h
+           LEFT JOIN authorized_adults ra ON ra.id = h.receiver_adult_id LEFT JOIN destinations rd ON rd.id = h.receiver_destination_id
+          ORDER BY h.id`,
+        [id],
+      ) as QueryResult;
       const changes = await db.query(
         `SELECT cl.action, cl.before_data, cl.after_data, cl.occurred_at, cl.actor_user_id, cl.actor_label, u.username
            FROM change_log cl LEFT JOIN users u ON u.id = cl.actor_user_id
@@ -4341,10 +4360,14 @@ export function createApp({ db, routing, router, geocoder, solver, travelTime, c
           pickupTime: (row.pickup as string | null) ?? null,
           dropoffTime: (row.dropoff as string | null) ?? null,
         })),
-        marks: marks.rows.map((row) => ({
-          ...formatMark(row),
-          author: { userId: Number(row.author_user_id), username: String(row.author_username), role: String(row.author_role) },
-        })),
+        marks: marks.rows.map((row) => {
+          const mark = formatMark(row);
+          return {
+            ...mark,
+            receiver: historyReceiver(mark.receiver, row),
+            author: { userId: Number(row.author_user_id), username: String(row.author_username), role: String(row.author_role) },
+          };
+        }),
         changes: changes.rows.map((row) => ({
           action: String(row.action),
           before: row.before_data,
@@ -4354,17 +4377,26 @@ export function createApp({ db, routing, router, geocoder, solver, travelTime, c
         })),
       });
     })
-    // The Oficina's alert inbox, newest first; the office app polls it.
+    // The Oficina's alert inbox, newest first; the office app polls it. An Ausente on an entrada is resolved while a
+    // Corrección replaces its Marca: undoing that Corrección puts the Ausente back in force and its alert back to pending.
     .get("/alerts", async (context) => {
       const actor = await requireOffice(context);
       if (actor instanceof Response) return actor;
       const result = await db.query(
         `SELECT al.id, al.kind, al.created_at, al.transfer_id, al.route_id, m.client_id AS mark_id, p.name AS passenger_name,
-                dr.name AS driver_name, al.details
+                dr.name AS driver_name, al.details, rc.client_id AS resolved_by_mark_id, rc.kind AS resolved_by_kind,
+                rc.server_time AS resolved_at, rc.reason AS resolved_reason, rc.user_id AS resolved_user_id,
+                rc.username AS resolved_username, rc.role AS resolved_role
            FROM alerts al
            LEFT JOIN marks m ON m.id = al.mark_id
            LEFT JOIN transfers t ON t.id = al.transfer_id LEFT JOIN passengers p ON p.id = t.passenger_id
            LEFT JOIN routes r ON r.id = al.route_id LEFT JOIN drivers dr ON dr.id = r.driver_id
+           LEFT JOIN LATERAL (
+             SELECT c.client_id, c.kind, c.server_time, c.reason, ru.id AS user_id, ru.username, ru.role
+               FROM marks c JOIN sessions rs ON rs.id = c.session_id JOIN users ru ON ru.id = rs.user_id
+              WHERE al.kind = 'absent_on_entrada' AND c.corrects_mark_id = al.mark_id AND ${REPLACES_SQL}
+              ORDER BY c.id DESC LIMIT 1
+           ) rc ON true
           ORDER BY al.id DESC LIMIT 200`,
       ) as QueryResult;
       return context.json({
@@ -4378,6 +4410,13 @@ export function createApp({ db, routing, router, geocoder, solver, travelTime, c
           passengerName: (row.passenger_name as string | null) ?? null,
           driverName: (row.driver_name as string | null) ?? null,
           details: row.details as Record<string, unknown>,
+          resolution: row.resolved_by_mark_id ? {
+            markId: String(row.resolved_by_mark_id),
+            kind: String(row.resolved_by_kind),
+            at: new Date(String(row.resolved_at)).toISOString(),
+            reason: (row.resolved_reason as string | null) ?? null,
+            author: { userId: Number(row.resolved_user_id), username: String(row.resolved_username), role: String(row.resolved_role) },
+          } : null,
         })),
       });
     })
