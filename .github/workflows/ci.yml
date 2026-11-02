@@ -3,7 +3,7 @@ name: CI
 on:
   pull_request:
   push:
-    branches: [main]
+    branches: [main, Gagaismo/traslado-programado-sys-101] # temporal (#101): corridas de medición, se revierte antes del PR
 
 jobs:
   verify:
