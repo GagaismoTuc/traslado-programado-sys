@@ -89,6 +89,30 @@ describe("Traslado history", () => {
     expect(markup).not.toContain("undefined");
   });
 
+  it("#87 AC3: shows the whole Trasbordo chain, with each Entregado to the receiving Chofer and each Subió", () => {
+    const leg = (id: string, kind: HistoryMark["kind"], time: string, routeId: number, driverId?: number) => mark(id, kind, time, {
+      routeId, author: oficina, ...(driverId ? { receiver: { kind: "driver" as const, driverId } } : {}),
+    });
+    const chain = [
+      { transferId: 3, marks: [mark("00000000-0000-4000-8000-000000000031", "subio", "2026-10-23T10:00:00.000Z"),
+        leg("00000000-0000-4000-8000-000000000032", "entregado", "2026-10-23T10:50:00.000Z", 9, 7)] },
+      { transferId: 5, marks: [leg("00000000-0000-4000-8000-000000000033", "subio", "2026-10-23T10:50:00.000Z", 10),
+        leg("00000000-0000-4000-8000-000000000034", "entregado", "2026-10-23T10:55:00.000Z", 10, 8)] },
+      { transferId: 6, marks: [leg("00000000-0000-4000-8000-000000000035", "subio", "2026-10-23T10:55:00.000Z", 11)] },
+    ];
+    // Built from JSON, as the API returns it, for the middle leg.
+    const middle = JSON.parse(JSON.stringify({ ...history, transferId: 5, status: "entregado", marks: chain[1].marks, chain })) as TransferHistory;
+    const markup = renderToStaticMarkup(<TransferHistoryView history={middle} onCorrect={() => undefined} />);
+    expect(markup).toContain("<h2>Trasbordo chain</h2>");
+    expect(markup).toContain("<li>Leg 1: Traslado 3<ul><li>Subió by chofer-sintetico (driver), phone 23/10/2026, 07:00:00");
+    expect(markup).toContain("<li>Entregado, Receptor: driver 7 (Chofer receptor) by oficina-sintetica (office), phone 23/10/2026, 07:50:00");
+    expect(markup).toContain("<li>Leg 2: Traslado 5 (this one)<ul><li>Subió by oficina-sintetica (office), phone 23/10/2026, 07:50:00");
+    expect(markup).toContain("<li>Entregado, Receptor: driver 8 (Chofer receptor) by oficina-sintetica (office), phone 23/10/2026, 07:55:00");
+    expect(markup).toContain("<li>Leg 3: Traslado 6<ul><li>Subió by oficina-sintetica (office), phone 23/10/2026, 07:55:00");
+    // A Traslado without a Trasbordo shows no chain.
+    expect(renderToStaticMarkup(<TransferHistoryView history={history} onCorrect={() => undefined} />)).not.toContain("Trasbordo chain");
+  });
+
   it("offers a Corrección of the Marca in force only, always with a required reason", () => {
     expect(markInForce(history.marks)).toBe(office);
     expect(markInForce([subio, mark("00000000-0000-4000-8000-000000000004", "undo", "2026-10-23T12:01:00.000Z", { corrects: subio.id })])).toBeNull();
