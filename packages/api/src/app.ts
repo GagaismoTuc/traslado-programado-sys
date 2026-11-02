@@ -1956,7 +1956,7 @@ function formatMarkReceiver(row: Record<string, unknown>): MarkReceiver | null {
 
 /** Only the last 3 digits of a DNI, without its dots and spaces; a DNI with fewer than 4 digits gives none of them. */
 function maskDni(dni: string) {
-  const digits = dni.replace(/[.\s]/g, "");
+  const digits = normalizeDni(dni);
   return digits.length < 4 ? "***" : `***${digits.slice(-3)}`;
 }
 
