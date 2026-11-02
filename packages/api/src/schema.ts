@@ -236,6 +236,9 @@ export const routes = pgTable("routes", {
 // An entrada may start at another Destino (origin) instead of home; a salida always ends at home.
 // exit_time is when the Pasajero leaves that first Destino: the API requires it for such entradas, and rows from
 // before the field existed keep it null until the Oficina sets it.
+// A Trasbordo splits a Traslado into chained legs: leg B names the leg A it continues (chained_from_transfer_id), and each
+// leg's end at the Trasbordo point (trasbordo_stop: A's drop-off, B's pickup) is there at trasbordo_time instead of at
+// home or at a Destino.
 export const transfers = pgTable("transfers", {
   id: integer().generatedAlwaysAsIdentity().primaryKey(),
   dailyPlanId: integer("daily_plan_id").notNull().references(() => dailyPlans.id, { onDelete: "restrict" }),
@@ -247,8 +250,21 @@ export const transfers = pgTable("transfers", {
   exitTime: time("exit_time"),
   companions: integer().notNull(),
   status: text().default("planificado").notNull(),
+  chainedFromTransferId: integer("chained_from_transfer_id").references((): AnyPgColumn => transfers.id, { onDelete: "restrict" }),
+  trasbordoStop: text("trasbordo_stop"),
+  trasbordoLatitude: doublePrecision("trasbordo_latitude"),
+  trasbordoLongitude: doublePrecision("trasbordo_longitude"),
+  trasbordoTime: time("trasbordo_time"),
   createdAt: timestamp("created_at", { withTimezone: true, mode: "string" }).defaultNow().notNull(),
 }, (table) => [
+  uniqueIndex("transfers_chained_from_unique").on(table.chainedFromTransferId),
+  check(
+    "transfers_trasbordo_check",
+    sql`(${table.trasbordoStop} IS NULL AND ${table.trasbordoLatitude} IS NULL AND ${table.trasbordoLongitude} IS NULL AND ${table.trasbordoTime} IS NULL)
+      OR (${table.trasbordoStop} IN ('pickup', 'dropoff') AND ${table.trasbordoLatitude} BETWEEN -90 AND 90
+        AND ${table.trasbordoLongitude} BETWEEN -180 AND 180 AND ${table.trasbordoTime} IS NOT NULL)`,
+  ),
+  check("transfers_chain_check", sql`${table.chainedFromTransferId} IS NULL OR ${table.trasbordoStop} = 'pickup'`),
   check("transfers_direction_check", sql`${table.direction} IN ('entrada', 'salida')`),
   check("transfers_status_check", sql`${table.status} IN ('planificado', 'subio', 'entregado', 'ausente', 'cancelado_ausencia')`),
   check("transfers_companions_check", sql`${table.companions} BETWEEN 0 AND 2`),
@@ -384,6 +400,9 @@ export const marks = pgTable("marks", {
   receiverName: text("receiver_name"),
   receiverDni: text("receiver_dni"),
   authorizationId: integer("authorization_id").references(() => oneOffAuthorizations.id, { onDelete: "restrict" }),
+  // The receiving Chofer of a Trasbordo; the Subió in the receiving Recorrido names the Entregado it continues.
+  receiverDriverId: integer("receiver_driver_id").references(() => drivers.id, { onDelete: "restrict" }),
+  trasbordoMarkId: integer("trasbordo_mark_id").references((): AnyPgColumn => marks.id, { onDelete: "restrict" }),
   flags: jsonb().default([]).notNull(),
 }, (table) => [
   uniqueIndex("marks_client_id_unique").on(table.clientId),
@@ -401,6 +420,8 @@ export const marks = pgTable("marks", {
   ),
   // Entregado requires a Receptor, and only Entregado has one.
   check("marks_receiver_check", sql`(${table.kind} = 'entregado') = (${table.receiverKind} IS NOT NULL)`),
+  check("marks_receiver_driver_check", sql`(${table.receiverKind} = 'driver') = (${table.receiverDriverId} IS NOT NULL)`),
+  check("marks_trasbordo_mark_check", sql`${table.trasbordoMarkId} IS NULL OR ${table.kind} = 'subio'`),
   check(
     "marks_receiver_kind_check",
     sql`${table.receiverKind} IS NULL
@@ -410,7 +431,7 @@ export const marks = pgTable("marks", {
         AND ${table.receiverName} IS NULL AND ${table.receiverDni} IS NULL AND ${table.authorizationId} IS NULL)
       OR (${table.receiverKind} = 'other_adult' AND ${table.receiverName} IS NOT NULL AND ${table.receiverDni} IS NOT NULL
         AND ${table.receiverAdultId} IS NULL AND ${table.receiverDestinationId} IS NULL)
-      OR (${table.receiverKind} = 'base_staff' AND ${table.receiverAdultId} IS NULL AND ${table.receiverDestinationId} IS NULL
+      OR (${table.receiverKind} IN ('base_staff', 'driver') AND ${table.receiverAdultId} IS NULL AND ${table.receiverDestinationId} IS NULL
         AND ${table.receiverName} IS NULL AND ${table.receiverDni} IS NULL AND ${table.authorizationId} IS NULL)`,
   ),
 ]);
