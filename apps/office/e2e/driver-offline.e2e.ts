@@ -227,8 +227,9 @@ test("marks without signal, keeps the Marcas through a reload and confirms each 
   await expect(page.getByText("Marked: Entregado")).toHaveCount(2);
   await expect(page.getByText("Saved on phone", { exact: true })).toHaveCount(2);
   expect(await storedMarks(seeded.transferId)).toEqual([]);
-  // The app did try to send the Marcas, and the lost signal is what kept them on the phone.
-  expect(dropped()).toContain(`${driverUrl}/api/driver/routes/${seeded.routeId}/marks`);
+  // The queue asks the session before sending any Marca: the lost signal dropped that check, so no Marca was even tried.
+  expect(dropped()).toContain(`${driverUrl}/api/auth/me`);
+  expect(dropped()).not.toContain(`${driverUrl}/api/driver/routes/${seeded.routeId}/marks`);
 
   await regainSignal(context);
   await expect(page.getByText("Confirmed by server", { exact: true })).toHaveCount(2);
