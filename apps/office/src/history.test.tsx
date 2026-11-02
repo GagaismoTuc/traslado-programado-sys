@@ -59,6 +59,19 @@ describe("Traslado history", () => {
     expect(markup).not.toContain("3000001");
   });
 
+  it("#33: keeps the receiving driver visible in a Trasbordo's Entregado", () => {
+    // Built from JSON, as the API returns it.
+    const handover = JSON.parse(JSON.stringify({
+      ...history, status: "entregado",
+      marks: [mark("00000000-0000-4000-8000-000000000021", "entregado", "2026-10-23T12:05:00.000Z", {
+        receiver: { kind: "driver", driverId: 7 },
+      })],
+    })) as TransferHistory;
+    const markup = renderToStaticMarkup(<TransferHistoryView history={handover} onCorrect={() => undefined} />);
+    expect(markup).toContain("Entregado, Receptor: driver 7 (Chofer receptor) by chofer-sintetico");
+    expect(markup).not.toContain("undefined");
+  });
+
   it("offers a Corrección of the Marca in force only, always with a required reason", () => {
     expect(markInForce(history.marks)).toBe(office);
     expect(markInForce([subio, mark("00000000-0000-4000-8000-000000000004", "undo", "2026-10-23T12:01:00.000Z", { corrects: subio.id })])).toBeNull();

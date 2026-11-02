@@ -1,3 +1,5 @@
+import { TRASBORDO_WINDOW_MINUTES } from "@traslado/shared";
+
 // Builds the VROOM problem of one Recorrido and reads its solution back as Paradas with planned times.
 // Times are seconds since midnight of the Plan diario's day; locations are [lng, lat] as VROOM expects.
 
@@ -31,6 +33,10 @@ export type PlanTransfer = {
   dropoffMinutes: number;
   // A Pasajero already on board since this minute (their actual Subió): only the drop-off is left, in this Vehículo.
   boardedMinutes?: number;
+  // A leg of a Trasbordo: its end at the Trasbordo point (`stop`) happens in [minutes, minutes + 5].
+  trasbordo?: { stop: "pickup" | "dropoff"; minutes: number };
+  // Leg B of a Trasbordo rides since leg A's planned pickup (or the original Subió): its ride counts from this minute.
+  rideStartMinutes?: number;
 };
 
 export type PlanInput = {
@@ -96,6 +102,7 @@ export function stepWindows(transfer: PlanTransfer, settings: PlannerSettings): 
   const dropoffService = transfer.dropoffMinutes * 60;
   const target = transfer.targetMinutes * 60;
   if (ride < dropoffService + transfer.pickupMinutes * 60) return null;
+  if (transfer.trasbordo) return trasbordoWindows(transfer, settings, ride);
   if (transfer.direction === "entrada") {
     const earliestPickup = Math.max(0, target - ride + dropoffService, (transfer.notBeforeMinutes ?? 0) * 60);
     if (earliestPickup + transfer.pickupMinutes * 60 > target) return null;
@@ -109,15 +116,45 @@ export function stepWindows(transfer: PlanTransfer, settings: PlannerSettings): 
 }
 
 /**
- * Window of an on-board Pasajero's drop-off: the ride counts from the actual Subió, so the drop-off starts by
- * Subió + R' − drop-off service; an entrada also arrives between T − early tolerance and T. Null when it no longer fits.
+ * A Trasbordo leg's end at the point is held to [t, t + 5]. Leg A (ends there): an entrada is picked up so that its ride
+ * to the point fits R', a salida from its pickup at P; leg B (starts there): its drop-off starts by leg A's planned
+ * pickup + R' − drop-off service, and an entrada still arrives between T − early tolerance and T.
+ */
+function trasbordoWindows(transfer: PlanTransfer, settings: PlannerSettings, ride: number) {
+  const point: Window = [transfer.trasbordo!.minutes * 60, (transfer.trasbordo!.minutes + TRASBORDO_WINDOW_MINUTES) * 60];
+  const dropoffService = transfer.dropoffMinutes * 60;
+  const target = transfer.targetMinutes * 60;
+  let pickup: Window;
+  let dropoff: Window;
+  if (transfer.trasbordo!.stop === "dropoff") {
+    pickup = transfer.direction === "entrada"
+      ? [Math.max(0, point[1] - ride + dropoffService, (transfer.notBeforeMinutes ?? 0) * 60), point[1]]
+      : [target, point[1]];
+    dropoff = [point[0], Math.min(point[1], pickup[0] + ride - dropoffService)];
+  } else {
+    const latest = (transfer.rideStartMinutes ?? transfer.trasbordo!.minutes) * 60 + ride - dropoffService;
+    pickup = point;
+    dropoff = transfer.direction === "entrada"
+      ? [Math.max(point[0], target - settings.earlyToleranceMinutes * 60), Math.min(target, latest)]
+      : [point[0], latest];
+  }
+  return pickup[0] <= pickup[1] && dropoff[0] <= dropoff[1] ? { pickup, dropoff } : null;
+}
+
+/**
+ * Window of an on-board Pasajero's drop-off: the ride counts from the actual Subió (after a Trasbordo, the original one), so the drop-off starts by
+ * Subió + R' − drop-off service; an entrada also arrives between T − early tolerance and T, and leg A of a Trasbordo is left at the
+ * Trasbordo point in [t, t + 5]. Null when it no longer fits.
  */
 export function boardedWindow(transfer: PlanTransfer, settings: PlannerSettings): Window | null {
-  const latest = (transfer.boardedMinutes! + transfer.maxRideMinutes - settings.rideTimeBufferMinutes - transfer.dropoffMinutes) * 60;
+  const latest = ((transfer.rideStartMinutes ?? transfer.boardedMinutes!) + transfer.maxRideMinutes - settings.rideTimeBufferMinutes - transfer.dropoffMinutes) * 60;
   const target = transfer.targetMinutes * 60;
-  const window: Window = transfer.direction === "entrada"
-    ? [Math.max(0, target - settings.earlyToleranceMinutes * 60), Math.min(target, latest)]
-    : [transfer.boardedMinutes! * 60, latest];
+  const point = transfer.trasbordo?.stop === "dropoff" ? transfer.trasbordo.minutes : null;
+  const window: Window = point !== null
+    ? [point * 60, Math.min((point + TRASBORDO_WINDOW_MINUTES) * 60, latest)]
+    : transfer.direction === "entrada"
+      ? [Math.max(0, target - settings.earlyToleranceMinutes * 60), Math.min(target, latest)]
+      : [transfer.boardedMinutes! * 60, latest];
   return window[0] <= window[1] ? window : null;
 }
 
