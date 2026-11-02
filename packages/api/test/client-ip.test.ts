@@ -47,6 +47,8 @@ describe("client address behind trusted proxies", () => {
     expect(sixth.status).toBe(429);
     expect(await sixth.json()).toEqual({ error: "Too many login attempts" });
     expect((await failLogin("172.18.0.3", "198.51.100.7")).status).toBe(401);
+    // The same proxy seen as an IPv4-mapped IPv6 socket address is still trusted.
+    expect((await failLogin("::ffff:172.18.0.3", "203.0.113.5")).status).toBe(429);
   });
 
   it("limits a peer that is not a trusted proxy by its socket address whatever X-Forwarded-For says", async () => {
