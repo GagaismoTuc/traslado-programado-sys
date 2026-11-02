@@ -110,7 +110,8 @@ type SessionCheck = () => Promise<Response>;
  * is confirmed only when the server answers with that same Marca; any other answer keeps it pending with the server's
  * message. No signal or an expired session stops the
  * round and keeps the queue; a revoked device wipes the store without sending the rest. With `check`, the session is
- * asked first, so a revoked phone wipes before any Marca leaves it; a revocation that lands between the check and the
+ * asked first, so a revoked phone wipes before any Marca leaves it; any answer that cannot rule out a revocation (not a
+ * success, not a 401) sends nothing and keeps the queue pending for the next round; a revocation that lands between the check and the
  * first send lets that one Marca go out, and the server refuses it.
  */
 async function flushOnce(store: LocalStore, send: Send, check?: SessionCheck): Promise<FlushOutcome> {
@@ -126,6 +127,7 @@ async function flushOnce(store: LocalStore, send: Send, check?: SessionCheck): P
       return { result: "offline", confirmed: 0 };
     }
     if (response.status === 401) return { result: await wipeIfRevoked(response, store) ? "revoked" : "signed_out", confirmed: 0 };
+    if (!response.ok) return { result: "done", confirmed: 0 };
   }
   let confirmed = 0;
   for (const item of pending) {

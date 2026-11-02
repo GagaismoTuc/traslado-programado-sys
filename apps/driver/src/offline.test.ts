@@ -210,6 +210,28 @@ describe("Cerrar sesión and revocation", () => {
     expect(getPlan()).toBeNull();
   });
 
+  it("failed session check never uploads while revocation status is unknown, and the next conclusive check sends the queue", async () => {
+    const { store, marks, getPlan } = memoryStore();
+    await store.putPlan(savedPlan(7));
+    await markQueue(store, offline).add(9, mark(1));
+    let uploads = 0;
+    const send = async (_routeId: number, sentMark: Mark) => {
+      uploads++;
+      return stored(sentMark);
+    };
+    const unavailable = async () => new Response("unavailable", { status: 503 });
+
+    expect(await markQueue(store, send, unavailable).flush()).toEqual({ result: "done", confirmed: 0 });
+    expect(await signOut(store, markQueue(store, send, unavailable), { session: unavailable, logout: offline }))
+      .toEqual({ result: "refused", pending: 1, offline: false });
+    expect(uploads).toBe(0);
+    expect(marks.get(mark(1).id)).toMatchObject({ state: "pending", mark: mark(1) });
+    expect(getPlan()).toEqual(savedPlan(7));
+
+    expect(await markQueue(store, send, signedIn).flush()).toEqual({ result: "done", confirmed: 1 });
+    expect(uploads).toBe(1);
+  });
+
   it("sends the queue first and refuses to end the session while a Marca is unconfirmed, without signal or refused by the server", async () => {
     const { store, marks, getPlan } = memoryStore();
     await store.putPlan(savedPlan(7));
