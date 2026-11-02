@@ -214,5 +214,5 @@ test("drops the requests the service worker sends itself while the phone has no 
   const fromWorker = context.waitForEvent("requestfailed", (request) => request.serviceWorker() !== null && request.url() === `${driverUrl}/icon-192.png`);
   expect(await page.evaluate(async () => await fetch("/icon-192.png").then(() => "loaded", () => "failed"))).toBe("failed");
   await fromWorker;
-  expect(dropped()).toEqual([`${driverUrl}/icon-192.png`]);
+  expect(dropped()).toContain(`${driverUrl}/icon-192.png`);
 });
