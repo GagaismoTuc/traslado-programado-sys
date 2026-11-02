@@ -1,11 +1,19 @@
 # Routing services for dev and CI. The OSRM image is the prebuilt artifact from infra/osrm;
 # no service here preprocesses OSM data.
 name: traslado
+
+x-logging: &default-logging
+  driver: json-file
+  options:
+    max-size: "10m"
+    max-file: "3"
+
 services:
   osrm:
     image: ${OSRM_IMAGE:-ghcr.io/gagaismotuc/traslado-osrm:tucuman-260101-osrm26.4.0-r1}
     ports:
       - "127.0.0.1:${OSRM_PORT:-5000}:5000"
+    logging: *default-logging
     healthcheck:
       test: ["CMD", "wget", "-q", "-O", "/dev/null", "http://127.0.0.1:5000/nearest/v1/driving/-65.2036,-26.8241"]
       interval: 2s
@@ -18,6 +26,7 @@ services:
       - ./infra/vroom/config.yml:/conf/config.yml:ro
     ports:
       - "127.0.0.1:${VROOM_PORT:-3001}:3000"
+    logging: *default-logging
     depends_on:
       osrm:
         condition: service_healthy

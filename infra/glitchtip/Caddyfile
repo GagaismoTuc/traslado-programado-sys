@@ -1,0 +1,45 @@
+{
+	auto_https off
+	admin off
+}
+
+:8080 {
+	handle /healthz {
+		respond "ok" 200
+	}
+
+	redir {$GLITCHTIP_ADMIN_PATH:/_glitchtip} {$GLITCHTIP_ADMIN_PATH:/_glitchtip}/ 308
+
+	handle_path {$GLITCHTIP_ADMIN_PATH:/_glitchtip}/* {
+		# Browser and API SDKs send scrubbed error envelopes here using the public project key.
+		@ingest {
+			method POST OPTIONS
+			path_regexp ingest ^/api/[0-9]+/(envelope|store)/?$
+		}
+		handle @ingest {
+			reverse_proxy glitchtip:8000
+		}
+
+		# GlitchTip API tokens authenticate directly against GlitchTip.
+		@bearer_api {
+			path /api/0/*
+			header Authorization "Bearer *"
+		}
+		handle @bearer_api {
+			reverse_proxy glitchtip:8000
+		}
+
+		# Admin UI and unauthenticated endpoints require HTTP Basic Auth at the proxy edge.
+		handle {
+			basic_auth {
+				{$GLITCHTIP_ADMIN_USER} {$GLITCHTIP_ADMIN_PASSWORD_HASH}
+			}
+			reverse_proxy glitchtip:8000 {
+				header_up -Authorization
+			}
+		}
+	}
+
+	respond 404
+}
+
