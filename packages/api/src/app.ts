@@ -4655,7 +4655,8 @@ export function createApp({ db, routing, router, geocoder, solver, travelTime, c
             ) as QueryResult).rows[0];
             await insertAlert(client, {
               kind: "authorization_conflict", transferId: current.transferId, routeId: Number(use.route_id), markId: Number(use.id),
-              details: { authorizationId: id, name: current.name }, dedupeKey: `authorization_conflict:${id}`,
+              // One alert per Entregado: once that one is undone, another Entregado in force can use the authorization again.
+              details: { authorizationId: id, name: current.name }, dedupeKey: `authorization_conflict:${id}:${Number(use.id)}`,
             }, now());
             return {
               status: 409 as const,

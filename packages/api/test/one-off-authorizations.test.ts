@@ -247,21 +247,25 @@ describe("Autorización puntual", () => {
     const { record, office, transferId, driver, routeId } = await salida("reused");
     const { authorization } = await answer(record({}), 201);
     const receiver = { kind: "other_adult", ...AUNT, authorizationId: authorization.id };
+    const idOf = async (clientId: string) => (await rows("SELECT id FROM marks WHERE client_id = $1", [clientId]))[0].id;
+    const revoke = async () => expect(await answer(request(`/authorizations/${authorization.id}/revocation`, "POST", {}, office), 409))
+      .toEqual({ error: "The Autorización puntual was already used: the Entregado stands and the conflict is in the alert inbox" });
     const undone = markBody(transferId, "entregado", { receiver });
     await answer(mark(driver.cookie, routeId, undone), 201);
+    await revoke();
     await answer(mark(driver.cookie, routeId, markBody(transferId, "undo", { corrects: undone.id })), 201);
 
     const again = markBody(transferId, "entregado", { receiver });
     expect((await answer(mark(driver.cookie, routeId, again), 201)).mark.flags).toEqual([]);
     expect(await statuses(office, transferId)).toEqual(["used"]);
-    expect(await answer(request(`/authorizations/${authorization.id}/revocation`, "POST", {}, office), 409))
-      .toEqual({ error: "The Autorización puntual was already used: the Entregado stands and the conflict is in the alert inbox" });
-    const againId = (await rows("SELECT id FROM marks WHERE client_id = $1", [again.id]))[0].id;
+    await revoke();
+    await revoke();
+    const conflict = { authorizationId: authorization.id, name: AUNT.name };
     expect((await alerts()).filter((alert) => alert.kind !== "mark_flagged")).toEqual([
-      { kind: "other_adult_handover", transferId, markId: (await rows("SELECT id FROM marks WHERE client_id = $1", [undone.id]))[0].id,
-        details: { authorized: true, ...AUNT } },
-      { kind: "other_adult_handover", transferId, markId: againId, details: { authorized: true, ...AUNT } },
-      { kind: "authorization_conflict", transferId, markId: againId, details: { authorizationId: authorization.id, name: AUNT.name } },
+      { kind: "other_adult_handover", transferId, markId: await idOf(undone.id), details: { authorized: true, ...AUNT } },
+      { kind: "authorization_conflict", transferId, markId: await idOf(undone.id), details: conflict },
+      { kind: "other_adult_handover", transferId, markId: await idOf(again.id), details: { authorized: true, ...AUNT } },
+      { kind: "authorization_conflict", transferId, markId: await idOf(again.id), details: conflict },
     ]);
     expect(await rows("SELECT * FROM one_off_authorization_revocations")).toEqual([]);
   });
