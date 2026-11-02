@@ -46,3 +46,15 @@ test('edge connects to separate ingress networks while databases stay private', 
   assert.deepEqual(Object.keys(stage.services.gateway.networks).sort(), ['default', 'ingress']);
   for (const service of Object.values(stage.services)) assert.equal(service.ports, undefined);
 });
+
+
+test('host variables follow names specified by the issue', () => {
+  const expected = ['PRODUCTION_HOST', 'STAGING_HOST'];
+  for (const path of ['deploy/Caddyfile', 'deploy/Gateway.Caddyfile']) {
+    const used = [...readFileSync(path, 'utf8').matchAll(/\{\$(\w+_HOST)\}/g)].map((match) => match[1]);
+    assert.deepEqual([...new Set(used)].sort(), expected);
+  }
+  const env = readFileSync('deploy/.env.example', 'utf8');
+  const used = [...env.matchAll(/^(\w+_HOST)=/gm)].map((match) => match[1]);
+  assert.deepEqual(used.sort(), expected);
+});
