@@ -118,7 +118,7 @@ describe("Trasbordo", () => {
     await h.answer(h.mark(first.cookie, fromRouteId, h.markBody(legA, "subio")), 201);
     // The app shows both ends at the point as a Trasbordo, where it offers no Marca.
     const receivingDay = await h.answer(h.request(`/driver/days/${TODAY}`, "GET", undefined, second.cookie), 200);
-    expect(receivingDay.routes[0].stops.map((stop: { kind: string; trasbordo: boolean }) => [stop.kind, stop.trasbordo])).toEqual([["pickup", true], ["dropoff", false]]);
+    expect(receivingDay.routes[0].stops.map((stop: { kind: string; trasbordo?: boolean }) => [stop.kind, stop.trasbordo])).toEqual([["pickup", true], ["dropoff", undefined]]);
     at("08:02");
     const bypass = await h.answer(h.mark(second.cookie, toRouteId, h.markBody(legB, "subio")), 201);
     expect(bypass.mark.flags).toEqual(["trasbordo_unlinked"]);

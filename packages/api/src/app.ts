@@ -1753,8 +1753,8 @@ async function loadDriverDay(client: Queryable, driverId: number, date: string) 
       direction: String(leg.direction),
       // The Traslado's state now (Planificado, Subió, Entregado, ...), so the app shows what is already marked.
       transferStatus: String(leg.status),
-      // A Trasbordo end: the Oficina records the handover there, so the app offers no Marca.
-      trasbordo: leg.trasbordo_stop === leg.kind,
+      // Only at a Trasbordo end: the Oficina records the handover there, so the app offers no Marca.
+      ...(leg.trasbordo_stop === leg.kind ? { trasbordo: true } : {}),
       // destinationId is the Destino the Chofer marks as Receptor at a drop-off there; null at home and at a Trasbordo point.
       place: leg.trasbordo_stop === leg.kind
         ? { name: "Trasbordo", destinationId: null, address: `${leg.trasbordo_latitude}, ${leg.trasbordo_longitude}`, accessNotes: null }
