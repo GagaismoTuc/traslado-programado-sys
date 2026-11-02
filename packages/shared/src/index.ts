@@ -414,3 +414,13 @@ export function isRouteValid(violations: RouteViolation[]): boolean {
 export function markOrder<T>(phoneTime: (item: T) => string, arrival: (a: T, b: T) => number) {
   return (a: T, b: T) => Date.parse(phoneTime(a)) - Date.parse(phoneTime(b)) || arrival(a, b);
 }
+
+export {
+  REDACTED,
+  scrubBreadcrumb,
+  scrubErrorEvent,
+  scrubString,
+  stripUrlQueryAndFragment,
+  type ScrubbableBreadcrumb,
+  type ScrubbableErrorEvent,
+} from "./error-scrubbing";
