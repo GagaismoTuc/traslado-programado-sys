@@ -18,6 +18,7 @@ import {
 } from "./sessions.js";
 import type { GeocodeResult, Geocoder } from "./geocoding.js";
 import type { TravelTime } from "./routing.js";
+import { createTrustedProxies, forwardedClientIp } from "./trusted-proxies.js";
 import { planRoute, speedFactorAt, type LngLat, type PlannerSettings, type PlanResult, type PlanTransfer, type VroomSolver } from "./planner.js";
 
 type QueryResult = { rows: Record<string, unknown>[]; rowCount: number | null };
@@ -42,6 +43,8 @@ export type AppConfig = {
   healthTimeoutMs?: number;
   trustedOrigins?: string[];
   getClientIp?: (context: Context) => string;
+  // Proxies allowed to name the client in X-Forwarded-For; empty or unset trusts none.
+  trustedProxyCidrs?: string[];
   now?: () => Date;
   // A Chofer's day is cut into Recorridos where two consecutive target times are further apart than this.
   routeGapMinutes?: number;
@@ -100,13 +103,15 @@ function isTrustedOrigin(origin: string | undefined, requestUrl: string, allowed
   }
 }
 
-function clientIp(context: Context, config: AppConfig) {
+function clientIp(context: Context, config: AppConfig, trustedProxies: ReturnType<typeof createTrustedProxies>) {
   if (config.getClientIp) return config.getClientIp(context);
+  let socketAddress: string;
   try {
-    return getConnInfo(context).remote.address ?? "unknown";
+    socketAddress = getConnInfo(context).remote.address ?? "unknown";
   } catch {
     return "unknown";
   }
+  return trustedProxies ? forwardedClientIp(socketAddress, context.req.header("X-Forwarded-For"), trustedProxies) : socketAddress;
 }
 
 function reserveLoginAttempt(username: string, ip: string) {
@@ -2103,6 +2108,7 @@ export function createApp({ db, routing, router, geocoder, solver, travelTime, c
   const geocodeCache = new Map<string, GeocodeResult | null>();
   let nextGeocodeAt = 0;
   const totpLimiter = createAttemptLimiter(TOTP_FAILURE_LIMIT, LOGIN_WINDOW_MS, now);
+  const trustedProxies = createTrustedProxies(config.trustedProxyCidrs ?? []);
 
   function setSessionCookie(context: Context, token: string) {
     setCookie(context, SESSION_COOKIE, token, { ...COOKIE_OPTIONS, maxAge: SESSION_MAX_AGE_SECONDS });
@@ -2808,7 +2814,7 @@ export function createApp({ db, routing, router, geocoder, solver, travelTime, c
       const password = body.password;
       const deviceLabel = body.deviceLabel.trim();
       if (!username || !password || !deviceLabel || deviceLabel.length > 100) return context.json({ error: "Invalid request" }, 400);
-      const ip = clientIp(context, config);
+      const ip = clientIp(context, config, trustedProxies);
       const reservation = reserveLoginAttempt(username, ip);
       if (!reservation) {
         context.header("Retry-After", String(Math.ceil(LOGIN_WINDOW_MS / 1000)));

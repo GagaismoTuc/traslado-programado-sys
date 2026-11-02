@@ -35,6 +35,8 @@ If nobody can sign in to the Office, reset an active Office account's password a
 
 Browser mutations must include an allowed `Origin`. The API trusts the local Office/Driver Vite origins by default; set `AUTH_ALLOWED_ORIGINS` to a comma-separated list of exact origins in other deployments. Same-origin requests are always accepted.
 
+Five failed logins lock a username, and the client address they came from, for 15 minutes. Behind reverse proxies set `TRUSTED_PROXY_CIDRS` to a comma-separated list of the proxies' CIDRs (for example `172.16.0.0/12`): for a request whose socket peer is in that list, the API takes the client address from `X-Forwarded-For`, read from the right and skipping every trusted proxy; a missing or malformed header falls back to the socket address. Empty or unset trusts no proxy and ignores `X-Forwarded-For`. A malformed list stops the API at startup. With Caddy, each proxy behind another one must also list the proxy in front in its `servers > trusted_proxies` global option, or it replaces `X-Forwarded-For` with that proxy's address.
+
 The Office "Suggest pin" button geocodes an address through the API. Geocoding is off unless `GEOCODER=nominatim`; then the API calls `NOMINATIM_URL` (default `https://nominatim.openstreetmap.org`) with the `NOMINATIM_USER_AGENT` header, at most once per second for the whole process, caching repeated queries. Tests, CI and development keep it off. The Office map loads its style from `VITE_MAP_STYLE_URL` (OpenFreeMap Liberty by default).
 
 The Office plans each day at `/plan`. Giving a Chofer their whole day cuts it into Recorridos wherever two consecutive target times are more than `ROUTE_GAP_MINUTES` apart (default 60).
