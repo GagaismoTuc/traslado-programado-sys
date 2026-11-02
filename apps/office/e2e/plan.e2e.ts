@@ -69,7 +69,7 @@ test.afterEach(async () => {
 test("plans a day by hand at phone width without scrolling sideways", async ({ page }) => {
   await page.setViewportSize(PHONE);
   await page.goto(`${process.env.E2E_BASE_URL}/plan`);
-  await page.getByLabel("Day").fill(DAY);
+  await page.getByLabel("Day", { exact: true }).fill(DAY);
   await page.getByRole("button", { name: "Create plan" }).click();
   await expect(page.getByText("Times are local to America/Argentina/Tucuman. Day total: 0.0 km")).toBeVisible();
   await expectNoSideScroll(page);
@@ -110,7 +110,7 @@ test("asks for the exit time when an entrada starts at another Destino", async (
     );
     await pool.query("INSERT INTO daily_plans (plan_date) VALUES ($1)", [DAY]);
     await page.goto(`${process.env.E2E_BASE_URL}/plan`);
-    await page.getByLabel("Day").fill(DAY);
+    await page.getByLabel("Day", { exact: true }).fill(DAY);
     await page.locator("select[name=passengerId]").selectOption({ label: "Pasajero Plan E2E" });
     await expect(page.getByLabel("Leaves the first Destino at")).toHaveCount(0);
     await page.locator("select[name=originDestinationId]").selectOption({ label: "Terapia Plan E2E" });
@@ -167,7 +167,7 @@ test("orders a Recorrido with the engine, shows the planned times and what did n
   await seedRecorrido();
   await page.setViewportSize(PHONE);
   await page.goto(`${process.env.E2E_BASE_URL}/plan`);
-  await page.getByLabel("Day").fill(DAY);
+  await page.getByLabel("Day", { exact: true }).fill(DAY);
   await expect(page.getByText("Carries a Pasajero who needs the front seat: check it when changing the Chofer or the Vehicle.")).toBeVisible();
   await expect(page.locator("li", { hasText: "08:00 Pasajero Plan E2E" }).locator("select").locator("option", { hasText: "(front seat taken)" }))
     .toHaveText("Chofer Plan E2E 07:00-09:00 (front seat taken)");
@@ -197,7 +197,7 @@ test("changes the Chofer of a Recorrido from its editor and warns about the fron
   }
   await page.setViewportSize(PHONE);
   await page.goto(`${process.env.E2E_BASE_URL}/plan`);
-  await page.getByLabel("Day").fill(DAY);
+  await page.getByLabel("Day", { exact: true }).fill(DAY);
   const recorrido = page.locator("li").filter({ has: page.getByLabel("Vehicle") });
   const vehicle = await recorrido.getByLabel("Vehicle").inputValue();
   await recorrido.getByRole("combobox", { name: /^Chofer/ }).selectOption({ label: "Chofera Plan E2E" });
@@ -258,11 +258,11 @@ test("does not render or mutate a daily plan whose answer arrives after the Ofic
   });
 
   await page.goto(`${process.env.E2E_BASE_URL}/plan`);
-  await page.getByLabel("Day").fill(delayedDay);
+  await page.getByLabel("Day", { exact: true }).fill(delayedDay);
   await startedRequest;
   const selectedRead = page.waitForResponse((response) =>
     response.request().method() === "GET" && response.url().endsWith(`/api/daily-plans/${selectedDay}`));
-  await page.getByLabel("Day").fill(selectedDay);
+  await page.getByLabel("Day", { exact: true }).fill(selectedDay);
   await selectedRead;
   await expect(page.locator("strong", { hasText: "08:00 Pasajero Plan E2E" })).toBeVisible();
 
@@ -272,7 +272,7 @@ test("does not render or mutate a daily plan whose answer arrives after the Ofic
   await delayedRead;
   await page.waitForTimeout(200);
 
-  await expect(page.getByLabel("Day")).toHaveValue(selectedDay);
+  await expect(page.getByLabel("Day", { exact: true })).toHaveValue(selectedDay);
   await expect(page.locator("strong", { hasText: "09:00 Pasajero Plan E2E" })).toHaveCount(0);
   await expect(page.locator("strong", { hasText: "08:00 Pasajero Plan E2E" })).toBeVisible();
   await page.getByRole("button", { name: "Register absence" }).click();
