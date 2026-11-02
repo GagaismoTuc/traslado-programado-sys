@@ -54,6 +54,19 @@ async function freePorts(count: number) {
 // C2 seam: builds the serving image from the small synthetic extract with the production recipe,
 // then starts the Compose routing services with that image in a throwaway project.
 export async function startRoutingStack(): Promise<RoutingStack> {
+  const profileStarted = Date.now();
+  try {
+    return await startRoutingStackInner();
+  } finally {
+    if (process.env.TEST_PROFILE) {
+      const { appendFileSync } = await import("node:fs");
+      appendFileSync(process.env.TEST_PROFILE, `${JSON.stringify({ worker: process.env.VITEST_POOL_ID, file: "routing-stack-start", test: "startRoutingStack", start: profileStarted, wall: Date.now() - profileStarted })}
+`);
+    }
+  }
+}
+
+async function startRoutingStackInner(): Promise<RoutingStack> {
   const id = randomBytes(4).toString("hex");
   const project = `traslado-c2-${id}`;
   const image = `traslado-osrm-c2:${id}`;

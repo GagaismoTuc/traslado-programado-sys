@@ -3,7 +3,7 @@ name: CI
 on:
   pull_request:
   push:
-    branches: [main]
+    branches: [main, Gagaismo/traslado-programado-sys-101] # DIAGNOSTIC (#101): removed before the PR
 
 jobs:
   verify:
@@ -18,7 +18,15 @@ jobs:
       - run: corepack enable
       - run: pnpm install --frozen-lockfile
       - run: pnpm typecheck
-      - run: pnpm build && pnpm test
+      # DIAGNOSTIC (#101): runner specs, host load and per-test profile. Removed before the PR.
+      - run: nproc && lscpu | head -20 && free -m
+      - run: |
+          vmstat -t 5 > "$RUNNER_TEMP/vmstat.log" &
+          pnpm build && pnpm test
+        env:
+          TEST_PROFILE: ${{ runner.temp }}/profile.jsonl
+      - if: always()
+        run: node .github/scripts/profile-report.mjs "$RUNNER_TEMP/profile.jsonl"; cat "$RUNNER_TEMP/vmstat.log"
 
   e2e:
     runs-on: ubuntu-latest
