@@ -2235,7 +2235,7 @@ export function createApp({ db, routing, router, geocoder, solver, travelTime, c
     // A Trasbordo is recorded by the Oficina, which links both Marcas: a Chofer's own Subió or Entregado at its point is kept,
     // flagged, for the Oficina to correct it and record the Trasbordo.
     const handoverKind = transfer.trasbordo_stop === "pickup" ? "subio" : transfer.trasbordo_stop === "dropoff" ? "entregado" : null;
-    if (chofer.driverId !== null && !fields.corrects && fields.kind === handoverKind) flags.push("trasbordo_unlinked");
+    if (chofer.driverId !== null && fields.kind === handoverKind) flags.push("trasbordo_unlinked");
     const receiver = fields.receiver;
     let authorized = false;
     if (receiver?.kind === "authorized_adult") {
