@@ -110,7 +110,8 @@ type SessionCheck = () => Promise<Response>;
  * is confirmed only when the server answers with that same Marca; any other answer keeps it pending with the server's
  * message. No signal or an expired session stops the
  * round and keeps the queue; a revoked device wipes the store without sending the rest. With `check`, the session is
- * asked first, so a revoked phone wipes before any Marca leaves it.
+ * asked first, so a revoked phone wipes before any Marca leaves it; a revocation that lands between the check and the
+ * first send lets that one Marca go out, and the server refuses it.
  */
 async function flushOnce(store: LocalStore, send: Send, check?: SessionCheck): Promise<FlushOutcome> {
   const items = await store.marks();
