@@ -15,6 +15,8 @@ export type QueuedMark = {
   state: "pending" | "confirmed";
   confirmedAt: string | null;
   note: string | null;
+  // False until the queue first tries to send it; a Marca saved before this field existed counts as tried.
+  sent?: boolean;
 };
 /** Today's and tomorrow's plan as last downloaded by the Chofer `userId`, with the handover data of every home drop-off. */
 export type CachedPlan = { userId: number; days: DriverDay[]; handovers: Record<number, Handover>; fetchedAt: string };
@@ -22,6 +24,7 @@ export type CachedPlan = { userId: number; days: DriverDay[]; handovers: Record<
 export type LocalStore = {
   marks(): Promise<QueuedMark[]>;
   putMark(item: QueuedMark): Promise<void>;
+  deleteMark(id: string): Promise<void>;
   plan(): Promise<CachedPlan | null>;
   putPlan(plan: CachedPlan): Promise<void>;
   /** Wipes everything; only a revoked device does it. */
@@ -67,6 +70,9 @@ export function indexedDbStore(factory: IDBFactory = indexedDB): LocalStore {
     putMark: async (item) => {
       await run(["marks"], "readwrite", (transaction) => void transaction.objectStore("marks").put(item));
     },
+    deleteMark: async (id) => {
+      await run(["marks"], "readwrite", (transaction) => void transaction.objectStore("marks").delete(id));
+    },
     plan: async () => await run(["plan"], "readonly", (transaction) => transaction.objectStore("plan").get("current") as IDBRequest<CachedPlan | undefined>) ?? null,
     putPlan: async (plan) => {
       await run(["plan"], "readwrite", (transaction) => void transaction.objectStore("plan").put(plan, "current"));
@@ -107,8 +113,9 @@ type SessionCheck = () => Promise<Response>;
 
 /**
  * Sends every pending Marca once, in `queueOrder`, so the server stores them in the order the phone reads them. A Marca
- * is confirmed only when the server answers with that same Marca; any other answer keeps it pending with the server's
- * message. No signal or an expired session stops the
+ * is marked as tried before it is sent, and confirmed only when the server answers with that same Marca; any other answer
+ * keeps it pending with the server's message. A Corrección of a Marca on the phone waits until the server confirmed that
+ * Marca, so the API never gets one for a Marca it does not hold. No signal or an expired session stops the
  * round and keeps the queue; a revoked device wipes the store without sending the rest. With `check`, the session is
  * asked first, so a revoked phone wipes before any Marca leaves it; any answer that cannot rule out a revocation (not a
  * success, not a 401) sends nothing and keeps the queue pending for the next round; a revocation that lands between the check and the
@@ -129,8 +136,12 @@ async function flushOnce(store: LocalStore, send: Send, check?: SessionCheck): P
     if (response.status === 401) return { result: await wipeIfRevoked(response, store) ? "revoked" : "signed_out", confirmed: 0 };
     if (!response.ok) return { result: "done", confirmed: 0 };
   }
+  const unconfirmed = new Set(items.filter((item) => item.state === "pending").map((item) => item.id));
   let confirmed = 0;
-  for (const item of pending) {
+  for (const pendingItem of pending) {
+    if (pendingItem.mark.corrects && unconfirmed.has(pendingItem.mark.corrects)) continue;
+    const item = { ...pendingItem, sent: true };
+    if (pendingItem.sent !== true) await store.putMark(item);
     let response: Response;
     try {
       response = await send(item.routeId, item.mark);
@@ -142,6 +153,7 @@ async function flushOnce(store: LocalStore, send: Send, check?: SessionCheck): P
     if (response.ok && body?.mark?.id === item.id) {
       lastConfirmed = Math.max(Date.now(), lastConfirmed + 1);
       await store.putMark({ ...item, state: "confirmed", confirmedAt: new Date(lastConfirmed).toISOString(), note: body.conflict ? CONFLICT_NOTE : null });
+      unconfirmed.delete(item.id);
       confirmed++;
     } else {
       await store.putMark({ ...item, note: body?.error ?? "The server did not take the Marca yet; it stays on the phone" });
@@ -152,18 +164,28 @@ async function flushOnce(store: LocalStore, send: Send, check?: SessionCheck): P
 
 /**
  * The Marca queue. `add` saves a new Marca as pending before anything is sent. Only one flush runs at a time: a flush
- * asked for while one runs makes it go round again, so a Marca is never sent twice at once from this tab.
+ * asked for while one runs makes it go round again, so a Marca is never sent twice at once from this tab. A flush round
+ * and a Deshacer never touch the queue at the same time.
  */
 export function markQueue(store: LocalStore, send: Send, check?: SessionCheck) {
   let running: Promise<FlushOutcome> | null = null;
   let again = false;
+  let last: Promise<unknown> = Promise.resolve();
+  function exclusive<T>(work: () => Promise<T>) {
+    const result = last.then(work);
+    last = result.catch(() => undefined);
+    return result;
+  }
+  async function add(routeId: number, mark: Mark) {
+    await store.putMark({ id: mark.id, routeId, mark, state: "pending", confirmedAt: null, note: null, sent: false });
+  }
   async function loop() {
     let confirmed = 0;
     let outcome: FlushOutcome;
     try {
       do {
         again = false;
-        outcome = await flushOnce(store, send, check);
+        outcome = await exclusive(() => flushOnce(store, send, check));
         confirmed += outcome.confirmed;
       } while (again && outcome.result === "done");
     } finally {
@@ -173,9 +195,20 @@ export function markQueue(store: LocalStore, send: Send, check?: SessionCheck) {
     return { result: outcome.result, confirmed };
   }
   return {
-    add: async (routeId: number, mark: Mark) => {
-      await store.putMark({ id: mark.id, routeId, mark, state: "pending", confirmedAt: null, note: null });
-    },
+    add,
+    /**
+     * "Deshacer" of the Marca `undo` corrects. One the queue never tried to send is cancelled: neither it nor `undo` is
+     * sent. Any other gets `undo` queued. A Marca no longer on the phone was already cancelled, so a second tap queues nothing.
+     */
+    undo: (routeId: number, undo: Mark) => exclusive(async () => {
+      const target = (await store.marks()).find((item) => item.id === undo.corrects);
+      if (target && (target.state === "confirmed" || target.sent !== false)) {
+        await add(routeId, undo);
+        return "queued" as const;
+      }
+      if (target) await store.deleteMark(target.id);
+      return "cancelled" as const;
+    }),
     flush: () => {
       if (running) {
         again = true;
@@ -196,11 +229,28 @@ export const queueOrder = markOrder<QueuedMark>((item) => item.mark.phoneTime, (
   Number(a.state === "pending") - Number(b.state === "pending") || (a.confirmedAt ?? "").localeCompare(b.confirmedAt ?? "")
   || a.id.localeCompare(b.id));
 
-/** The newest Marca the phone holds for each Traslado: the last one in `queueOrder`, the one the server takes as latest. */
-export function latestMarks(items: QueuedMark[]) {
+/** A pending Marca the server answered without taking it; its `note` is the server's reason. */
+function isRefused(item: QueuedMark) {
+  return item.state === "pending" && item.note !== null;
+}
+
+function lastPerTransfer(items: QueuedMark[]) {
   const latest: Record<number, QueuedMark> = {};
   for (const item of [...items].sort(queueOrder)) latest[item.mark.transferId] = item;
   return latest;
+}
+
+/**
+ * The Marca in force for each Traslado: the last one in `queueOrder` among the Marcas the server confirmed and the ones
+ * it has not answered yet. A Marca the server refused is never in force, since the server did not store it.
+ */
+export function latestMarks(items: QueuedMark[]) {
+  return lastPerTransfer(items.filter((item) => !isRefused(item)));
+}
+
+/** The newest Marca the server refused for each Traslado, still on the phone with the server's reason. */
+export function refusedMarks(items: QueuedMark[]) {
+  return lastPerTransfer(items.filter(isRefused));
 }
 
 export type SignOutOutcome =

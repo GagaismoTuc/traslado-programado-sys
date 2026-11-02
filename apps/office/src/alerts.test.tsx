@@ -12,7 +12,7 @@ afterEach(() => {
 // Synthetic data only.
 const alert = (kind: string, details: Record<string, unknown>, extra: Partial<Alert> = {}): Alert => ({
   id: 1, kind, createdAt: "2026-10-23T12:00:00.000Z", transferId: 3, routeId: 9, markId: "00000000-0000-4000-8000-000000000001",
-  passengerName: "Pasajero Sintético", driverName: "Chofer Sintético", details, ...extra,
+  passengerName: "Pasajero Sintético", driverName: "Chofer Sintético", details, resolution: null, ...extra,
 });
 
 describe("Oficina alert inbox", () => {
@@ -65,6 +65,27 @@ describe("Oficina alert inbox", () => {
     expect(markup).toContain("Pasajero Sintético was marked Ausente on an entrada (Chofer Sintético). Decide about the rest of the day:"
       + "<ul><li>11:00 entrada, Terapia Sintética → Escuela Sintética</li><li>13:00 salida, Escuela Sintética → home</li></ul>");
     expect(renderToStaticMarkup(<AlertList alerts={[alert("absent_on_entrada", { remaining: [] })]} />)).toContain("No other Traslados today.");
+  });
+
+  it("Rule 2 (#83): shows an Ausente alert resolved by a Corrección as resolved, with who made it, when and why", () => {
+    const remaining = [{ transferId: 5, direction: "salida", targetTime: "13:00", destinationName: "Escuela Sintética", originDestinationName: null }];
+    const pending = renderToStaticMarkup(<AlertList alerts={[alert("absent_on_entrada", { remaining })]} />);
+    expect(pending).toContain("Pasajero Sintético was marked Ausente on an entrada (Chofer Sintético). Decide about the rest of the day:");
+    expect(pending).not.toContain("Resolved");
+
+    const resolution = {
+      markId: "00000000-0000-4000-8000-000000000002", kind: "subio", at: "2026-10-23T12:30:00.000Z", reason: "La escuela confirmó que viajó",
+      author: { userId: 1, username: "oficina-sintetica", role: "office" },
+    };
+    const resolved = renderToStaticMarkup(<AlertList alerts={[alert("absent_on_entrada", { remaining }, { resolution })]} />);
+    expect(resolved).toContain("Pasajero Sintético was marked Ausente on an entrada (Chofer Sintético).");
+    expect(resolved).toContain("<div>Resolved by a Corrección to Subió by oficina-sintetica (office) at 09:30. Reason: La escuela confirmó que viajó</div>");
+    expect(resolved).not.toContain("Decide about the rest of the day");
+    expect(resolved).toContain("The rest of the day when it was raised:<ul><li>");
+    const undone = renderToStaticMarkup(<AlertList alerts={[alert("absent_on_entrada", { remaining }, {
+      resolution: { ...resolution, kind: "undo", at: "2026-10-23T12:01:00.000Z", reason: null, author: { userId: 4, username: "chofer-sintetico", role: "driver" } },
+    })]} />);
+    expect(undone).toContain("<div>Resolved by a Corrección that undid it by chofer-sintetico (driver) at 09:01</div>");
   });
 
   it("lists the Traslados still open when a Chofer could not close a Recorrido", () => {
