@@ -227,3 +227,41 @@ describe("Autorización puntual", () => {
     expect(await rows("SELECT * FROM one_off_authorization_revocations")).toEqual([]);
   });
 });
+
+describe("The Receptor's DNI in the history (#95)", () => {
+  /** Records an Entregado to another adult with each DNI, in order, and returns the DNIs the history gives for them. */
+  async function historyDnis(name: string, dnis: string[]) {
+    const { office, transferId, driver, routeId } = await salida(name);
+    for (const dni of dnis) {
+      await answer(mark(driver.cookie, routeId, markBody(transferId, "entregado", { receiver: { kind: "other_adult", name: AUNT.name, dni } })), 201);
+    }
+    const history = await answer(request(`/transfers/${transferId}/history`, "GET", undefined, office), 200);
+    return history.marks.map((item: { receiver: { dni?: string } }) => item.receiver.dni);
+  }
+
+  it("Rule 1: the history gives only the last 3 digits of the DNI, without its dots and spaces", async () => {
+    expect(await historyDnis("mask", ["40.123.456", "40 123 457", "1234"])).toEqual(["***456", "***457", "***234"]);
+  });
+
+  it("Rule 2: the history gives *** for a DNI with fewer than 4 digits", async () => {
+    expect(await historyDnis("short", ["123", "1.2 3"])).toEqual(["***", "***"]);
+  });
+
+  it("Rule 4: the Marca, the alerts and the Autorizaciones puntuales still give the whole DNI", async () => {
+    const { record, office, transferId, driver, routeId } = await salida("whole");
+    const { authorization } = await answer(record({ dni: "40.123.456" }), 201);
+    const receiver = { kind: "other_adult", name: AUNT.name, dni: "40.123.456", authorizationId: authorization.id };
+    const sent = await answer(mark(driver.cookie, routeId, markBody(transferId, "entregado", { receiver })), 201);
+    expect(sent.mark.receiver).toEqual(receiver);
+    const inbox = await answer(request("/alerts", "GET", undefined, office), 200);
+    expect(inbox.alerts.filter((alert: { kind: string }) => alert.kind === "other_adult_handover").map((alert: { details: unknown }) => alert.details))
+      .toEqual([{ authorized: true, name: AUNT.name, dni: "40.123.456" }]);
+    const listed = await answer(request(`/transfers/${transferId}/authorizations`, "GET", undefined, office), 200);
+    expect(listed.authorizations.map((item: { dni: string }) => item.dni)).toEqual(["40.123.456"]);
+  });
+
+  it("Rule 5: the Marca keeps the whole DNI stored while the history masks it", async () => {
+    expect(await historyDnis("stored", ["40.123.456"])).toEqual(["***456"]);
+    expect((await rows("SELECT receiver_dni FROM marks")).map((row) => row.receiver_dni)).toEqual(["40.123.456"]);
+  });
+});
