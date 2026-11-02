@@ -29,7 +29,6 @@ export default async function setup(project: TestProject) {
       .withDatabase(templateDatabase)
       .withUsername("postgres")
       .withPassword(randomBytes(24).toString("hex"))
-      .withCommand(["postgres", "-c", "fsync=off", "-c", "synchronous_commit=off", "-c", "full_page_writes=off"])
       .start();
   } catch (error) {
     const detail = error instanceof Error ? error.message : String(error);
