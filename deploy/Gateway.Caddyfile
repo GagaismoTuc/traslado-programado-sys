@@ -1,0 +1,12 @@
+:80 {
+	@driver host driver.{$PRODUCTION_HOST} driver.{$STAGING_HOST}
+	handle_path /api/* {
+		reverse_proxy api:3000
+	}
+	handle @driver {
+		reverse_proxy driver:80
+	}
+	handle {
+		reverse_proxy office:80
+	}
+}
