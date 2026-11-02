@@ -88,7 +88,7 @@ done
 sh "$scripts/ci-ok.sh" > /dev/null 2>&1 && ok=1
 # Without if: always() a failed need skips ci-ok instead of failing it.
 job ci-ok | grep -qF 'if: always()' || ok=1
-job ci-ok | grep -qF 'needs: [verify, e2e, commitlint, gitleaks]' || ok=1
+job ci-ok | grep -qF 'needs: [verify, e2e, deploy-tests, commitlint, gitleaks]' || ok=1
 job ci-ok | grep -qF "RESULTS: \${{ join(needs.*.result, ' ') }}" || ok=1
 check "$t" $ok
 
