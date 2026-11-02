@@ -42,6 +42,7 @@ export function DeviceSessions({ userId, driver = false, initialSessions = null 
   }
 
   async function revoke(session: DeviceSession) {
+    setUnconfirmed(null);
     const response = await send(`/users/${userId}/sessions/${session.id}`, "DELETE");
     setMessage(response.ok ? `Revoked ${session.device_label}` : await readError(response, "Unable to revoke the device"));
     if (!response.ok) return;

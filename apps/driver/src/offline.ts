@@ -102,18 +102,30 @@ export function savedPlanFor(saved: CachedPlan | null, userId: number) {
 export type FlushResult = "done" | "offline" | "signed_out" | "revoked";
 export type FlushOutcome = { result: FlushResult; confirmed: number };
 type Send = (routeId: number, mark: Mark) => Promise<Response>;
+// Asks the server about this phone's session (`GET /auth/me`) without sending any Marca.
+type SessionCheck = () => Promise<Response>;
 
 /**
  * Sends every pending Marca once, in `queueOrder`, so the server stores them in the order the phone reads them. A Marca
  * is confirmed only when the server answers with that same Marca; any other answer keeps it pending with the server's
  * message. No signal or an expired session stops the
- * round and keeps the queue; a revoked device wipes the store without sending the rest.
+ * round and keeps the queue; a revoked device wipes the store without sending the rest. With `check`, the session is
+ * asked first, so a revoked phone wipes before any Marca leaves it.
  */
-async function flushOnce(store: LocalStore, send: Send): Promise<FlushOutcome> {
+async function flushOnce(store: LocalStore, send: Send, check?: SessionCheck): Promise<FlushOutcome> {
   const items = await store.marks();
   // At least 1 ms after the last confirmation, even within one millisecond or after the phone's clock went back.
   let lastConfirmed = Math.max(0, ...items.map((item) => item.confirmedAt ? Date.parse(item.confirmedAt) : 0));
   const pending = items.filter((item) => item.state === "pending").sort(queueOrder);
+  if (pending.length && check) {
+    let response: Response;
+    try {
+      response = await check();
+    } catch {
+      return { result: "offline", confirmed: 0 };
+    }
+    if (response.status === 401) return { result: await wipeIfRevoked(response, store) ? "revoked" : "signed_out", confirmed: 0 };
+  }
   let confirmed = 0;
   for (const item of pending) {
     let response: Response;
@@ -139,7 +151,7 @@ async function flushOnce(store: LocalStore, send: Send): Promise<FlushOutcome> {
  * The Marca queue. `add` saves a new Marca as pending before anything is sent. Only one flush runs at a time: a flush
  * asked for while one runs makes it go round again, so a Marca is never sent twice at once from this tab.
  */
-export function markQueue(store: LocalStore, send: Send) {
+export function markQueue(store: LocalStore, send: Send, check?: SessionCheck) {
   let running: Promise<FlushOutcome> | null = null;
   let again = false;
   async function loop() {
@@ -148,7 +160,7 @@ export function markQueue(store: LocalStore, send: Send) {
     try {
       do {
         again = false;
-        outcome = await flushOnce(store, send);
+        outcome = await flushOnce(store, send, check);
         confirmed += outcome.confirmed;
       } while (again && outcome.result === "done");
     } finally {
@@ -195,16 +207,24 @@ export type SignOutOutcome =
 /**
  * "Cerrar sesión": sends the queue first and ends the session only when no Marca is left unconfirmed on the phone. Without
  * signal, or with a Marca the server did not take, it refuses and keeps everything. An expired session keeps the queue for
- * the next sign-in; a revoked device was wiped by the flush, which sent nothing more.
+ * the next sign-in; a revoked device is wiped, also when the queue was already empty and the flush asked nothing.
  */
-export async function signOut(store: LocalStore, queue: { flush: () => Promise<FlushOutcome> }, logout: () => Promise<Response>): Promise<SignOutOutcome> {
+export async function signOut(
+  store: LocalStore,
+  queue: { flush: () => Promise<FlushOutcome> },
+  server: { session: SessionCheck; logout: () => Promise<Response> },
+): Promise<SignOutOutcome> {
   const outcome = await queue.flush();
   if (outcome.result === "revoked") return { result: "revoked" };
   if (outcome.result === "signed_out") return { result: "expired" };
   const pending = (await store.marks()).filter((item) => item.state === "pending").length;
   if (pending) return { result: "refused", pending, offline: outcome.result === "offline" };
   try {
-    return (await logout()).ok ? { result: "signed_out" } : { result: "unreachable" };
+    // The logout answers 204 even to a revoked session: only the session itself says whether to wipe.
+    const session = await server.session();
+    if (session.status === 401) return { result: await wipeIfRevoked(session, store) ? "revoked" : "expired" };
+    if (!session.ok) return { result: "unreachable" };
+    return (await server.logout()).ok ? { result: "signed_out" } : { result: "unreachable" };
   } catch {
     return { result: "unreachable" };
   }

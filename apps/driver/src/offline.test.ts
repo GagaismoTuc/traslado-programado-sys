@@ -181,10 +181,34 @@ describe("Marca queue on the phone", () => {
   });
 });
 
-describe("Cerrar sesión", () => {
+describe("Cerrar sesión and revocation", () => {
   const offline = async (): Promise<Response> => {
     throw new TypeError("Failed to fetch");
   };
+  const signedIn = async () => json({ user: { id: 7, role: "driver" } }, 200);
+  const revokedAnswer = async () => json({ error: "Authentication required", code: "session_revoked" }, 401);
+
+  it("checks the session before sending a queued Marca: a revoked phone sends none and wipes everything", async () => {
+    const { store, marks, getPlan } = memoryStore();
+    await store.putPlan(savedPlan(7));
+    await markQueue(store, offline).add(9, mark(1));
+    const sent: string[] = [];
+    const send = async (_routeId: number, sentMark: Mark) => {
+      sent.push(sentMark.id);
+      return stored(sentMark);
+    };
+
+    expect(await markQueue(store, send, offline).flush()).toEqual({ result: "offline", confirmed: 0 });
+    expect(await markQueue(store, send, async () => json({ error: "Authentication required", code: "session_expired" }, 401)).flush())
+      .toEqual({ result: "signed_out", confirmed: 0 });
+    expect(sent).toEqual([]);
+    expect(marks.get(mark(1).id)).toMatchObject({ state: "pending", mark: mark(1) });
+
+    expect(await markQueue(store, send, revokedAnswer).flush()).toEqual({ result: "revoked", confirmed: 0 });
+    expect(sent).toEqual([]);
+    expect(marks.size).toBe(0);
+    expect(getPlan()).toBeNull();
+  });
 
   it("sends the queue first and refuses to end the session while a Marca is unconfirmed, without signal or refused by the server", async () => {
     const { store, marks, getPlan } = memoryStore();
@@ -192,8 +216,8 @@ describe("Cerrar sesión", () => {
     await markQueue(store, offline).add(9, mark(1));
     const logout = vi.fn(async () => new Response(null, { status: 204 }));
 
-    expect(await signOut(store, markQueue(store, offline), logout)).toEqual({ result: "refused", pending: 1, offline: true });
-    expect(await signOut(store, markQueue(store, async () => json({ error: "This Recorrido is closed" }, 409)), logout))
+    expect(await signOut(store, markQueue(store, offline, offline), { session: offline, logout })).toEqual({ result: "refused", pending: 1, offline: true });
+    expect(await signOut(store, markQueue(store, async () => json({ error: "This Recorrido is closed" }, 409), signedIn), { session: signedIn, logout }))
       .toEqual({ result: "refused", pending: 1, offline: false });
     expect(logout).not.toHaveBeenCalled();
     expect(marks.get(mark(1).id)).toMatchObject({ state: "pending", mark: mark(1) });
@@ -203,12 +227,12 @@ describe("Cerrar sesión", () => {
     const online = markQueue(store, async (_routeId, sentMark) => {
       sent.push(sentMark.id);
       return stored(sentMark);
-    });
+    }, signedIn);
     const order: string[] = [];
-    expect(await signOut(store, { flush: () => (order.push("flush"), online.flush()) }, async () => {
+    expect(await signOut(store, { flush: () => (order.push("flush"), online.flush()) }, { session: signedIn, logout: async () => {
       order.push("logout");
       return new Response(null, { status: 204 });
-    })).toEqual({ result: "signed_out" });
+    } })).toEqual({ result: "signed_out" });
     expect(order).toEqual(["flush", "logout"]);
     expect(sent).toEqual([mark(1).id]);
     expect(marks.get(mark(1).id)).toMatchObject({ state: "confirmed" });
@@ -217,30 +241,28 @@ describe("Cerrar sesión", () => {
   it("keeps the session and the queue when the sign-out request does not reach the server", async () => {
     const { store, marks } = memoryStore();
     await markQueue(store, offline).add(9, mark(1));
-    const queue = markQueue(store, async (_routeId, sentMark) => stored(sentMark));
-    expect(await signOut(store, queue, offline)).toEqual({ result: "unreachable" });
-    expect(await signOut(store, queue, async () => new Response("Bad gateway", { status: 502 }))).toEqual({ result: "unreachable" });
+    const queue = markQueue(store, async (_routeId, sentMark) => stored(sentMark), signedIn);
+    expect(await signOut(store, queue, { session: signedIn, logout: offline })).toEqual({ result: "unreachable" });
+    expect(await signOut(store, queue, { session: offline, logout: signedIn })).toEqual({ result: "unreachable" });
+    expect(await signOut(store, queue, { session: signedIn, logout: async () => new Response("Bad gateway", { status: 502 }) }))
+      .toEqual({ result: "unreachable" });
     expect(marks.get(mark(1).id)).toMatchObject({ state: "confirmed" });
   });
 
-  it("keeps the queue for the next sign-in on an expired session and reports a revoked device the flush wiped", async () => {
-    const { store, marks } = memoryStore();
+  it("keeps the queue for the next sign-in on an expired session and wipes a revoked phone even with nothing left to send", async () => {
+    const { store, marks, getPlan } = memoryStore();
+    await store.putPlan(savedPlan(7));
     await markQueue(store, offline).add(9, mark(1));
     const logout = vi.fn(async () => new Response(null, { status: 204 }));
-    const expired = markQueue(store, async () => json({ error: "Authentication required", code: "session_expired" }, 401));
-    expect(await signOut(store, expired, logout)).toEqual({ result: "expired" });
+    const expired = async () => json({ error: "Authentication required", code: "session_expired" }, 401);
+    expect(await signOut(store, markQueue(store, offline, expired), { session: expired, logout })).toEqual({ result: "expired" });
     expect(marks.get(mark(1).id)).toMatchObject({ state: "pending", mark: mark(1) });
 
-    const sent: string[] = [];
-    const revoked = markQueue(store, async (_routeId, sentMark) => {
-      sent.push(sentMark.id);
-      return json({ error: "Authentication required", code: "session_revoked" }, 401);
-    });
-    await markQueue(store, offline).add(9, mark(2));
-    expect(await signOut(store, revoked, logout)).toEqual({ result: "revoked" });
-    // The first send learnt the device was revoked: nothing else was sent and the phone holds nothing.
-    expect(sent).toEqual([mark(1).id]);
+    // Every Marca confirmed, then the Oficina revokes the phone: signing out still wipes it.
+    await markQueue(store, async (_routeId, sentMark) => stored(sentMark), signedIn).flush();
+    expect(await signOut(store, markQueue(store, offline, revokedAnswer), { session: revokedAnswer, logout })).toEqual({ result: "revoked" });
     expect(marks.size).toBe(0);
+    expect(getPlan()).toBeNull();
     expect(logout).not.toHaveBeenCalled();
   });
 });

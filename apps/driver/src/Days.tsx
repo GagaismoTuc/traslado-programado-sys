@@ -311,7 +311,8 @@ export function DriverHome({ apiUrl, userId, onSignedOut }: { apiUrl: string; us
   const [handover, setHandover] = useState<Marking["handover"]>(null);
   const [refusedClose, setRefusedClose] = useState<Marking["refusedClose"]>(null);
   const [store] = useState(() => indexedDbStore());
-  const [queue] = useState(() => markQueue(store, (routeId, mark) => sendMark(apiUrl, routeId, mark)));
+  const [session] = useState(() => () => fetch(`${apiUrl}/auth/me`, { credentials: "include" }));
+  const [queue] = useState(() => markQueue(store, (routeId, mark) => sendMark(apiUrl, routeId, mark), session));
   const latestLoad = useRef(0);
   const signedOut = useRef(onSignedOut);
   signedOut.current = onSignedOut;
@@ -391,7 +392,10 @@ export function DriverHome({ apiUrl, userId, onSignedOut }: { apiUrl: string; us
   async function closeSession() {
     setSending(true);
     try {
-      const outcome = await signOut(store, queue, () => fetch(`${apiUrl}/auth/logout`, { method: "POST", credentials: "include" }));
+      const outcome = await signOut(store, queue, {
+        session,
+        logout: () => fetch(`${apiUrl}/auth/logout`, { method: "POST", credentials: "include" }),
+      });
       if (outcome.result === "revoked") {
         setPlan(null);
         setLocal([]);

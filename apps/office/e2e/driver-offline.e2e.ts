@@ -234,6 +234,17 @@ test("Cerrar sesión refuses without signal while a Marca is only on the phone, 
   await expect(page.getByRole("heading", { name: "Driver sign-in" })).toBeVisible();
   expect((await storedMarks(seeded.transferId)).map((mark) => mark.kind)).toEqual(["subio"]);
   expect(await sessionEnd(seeded.token)).toBe("logout");
+  // The server stored the Marca before the session ended.
+  const pool = database();
+  try {
+    const order = await pool.query(
+      `SELECT m.server_time <= s.revoked_at AS before FROM marks m, sessions s WHERE m.transfer_id = $1 AND s.token_hash = $2`,
+      [seeded.transferId, hashSessionToken(seeded.token)],
+    );
+    expect(order.rows).toEqual([{ before: true }]);
+  } finally {
+    await pool.end();
+  }
 });
 
 test("Revocar por pérdida o robo wipes the phone without uploading its queue and shows the Oficina the Traslados without a confirmed Marca", async ({ browser, context, page }) => {
@@ -255,9 +266,16 @@ test("Revocar por pérdida o robo wipes the phone without uploading its queue an
   }
   expect(await sessionEnd(seeded.token)).toBe("device_revoked");
 
-  // The signal returns: the phone's next request answers revoked and the phone wipes everything.
+  // The signal returns: the phone's next request answers revoked and the phone wipes everything, sending no Marca.
+  const sentMarks: string[] = [];
+  page.on("request", (request) => {
+    if (request.method() === "POST" && request.url().includes("/marks")) sentMarks.push(request.url());
+  });
+  const asked = page.waitForRequest((request) => request.url().endsWith("/auth/me"));
   await context.setOffline(false);
+  await asked;
   await expect(page.getByRole("heading", { name: "Driver sign-in" })).toBeVisible();
   await expect.poll(() => savedOnPhone(page)).toEqual({ marks: 0, plan: false });
+  expect(sentMarks).toEqual([]);
   expect(await storedMarks(seeded.transferId)).toEqual([]);
 });
