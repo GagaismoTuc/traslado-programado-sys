@@ -274,6 +274,21 @@ describe("Trasbordo", () => {
   });
 });
 
+describe("Trasbordo authorization", () => {
+  it("lets only the Oficina plan and record a Trasbordo", async () => {
+    const { s, giving, receiving, legA } = await breakdownDay("authorization");
+    const planned = { ...FAR, time: "07:30", fromRouteId: giving.routeId, toRouteId: receiving.routeId };
+    for (const [path, body] of [["planned-trasbordo", planned], ["trasbordo", { routeId: receiving.routeId, ...NEAR_SCHOOL }]] as const) {
+      expect(await h.answer(h.request(`/transfers/${legA}/${path}`, "POST", body, giving.driver.cookie), 403)).toEqual({ error: "Office role required" });
+      expect((await h.request(`/transfers/${legA}/${path}`, "POST", body)).status).toBe(401);
+    }
+    // Nothing was recorded: the Pasajero is still on board in the first Recorrido.
+    expect((await day(s)).transfers.find((transfer: { id: number }) => transfer.id === legA)).toMatchObject({
+      status: "subio", routeId: giving.routeId, trasbordo: null, chainedToTransferId: null,
+    });
+  });
+});
+
 describe("Trasbordo: entries it touches keep their behaviour for a Traslado without one", () => {
   /** One published Recorrido of one entrada at 08:00 without a Trasbordo. */
   async function plainDay(name: string) {
