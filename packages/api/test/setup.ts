@@ -1,4 +1,3 @@
-import "./profile.js";
 import { afterAll, beforeEach, inject, vi } from "vitest";
 import { Pool } from "pg";
 
@@ -44,13 +43,11 @@ process.env.TEST_MIGRATION_DATABASE_URL = withCredentials(
 
 const migrationPool = new Pool({ connectionString: process.env.TEST_MIGRATION_DATABASE_URL, options: "-c timezone=UTC" });
 beforeEach(async () => {
-  const truncateStarted = performance.now();
   const result = await migrationPool.query(
     "SELECT string_agg(format('%I.%I', schemaname, tablename), ', ') AS tables FROM pg_tables WHERE schemaname = 'public'",
   );
   const tables = result.rows[0].tables as string | null;
   if (tables) await migrationPool.query(`TRUNCATE TABLE ${tables} RESTART IDENTITY CASCADE`);
-  (globalThis as unknown as { __profile: { current: { truncate: number } } }).__profile.current.truncate += performance.now() - truncateStarted;
 });
 afterAll(async () => {
   await migrationPool.end();
