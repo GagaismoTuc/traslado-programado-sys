@@ -110,6 +110,28 @@ describe("Trasbordo", () => {
     expect((await day(s)).transfers.filter((transfer: { passengerId: number }) => transfer.passengerId === legB.passengerId)).toHaveLength(2);
   });
 
+  it("Regla 1: a Chofer's own Subió at a planned Trasbordo point is kept but flagged, and the Oficina corrects it and records the Trasbordo", async () => {
+    const { s, first, second, fromRouteId, toRouteId, legA, legB } = await plannedDay("rule-1-planned");
+    await s.publish(fromRouteId);
+    await s.publish(toRouteId);
+    at("07:50");
+    await h.answer(h.mark(first.cookie, fromRouteId, h.markBody(legA, "subio")), 201);
+    // The app shows both ends at the point as a Trasbordo, where it offers no Marca.
+    const receivingDay = await h.answer(h.request(`/driver/days/${TODAY}`, "GET", undefined, second.cookie), 200);
+    expect(receivingDay.routes[0].stops.map((stop: { kind: string; trasbordo: boolean }) => [stop.kind, stop.trasbordo])).toEqual([["pickup", true], ["dropoff", false]]);
+    at("08:02");
+    const bypass = await h.answer(h.mark(second.cookie, toRouteId, h.markBody(legB, "subio")), 201);
+    expect(bypass.mark.flags).toEqual(["trasbordo_unlinked"]);
+    const alerts = await h.answer(h.request("/alerts", "GET", undefined, s.office), 200);
+    expect(alerts.alerts.find((alert: { markId: string }) => alert.markId === bypass.mark.id))
+      .toMatchObject({ kind: "mark_flagged", transferId: legB, details: { reasons: ["trasbordo_unlinked"] } });
+    // The Oficina undoes it and records the Trasbordo where it happened, which becomes both legs' point.
+    await s.post(`/marks/${bypass.mark.id}/corrections`, { kind: "undo", reason: "Recorded as a Trasbordo" });
+    const result = await trasbordo(s, legA, { routeId: toRouteId, ...NEAR_SCHOOL });
+    expect(result.marks.subio).toMatchObject({ transferId: legB, trasbordoOf: result.marks.entregado.id, flags: [] });
+    expect([result.legA.trasbordo, result.legB.trasbordo]).toEqual([{ stop: "dropoff", ...NEAR_SCHOOL, time: "08:00" }, { stop: "pickup", ...NEAR_SCHOOL, time: "08:00" }]);
+  });
+
   it("AC1 / Regla 5: records, linked, an Entregado to the receiving Chofer in the original Recorrido and a Subió in the receiving one, same place and time", async () => {
     const { s, giving, receiving, legA } = await breakdownDay("ac-1");
     at("07:50");
@@ -208,6 +230,19 @@ describe("Trasbordo", () => {
     expect(engine.problems.at(-1)!.shipments[0].delivery.time_windows).toEqual([[seconds("08:15"), seconds("08:20")]]);
   });
 
+  it("Regla 4: a version of leg A published before the split does not count as solving it", async () => {
+    const s = await h.setup("rule-4-before-split");
+    const [first, second] = [await s.chofer(), await s.chofer()];
+    const [fromRouteId, toRouteId] = [await s.route(first.driverId), await s.route(second.driverId)];
+    const legA = await s.transfer((await s.passenger()).passengerId, "entrada", "08:30");
+    await s.assign(legA, fromRouteId);
+    await s.publish(fromRouteId);
+    const { legB } = await plan(s, legA, { ...FAR, time: "08:00", fromRouteId, toRouteId });
+    expect(await h.answer(h.request(`/routes/${toRouteId}/order`, "POST", undefined, s.office), 409)).toEqual({
+      error: `Order the Recorrido of leg A of the Trasbordo first: Pasajero Sintético 1 (Traslado ${legB.id})`,
+    });
+  });
+
   it("AC5: the validator sums the whole chain, from the Subió in leg A through the wait at the point to the Entregado in leg B", async () => {
     const { s, first, fromRouteId, toRouteId, legA, legB } = await plannedDay("ac-5");
     await s.publish(fromRouteId);
@@ -269,6 +304,21 @@ describe("Trasbordo", () => {
     expect(republished.cascade).toEqual([{
       routeId: toRouteId, version: 1, fromRouteId, ok: false,
       problem: "Leg A of Pasajero Sintético 1 reaches the Trasbordo point at 08:21, after 08:05",
+    }]);
+    expect(await versions(s, toRouteId)).toHaveLength(1);
+  });
+
+  it("AC6 / Regla 6: the revalidation of leg B counts the chain from the Subió in leg A, not from its planned pickup", async () => {
+    const { s, first, fromRouteId, toRouteId, legA } = await plannedDay("rule-6-subio");
+    await s.publish(fromRouteId);
+    await s.publish(toRouteId);
+    // Planned pickup 07:48: the chain would ride 38 minutes; the Pasajero got on at 07:20 and rides 67 to 08:26:40.
+    at("07:20");
+    await h.answer(h.mark(first.cookie, fromRouteId, h.markBody(legA, "subio")), 201);
+    const republished = await s.post(`/routes/${fromRouteId}/publish`, {});
+    expect(republished.cascade).toEqual([{
+      routeId: toRouteId, version: 1, fromRouteId, ok: false,
+      problem: "Pasajero Sintético 1 rides 67 min from the start of leg A, over the Tiempo máximo a bordo of 60 min",
     }]);
     expect(await versions(s, toRouteId)).toHaveLength(1);
   });

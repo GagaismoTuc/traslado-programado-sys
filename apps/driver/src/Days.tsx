@@ -20,6 +20,8 @@ export type DriverStop = {
   place: { name: string | null; destinationId: number | null; address: string; accessNotes: string | null };
   passenger: { name: string; wheelchair: boolean; medicalAlert: string | null };
   companions: number;
+  // A Trasbordo end: the Oficina records the handover there, so the app offers no Marca.
+  trasbordo?: boolean;
 };
 export type DriverRoute = {
   routeId: number;
@@ -188,11 +190,13 @@ export function StopActions({ route, stop, marking }: { route: DriverRoute; stop
     {shown?.note && <p role="alert">{shown.note}</p>}
     {shown?.state === "pending" && <button type="button" onClick={marking.onFlush}>Send now</button>}
     {undoable && <button type="button" disabled={disabled} onClick={() => marking.onUndo(route, undoable)}>Deshacer</button>}
-    {stop.kind === "pickup" && status === "planificado" && <div>
+    {stop.trasbordo && status === (stop.kind === "pickup" ? "planificado" : "subio")
+      && <p>Trasbordo: call the Oficina to record the handover</p>}
+    {stop.kind === "pickup" && status === "planificado" && !stop.trasbordo && <div>
       <button type="button" disabled={disabled} onClick={() => marking.onMark(route, stop, "subio")}>Subió</button>
       <button type="button" disabled={disabled} onClick={() => marking.onMark(route, stop, "ausente")}>Ausente</button>
     </div>}
-    {stop.kind === "dropoff" && status === "subio" && (stop.place.destinationId !== null
+    {stop.kind === "dropoff" && status === "subio" && !stop.trasbordo && (stop.place.destinationId !== null
       ? <button type="button" disabled={disabled} onClick={() => marking.onMark(route, stop, "entregado", {
         kind: "destination", destinationId: stop.place.destinationId!,
       })}>{`Entregado at ${stop.place.name}`}</button>

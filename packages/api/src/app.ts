@@ -1059,21 +1059,26 @@ const BOARDED_MINUTES_SQL = `(SELECT EXTRACT(EPOCH FROM (m.phone_time AT TIME ZO
     FROM marks m WHERE m.transfer_id = t.id AND m.kind = 'subio' ORDER BY m.phone_time DESC, m.id DESC LIMIT 1)`;
 
 /**
- * The local minute a leg after a Trasbordo (alias t) started riding: the first leg of its chain's latest Subió, else that
- * leg's pickup in its latest published version, else its planned pickup in the current order. Null for a Traslado that
- * is not such a leg, and while the first leg has no time yet.
+ * The local minute a leg after a Trasbordo (the transfers row aliased `t`) started riding: the first leg of its chain's
+ * latest Subió, else that leg's pickup in the latest version of its Recorrido published since the split (t was created
+ * then), else its planned pickup in the current order. Null for a Traslado that is not such a leg, and while the first
+ * leg has no time yet.
  */
-const RIDE_START_MINUTES_SQL = `(CASE WHEN t.chained_from_transfer_id IS NOT NULL THEN (
+function rideStartMinutesSql(t = "t") {
+  return `(CASE WHEN ${t}.chained_from_transfer_id IS NOT NULL THEN (
     WITH RECURSIVE chain(id, previous) AS (
-      SELECT t.id, t.chained_from_transfer_id
+      SELECT ${t}.id, ${t}.chained_from_transfer_id
       UNION ALL SELECT c.id, c.chained_from_transfer_id FROM transfers c JOIN chain ON c.id = chain.previous)
     SELECT COALESCE(
       (SELECT EXTRACT(EPOCH FROM (m.phone_time AT TIME ZONE '${LOCAL_TIME_ZONE}')::time) / 60
          FROM marks m WHERE m.transfer_id = chain.id AND m.kind = 'subio' ORDER BY m.phone_time DESC, m.id DESC LIMIT 1),
-      (SELECT EXTRACT(EPOCH FROM l.planned_time) / 60 FROM plan_version_legs l
-        WHERE l.transfer_id = chain.id AND l.kind = 'pickup' ORDER BY l.plan_version_id DESC LIMIT 1),
+      (SELECT EXTRACT(EPOCH FROM l.planned_time) / 60 FROM plan_version_legs l JOIN plan_versions pv ON pv.id = l.plan_version_id
+        WHERE l.transfer_id = chain.id AND l.kind = 'pickup' AND pv.published_at >= ${t}.created_at
+          AND pv.route_id = (SELECT route_id FROM stops WHERE transfer_id = chain.id AND kind = 'pickup')
+        ORDER BY pv.version DESC LIMIT 1),
       (SELECT EXTRACT(EPOCH FROM fs.planned_time) / 60 FROM stops fs WHERE fs.transfer_id = chain.id AND fs.kind = 'pickup'))
       FROM chain WHERE chain.previous IS NULL) END)`;
+}
 
 const ORDER_ROUTE_SQL = `
   SELECT r.daily_plan_id, r.driver_id, r.vehicle_id, r.status, to_char(r.start_time, 'HH24:MI') AS start_time,
@@ -1090,7 +1095,7 @@ const ORDER_TRANSFERS_SQL = `
          p.home_latitude, p.home_longitude, p.front_seat, p.max_ride_time_minutes, p.pickup_duration_minutes,
          p.dropoff_duration_minutes, d.latitude AS d_lat, d.longitude AS d_lng, d.arrival_tolerance_minutes,
          o.latitude AS o_lat, o.longitude AS o_lng, t.trasbordo_stop, t.trasbordo_latitude, t.trasbordo_longitude,
-         EXTRACT(EPOCH FROM t.trasbordo_time) / 60 AS trasbordo_minutes, ${RIDE_START_MINUTES_SQL} AS ride_start_minutes,
+         EXTRACT(EPOCH FROM t.trasbordo_time) / 60 AS trasbordo_minutes, ${rideStartMinutesSql()} AS ride_start_minutes,
          ARRAY(SELECT feature_id FROM passenger_required_features f WHERE f.passenger_id = p.id ORDER BY feature_id) AS feature_ids
     FROM stops s
     JOIN transfers t ON t.id = s.transfer_id
@@ -1320,7 +1325,7 @@ type PublicationTransfer = {
   boardedMinutes: number | null;
   trasbordoStop: string | null;
   trasbordoMinutes: number | null;
-  // A leg after a Trasbordo rides since its chain's start (RIDE_START_MINUTES_SQL); null otherwise.
+  // A leg after a Trasbordo rides since its chain's start (rideStartMinutesSql); null otherwise.
   rideStartMinutes: number | null;
 };
 // A leg of the latest Versión del plan, with its planned time to the second.
@@ -1407,7 +1412,7 @@ async function loadPublicationSnapshot(client: Queryable, routeId: number): Prom
             p.dropoff_duration_minutes AS "dropoffDurationMinutes", p.front_seat AS "frontSeat",
             COALESCE(array_agg(rf.feature_id::text) FILTER (WHERE rf.feature_id IS NOT NULL), '{}') AS "requiredFeatures",
             t.status, ${BOARDED_MINUTES_SQL} AS "boardedMinutes", t.trasbordo_stop AS "trasbordoStop",
-            EXTRACT(EPOCH FROM t.trasbordo_time) / 60 AS "trasbordoMinutes", ${RIDE_START_MINUTES_SQL} AS "rideStartMinutes",
+            EXTRACT(EPOCH FROM t.trasbordo_time) / 60 AS "trasbordoMinutes", ${rideStartMinutesSql()} AS "rideStartMinutes",
             CASE WHEN t.trasbordo_stop = 'pickup' THEN t.trasbordo_latitude
                  ELSE COALESCE(o.latitude, CASE WHEN t.direction = 'entrada' THEN p.home_latitude ELSE d.latitude END) END AS "fromLat",
             CASE WHEN t.trasbordo_stop = 'pickup' THEN t.trasbordo_longitude
@@ -1748,6 +1753,8 @@ async function loadDriverDay(client: Queryable, driverId: number, date: string) 
       direction: String(leg.direction),
       // The Traslado's state now (Planificado, Subió, Entregado, ...), so the app shows what is already marked.
       transferStatus: String(leg.status),
+      // A Trasbordo end: the Oficina records the handover there, so the app offers no Marca.
+      trasbordo: leg.trasbordo_stop === leg.kind,
       // destinationId is the Destino the Chofer marks as Receptor at a drop-off there; null at home and at a Trasbordo point.
       place: leg.trasbordo_stop === leg.kind
         ? { name: "Trasbordo", destinationId: null, address: `${leg.trasbordo_latitude}, ${leg.trasbordo_longitude}`, accessNotes: null }
@@ -2176,7 +2183,7 @@ export function createApp({ db, routing, router, geocoder, solver, travelTime, c
     if (!seen.rows[0].served) throw new PlanningError(404, "Traslado not found in this Versión del plan");
     // Locking the Traslado serialises its Marcas with the Oficina's moves, Ausencias and revocations.
     const transfer = (await client.query(
-      "SELECT passenger_id, daily_plan_id, direction FROM transfers WHERE id = $1 FOR UPDATE",
+      "SELECT passenger_id, daily_plan_id, direction, trasbordo_stop FROM transfers WHERE id = $1 FOR UPDATE",
       [fields.transferId],
     ) as QueryResult).rows[0];
     const content = markContent({ ...fields, routeId });
@@ -2225,6 +2232,10 @@ export function createApp({ db, routing, router, geocoder, solver, travelTime, c
     // The close holds this Traslado's lock, so a Marca that waited on it sees the Recorrido Cerrado and the Oficina is told.
     const routeState = (await client.query("SELECT status FROM routes WHERE id = $1", [routeId]) as QueryResult).rows[0];
     if (routeState?.status === "cerrado") flags.push("route_closed");
+    // A Trasbordo is recorded by the Oficina, which links both Marcas: a Chofer's own Subió or Entregado at its point is kept,
+    // flagged, for the Oficina to correct it and record the Trasbordo.
+    const handoverKind = transfer.trasbordo_stop === "pickup" ? "subio" : transfer.trasbordo_stop === "dropoff" ? "entregado" : null;
+    if (chofer.driverId !== null && !fields.corrects && fields.kind === handoverKind) flags.push("trasbordo_unlinked");
     const receiver = fields.receiver;
     let authorized = false;
     if (receiver?.kind === "authorized_adult") {
@@ -2540,7 +2551,8 @@ export function createApp({ db, routing, router, geocoder, solver, travelTime, c
   /**
    * After Recorrido k is published, every planned Trasbordo whose leg A it serves and whose leg B is still to be picked up
    * in a published Recorrido is revalidated against k's new times: leg A must reach the point by t + 5 and before leg B's
-   * planned pickup, and the whole chain (A's pickup to the end of B's drop-off) must fit the Tiempo máximo a bordo. The
+   * planned pickup, and the whole chain (from A's Subió, or its pickup in k, to the end of B's drop-off) must fit the
+   * Tiempo máximo a bordo. The
    * Oficina is warned through the change log and the answer; leg B's Recorrido is never republished here.
    */
   async function revalidateTrasbordos(actorId: number, routeId: number): Promise<CascadeWarning[]> {
@@ -2550,7 +2562,8 @@ export function createApp({ db, routing, router, geocoder, solver, travelTime, c
            FROM plan_version_legs l JOIN plan_versions pv ON pv.id = l.plan_version_id
           WHERE pv.route_id = $1 AND pv.version = (SELECT max(version) FROM plan_versions WHERE route_id = $1))
        SELECT b.id, p.name, p.max_ride_time_minutes, p.dropoff_duration_minutes, a_up.version AS from_version,
-              EXTRACT(EPOCH FROM b.trasbordo_time) / 60 AS t, a_up.minutes AS a_pickup, a_down.minutes AS a_dropoff,
+              EXTRACT(EPOCH FROM b.trasbordo_time) / 60 AS t, ${rideStartMinutesSql("b")} AS ride_start,
+              a_down.minutes AS a_dropoff,
               pvb.route_id, pvb.version,
               (SELECT EXTRACT(EPOCH FROM l.planned_time) / 60 FROM plan_version_legs l
                 WHERE l.plan_version_id = pvb.id AND l.transfer_id = b.id AND l.kind = 'pickup') AS b_pickup,
@@ -2571,13 +2584,13 @@ export function createApp({ db, routing, router, geocoder, solver, travelTime, c
     const warnings: CascadeWarning[] = [];
     for (const row of chains.rows) {
       const [t, aDropoff, bPickup] = [Number(row.t), Number(row.a_dropoff), Number(row.b_pickup)];
-      const ride = Number(row.b_dropoff) + Number(row.dropoff_duration_minutes) - Number(row.a_pickup);
+      const ride = Number(row.b_dropoff) + Number(row.dropoff_duration_minutes) - Number(row.ride_start);
       const problems: string[] = [];
       if (aDropoff > Math.min(t + TRASBORDO_WINDOW_MINUTES, bPickup) + 1e-6) {
         problems.push(`Leg A of ${row.name} reaches the Trasbordo point at ${clock(aDropoff)}, after ${clock(Math.min(t + TRASBORDO_WINDOW_MINUTES, bPickup))}`);
       }
       if (ride > Number(row.max_ride_time_minutes) + 1e-6) {
-        problems.push(`${row.name} rides ${Math.round(ride)} min from leg A's pickup, over the Tiempo máximo a bordo of ${row.max_ride_time_minutes} min`);
+        problems.push(`${row.name} rides ${Math.round(ride)} min from the start of leg A, over the Tiempo máximo a bordo of ${row.max_ride_time_minutes} min`);
       }
       const problem = problems.length ? problems.join("; ") : null;
       const warning = { routeId: Number(row.route_id), version: Number(row.version), fromRouteId: routeId, ok: problem === null, problem };
@@ -2654,6 +2667,8 @@ export function createApp({ db, routing, router, geocoder, solver, travelTime, c
     let legBId: number;
     if (next) {
       legBId = Number(next.id);
+      // Both legs' end is where the Trasbordo happened, also when it was not the planned point.
+      await client.query("UPDATE transfers SET trasbordo_latitude = $3, trasbordo_longitude = $4 WHERE id IN ($1, $2)", [transferId, legBId, place.lat, place.lng]);
     } else {
       const localTime = new Intl.DateTimeFormat("en-GB", { timeZone: LOCAL_TIME_ZONE, hour: "2-digit", minute: "2-digit", second: "2-digit", hourCycle: "h23" }).format(at);
       await client.query(
