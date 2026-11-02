@@ -15,6 +15,7 @@ export type HistoryMark = {
     | { kind: "destination"; destinationId: number; name: string }
     | { kind: "other_adult"; name: string; dni: string; authorizationId: number | null }
     | { kind: "base_staff" }
+    | { kind: "driver"; driverId: number }
     | null;
   flags: string[];
   corrects?: string;
@@ -52,6 +53,8 @@ function receiverLabel(receiver: NonNullable<HistoryMark["receiver"]>) {
     case "other_adult": return `${receiver.name} (another adult)`;
     case "destination": return `${receiver.name} (Destino)`;
     case "base_staff": return "company staff at the base";
+    // A Trasbordo: the API names the receiving Chofer by id only.
+    case "driver": return `driver ${receiver.driverId} (Chofer receptor)`;
   }
 }
 
