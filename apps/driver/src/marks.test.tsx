@@ -2,7 +2,7 @@ import { isValidElement, type ReactElement, type ReactNode } from "react";
 import { renderToStaticMarkup } from "react-dom/server";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { RouteView, undoneKinds, type DriverRoute, type DriverStop, type Marking } from "./Days";
-import { latestMarks } from "./offline";
+import { latestMarks, refusedMarks } from "./offline";
 import {
   CALL_THE_OFFICE, closeRoute, currentLocation, fetchHandover, HandoverView, newMark, otherAdultReceiver, sendMark, startRoute, undoMark,
   type Handover, type HandoverActions,
@@ -28,7 +28,7 @@ const route = (status: string, stops: DriverStop[]): DriverRoute => ({
   routeId: 9, version: 2, startTime: "07:00", endTime: "18:00", vehiclePlate: "AAA001", status, acknowledgedVersion: 2, stops,
 });
 const marking = (fields: Partial<Marking> = {}): Marking => ({
-  sending: false, marks: {}, undone: {}, planFetchedAt: "2026-10-23T11:00:00.000Z", handover: null, refusedClose: null, onStart: vi.fn(),
+  sending: false, marks: {}, refused: {}, undone: {}, planFetchedAt: "2026-10-23T11:00:00.000Z", handover: null, refusedClose: null, onStart: vi.fn(),
   onClose: vi.fn(), onMark: vi.fn(), onFlush: vi.fn(), onUndo: vi.fn(), onOpenHandover: vi.fn(),
   onOtherAdult: vi.fn(), onSearch: vi.fn(), ...fields,
 });
@@ -285,6 +285,33 @@ describe("Marcas in the driver app", () => {
     const entrada = route("en_curso", [stop("pickup", "planificado", 4), stop("dropoff", "planificado", 4)]);
     press(<RouteView route={entrada} sending={false} onAcknowledge={() => undefined} marking={actionsFor} />, "Deshacer");
     expect(actionsFor.onUndo).toHaveBeenCalledWith(entrada, last);
+  });
+
+  it("#81 rule 3: a Marca the server refused shows the Chofer its reason and offers no Deshacer of it", () => {
+    const time = new Date("2026-10-23T12:00:00.000Z");
+    const subio = newMark({ transferId: 3, kind: "subio", location: null, version: 2 }, time, "00000000-0000-4000-8000-000000000001");
+    const undo = undoMark(subio, 2, null, new Date("2026-10-23T12:03:00.000Z"), "ffffffff-ffff-4000-8000-000000000002");
+    const reason = "More than 2 minutes have passed since this Marca: call the Oficina to correct it";
+    const items = [
+      { id: subio.id, routeId: 9, mark: subio, state: "confirmed" as const, confirmedAt: "2026-10-23T12:00:05.000Z", note: null },
+      { id: undo.id, routeId: 9, mark: undo, state: "pending" as const, confirmedAt: null, note: reason, sent: true },
+    ];
+    const entrada = route("en_curso", [stop("pickup", "planificado", 4), stop("dropoff", "planificado", 4)]);
+    const actionsFor = marking({ marks: latestMarks(items), refused: refusedMarks(items), undone: undoneKinds(items) });
+    const view = <RouteView route={entrada} sending={false} onAcknowledge={() => undefined} marking={actionsFor} />;
+    const markup = renderToStaticMarkup(view);
+    expect(markup).toContain(`<div>Marked: Subió</div><div>Confirmed by server</div><p role="alert">Deshacer not saved by the server: ${reason}</p>`);
+    // Deshacer is offered only on the Marca the server stored, once, at its own Parada.
+    expect(buttons(view).filter((item) => item.text === "Deshacer")).toHaveLength(1);
+    press(view, "Deshacer");
+    expect(actionsFor.onUndo).toHaveBeenCalledWith(entrada, subio);
+
+    // A refused Subió alone leaves the Traslado as the plan says, with the reason and nothing to undo.
+    const alone = [{ id: subio.id, routeId: 9, mark: subio, state: "pending" as const, confirmedAt: null, note: "This Recorrido is closed", sent: true }];
+    const refusedView = <RouteView route={entrada} sending={false} onAcknowledge={() => undefined}
+      marking={marking({ marks: latestMarks(alone), refused: refusedMarks(alone) })} />;
+    expect(renderToStaticMarkup(refusedView)).toContain("<p role=\"alert\">Subió not saved by the server: This Recorrido is closed</p>");
+    expect(buttons(refusedView).map((item) => item.text)).not.toContain("Deshacer");
   });
 
   it("keeps a Marca's UUID and phone time to send it again after a failure", async () => {

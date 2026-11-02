@@ -1,6 +1,6 @@
 import { randomBytes } from "node:crypto";
 import { expect, test, type BrowserContext, type Page } from "@playwright/test";
-import { hashSessionToken } from "../../../packages/api/src/auth.js";
+import { hashPassword, hashSessionToken } from "../../../packages/api/src/auth.js";
 import { database, signInOffice } from "./session";
 
 // The driver app's offline queue, on the production build with its service worker that e2e/global-setup.ts serves at
@@ -244,6 +244,26 @@ test("marks without signal, keeps the Marcas through a reload and confirms each 
   expect(await storedMarks(seeded.transferId)).toEqual(marks);
 });
 
+test("Deshacer without signal of a Marca that never left the phone cancels it there, so the server gets neither the Marca nor an undo", async ({ context, page }) => {
+  await markWithoutSignal(context, page);
+  const sentMarks: string[] = [];
+  page.on("request", (request) => {
+    if (request.method() === "POST" && request.url().includes("/marks")) sentMarks.push(request.url());
+  });
+
+  await page.getByRole("button", { name: "Deshacer" }).click();
+  await expect(page.getByText("Marca removed from the phone: it is not sent")).toBeVisible();
+  await expect(page.getByText("Saved on phone", { exact: true })).toHaveCount(0);
+  await expect(page.getByRole("button", { name: "Subió" })).toBeVisible();
+  expect(await savedOnPhone(page)).toEqual({ marks: 0, plan: true });
+
+  await regainSignal(context);
+  await page.reload();
+  await expect(page.getByRole("button", { name: "Subió" })).toBeVisible();
+  expect(sentMarks).toEqual([]);
+  expect(await storedMarks(seeded.transferId)).toEqual([]);
+});
+
 test("Cerrar sesión refuses without signal while a Marca is only on the phone, and ends the session once the server stored it", async ({ context, page }) => {
   await markWithoutSignal(context, page);
 
@@ -292,6 +312,95 @@ test("Revocar por pérdida o robo wipes the phone without uploading its queue an
   await expect.poll(() => savedOnPhone(page)).toEqual({ marks: 0, plan: false });
   expect(sentMarks).toEqual([]);
   expect(await storedMarks(seeded.transferId)).toEqual([]);
+});
+
+test("an expired session asks the Chofer to sign in again, keeps the queue and sends it once signed in", async ({ context, page }) => {
+  await markWithoutSignal(context, page);
+  const pool = database();
+  try {
+    await pool.query("UPDATE sessions SET last_used_at = now() - interval '31 days' WHERE token_hash = $1", [hashSessionToken(seeded.token)]);
+    await pool.query("UPDATE users SET password_hash = $1 WHERE id = $2", [await hashPassword("clave-sintetica-e2e"), seeded.userIds[1]]);
+  } finally {
+    await pool.end();
+  }
+
+  // The signal returns: the queue asks the session first, the server answers expired, and nothing is sent or wiped.
+  await regainSignal(context);
+  await expect(page.getByRole("heading", { name: "Driver sign-in" })).toBeVisible();
+  expect(await savedOnPhone(page)).toEqual({ marks: 1, plan: true });
+  expect(await storedMarks(seeded.transferId)).toEqual([]);
+
+  await page.getByLabel("Username").fill("chofer-offline-e2e");
+  await page.getByLabel("Password").fill("clave-sintetica-e2e");
+  await page.getByRole("button", { name: "Sign in" }).click();
+  await expect(page.getByText("Confirmed by server", { exact: true })).toHaveCount(2);
+  expect((await storedMarks(seeded.transferId)).map((mark) => mark.kind)).toEqual(["subio"]);
+});
+
+test("a server restored from a backup gets the day's confirmed Marcas again when its epoch changes, and only once", async ({ context, page }) => {
+  await markWithoutSignal(context, page);
+  await regainSignal(context);
+  await expect(page.getByText("Confirmed by server", { exact: true })).toHaveCount(2);
+  const before = await storedMarks(seeded.transferId);
+  expect(before.map((mark) => mark.kind)).toEqual(["subio"]);
+
+  // The restore lost the Marca and gave the server a new epoch, which every answer now carries.
+  const pool = database();
+  try {
+    await pool.query("DELETE FROM alerts WHERE transfer_id = $1", [seeded.transferId]);
+    await pool.query("DELETE FROM marks WHERE transfer_id = $1", [seeded.transferId]);
+  } finally {
+    await pool.end();
+  }
+  await context.route("**/api/**", async (route) => {
+    const response = await route.fetch();
+    await route.fulfill({ response, headers: { ...response.headers(), "x-server-epoch": "c3-e2e-restored" } });
+  });
+  const sentMarks: string[] = [];
+  page.on("request", (request) => {
+    if (request.method() === "POST" && request.url().includes("/marks")) sentMarks.push(request.url());
+  });
+
+  await page.reload();
+  await expect.poll(() => storedMarks(seeded.transferId)).toEqual(before);
+  await expect(page.getByText("Confirmed by server", { exact: true })).toHaveCount(2);
+  expect(sentMarks).toHaveLength(1);
+
+  // Opening the app again under the same epoch sends nothing.
+  const asked = page.waitForResponse((response) => response.url().endsWith("/auth/me"));
+  await page.reload();
+  await asked;
+  await expect(page.getByText("Confirmed by server", { exact: true })).toHaveCount(2);
+  expect(sentMarks).toHaveLength(1);
+  expect(await storedMarks(seeded.transferId)).toEqual(before);
+});
+
+test("keeps the day's Marcas past the end of the day while one is unconfirmed, and wipes the plan and the Marcas once the server has them all", async ({ context, page }) => {
+  await markWithoutSignal(context, page);
+  await regainSignal(context);
+  await expect(page.getByText("Confirmed by server", { exact: true })).toHaveCount(2);
+  // A confirmed Marca stays on the phone during its day.
+  await page.reload();
+  await expect(page.getByText("Confirmed by server", { exact: true })).toHaveCount(2);
+  expect(await savedOnPhone(page)).toEqual({ marks: 1, plan: true });
+
+  const dropped = await loseSignal(context);
+  await page.getByRole("button", { name: "Entregado", exact: true }).click();
+  await page.getByRole("button", { name: "Madre Offline E2E (madre)" }).click();
+  await expect(page.getByText("Marked: Entregado")).toHaveCount(2);
+
+  // Two days later, still without signal, the Entregado is only on the phone: nothing is wiped.
+  await page.clock.setFixedTime(Date.now() + 2 * 24 * 60 * 60 * 1000);
+  const checks = () => dropped().filter((url) => url.endsWith("/api/auth/me")).length;
+  const checksBefore = checks();
+  await page.reload();
+  await expect.poll(checks).toBeGreaterThan(checksBefore);
+  expect(await savedOnPhone(page)).toEqual({ marks: 2, plan: true });
+
+  // The signal returns: the server confirms the Entregado, then the phone wipes the ended day's plan and Marcas.
+  await regainSignal(context);
+  await expect.poll(() => storedMarks(seeded.transferId).then((marks) => marks.map((mark) => mark.kind))).toEqual(["subio", "entregado"]);
+  await expect.poll(() => savedOnPhone(page)).toEqual({ marks: 0, plan: false });
 });
 
 test("drops the requests the service worker sends itself while the phone has no signal", async ({ context, page }) => {

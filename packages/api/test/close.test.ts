@@ -100,6 +100,7 @@ describe("Closing a Recorrido", () => {
       id: expect.any(Number), kind: "close_refused", createdAt: "2026-10-23T12:00:00.000Z", transferId: null, routeId, markId: null,
       passengerName: null, driverName: "Chofer Sintético 1",
       details: { transfers: [{ transferId: onBoard.transferId, passengerName: onBoard.passengerName, direction: "entrada", status: "subio" }] },
+      resolution: null,
     }]);
   });
 

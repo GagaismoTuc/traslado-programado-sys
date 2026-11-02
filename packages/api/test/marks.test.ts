@@ -280,6 +280,56 @@ describe("Ausente on an entrada", () => {
     await answer(mark(later.driver.cookie, later.routeId, markBody(later.transferId, "ausente")), 201);
     expect((await alerts()).map((alert) => alert.kind)).toEqual(["absent_on_entrada"]);
   });
+
+  it("Rule 2 (#83): correcting or undoing an Ausente resolves its alert, records the Corrección that did it and never deletes the alert", async () => {
+    const { passenger, served, office } = await setup("absent-resolved");
+    const first = await passenger();
+    const second = await passenger();
+    const undone = await served(first.passengerId, "entrada", "08:00");
+    const corrected = await served(second.passengerId, "entrada", "08:30");
+    const inbox = async () => (await answer(request("/alerts", "GET", undefined, office), 200)).alerts as { markId: string; resolution: unknown }[];
+    const resolutionOf = async (markId: string) => (await inbox()).find((alert) => alert.markId === markId)!.resolution;
+
+    const firstAusente = markBody(undone.transferId, "ausente");
+    await answer(mark(undone.driver.cookie, undone.routeId, firstAusente), 201);
+    const secondAusente = markBody(corrected.transferId, "ausente");
+    await answer(mark(corrected.driver.cookie, corrected.routeId, secondAusente), 201);
+    expect(await resolutionOf(firstAusente.id)).toBeNull();
+    expect(await resolutionOf(secondAusente.id)).toBeNull();
+
+    // The Chofer undoes the first Ausente: its alert is resolved by that undo.
+    clock.now = new Date("2026-10-23T12:01:00.000Z");
+    const undo = markBody(undone.transferId, "undo", { corrects: firstAusente.id });
+    await answer(mark(undone.driver.cookie, undone.routeId, undo), 201);
+    expect(await resolutionOf(firstAusente.id)).toEqual({
+      markId: undo.id, kind: "undo", at: "2026-10-23T12:01:00.000Z", reason: null,
+      author: { userId: undone.driver.userId, username: "chofer-absent-resolved-1", role: "driver" },
+    });
+
+    // The Chofer corrects the second to Subió and then undoes that Corrección: the Ausente is in force again, so is its alert.
+    const subio = markBody(corrected.transferId, "subio", { corrects: secondAusente.id });
+    await answer(mark(corrected.driver.cookie, corrected.routeId, subio), 201);
+    expect(await resolutionOf(secondAusente.id)).toMatchObject({ markId: subio.id, kind: "subio" });
+    clock.now = new Date("2026-10-23T12:01:30.000Z");
+    await answer(mark(corrected.driver.cookie, corrected.routeId, markBody(corrected.transferId, "undo", { corrects: subio.id })), 201);
+    expect(await transferStatus(corrected.transferId)).toBe("ausente");
+    expect(await resolutionOf(secondAusente.id)).toBeNull();
+
+    // The Oficina corrects it, with a reason.
+    clock.now = new Date("2026-10-23T12:30:00.000Z");
+    const reason = "La escuela confirmó que viajó";
+    const byOffice = (await answer(request(`/marks/${secondAusente.id}/corrections`, "POST", { kind: "subio", reason }, office), 201)).mark;
+    expect(await resolutionOf(secondAusente.id)).toEqual({
+      markId: byOffice.id, kind: "subio", at: "2026-10-23T12:30:00.000Z", reason,
+      author: { userId: expect.any(Number), username: "oficina-absent-resolved", role: "office" },
+    });
+
+    // Nothing was deleted: both alerts are still in the inbox, with what they said when they were raised.
+    expect((await alerts()).map((alert) => [alert.kind, alert.transferId])).toEqual([
+      ["absent_on_entrada", undone.transferId], ["absent_on_entrada", corrected.transferId],
+    ]);
+    expect(await inbox()).toHaveLength(2);
+  });
 });
 
 describe("Alert inbox", () => {
@@ -299,6 +349,7 @@ describe("Alert inbox", () => {
     expect(listed.alerts[1]).toEqual({
       id: expect.any(Number), kind: "other_adult_handover", createdAt: NOW, transferId, routeId, markId: body.id,
       passengerName: "Pasajero Sintético 1", driverName: "Chofer Sintético 1", details: { authorized: false, name: "Tía Sintética", dni: "-3000001" },
+      resolution: null,
     });
     expect(await answer(request("/alerts", "GET", undefined, driver.cookie), 403)).toEqual({ error: "Office role required" });
   });

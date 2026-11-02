@@ -1,22 +1,42 @@
-import { describe, expect, it, vi } from "vitest";
-import { newMark, type Mark } from "./Marks";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { newMark, undoMark, type Mark } from "./Marks";
 import {
-  CONFLICT_NOTE, latestMarks, markQueue, requestPersistentStorage, savedPlanFor, signOut, startFlushing, wipeIfRevoked,
+  CONFLICT_NOTE, endedData, latestMarks, markQueue, refusedMarks, requestPersistentStorage, savedPlanFor, signOut, startFlushing, wipeIfRevoked,
   type CachedPlan, type LocalStore, type QueuedMark,
 } from "./offline";
+
+// The Marcas below are made on 2026-10-23; the phone's clock stays on that day unless a test moves it.
+beforeEach(() => {
+  vi.useFakeTimers({ toFake: ["Date"] });
+  vi.setSystemTime(new Date("2026-10-23T15:00:00.000Z"));
+});
+afterEach(() => {
+  vi.useRealTimers();
+});
 
 /** The store contract in memory; the IndexedDB one is exercised by the C3 test in apps/office/e2e/driver-offline.e2e.ts. */
 function memoryStore() {
   const marks = new Map<string, QueuedMark>();
   let plan: CachedPlan | null = null;
+  let epoch: string | null = null;
   const store: LocalStore = {
     marks: async () => [...marks.values()].map((item) => structuredClone(item)),
     putMark: async (item) => void marks.set(item.id, structuredClone(item)),
+    deleteMark: async (id) => void marks.delete(id),
     plan: async () => plan,
     putPlan: async (value) => void (plan = value),
+    epoch: async () => epoch,
+    putEpoch: async (value) => void (epoch = value),
+    wipeEnded: async (today) => {
+      const ended = endedData([...marks.values()], plan, today);
+      if (!ended) return;
+      for (const id of ended.markIds) marks.delete(id);
+      if (ended.plan) plan = null;
+    },
     clear: async () => {
       marks.clear();
       plan = null;
+      epoch = null;
     },
   };
   return { store, marks, getPlan: () => plan };
@@ -128,6 +148,106 @@ describe("Marca queue on the phone", () => {
     await round.flush();
     expect(order).toEqual([low.id, high.id]);
     expect(latestMarks([...other.marks.values()])[3].id).toBe(order.at(-1));
+  });
+
+  it("#81 rule 1: a pending Marca the server refused is never the one in force, even with a later phone time; one not answered yet is", async () => {
+    const { store } = memoryStore();
+    const at = (minute: number, kind: Mark["kind"], n: number) =>
+      newMark({ transferId: 3, kind, location: null, version: 1 }, new Date(`2026-10-23T12:0${minute}:00.000Z`), `00000000-0000-4000-8000-00000000001${n}`);
+    const subio = at(0, "subio", 1);
+    const ausente = at(5, "ausente", 2);
+    const entregado = at(6, "entregado", 3);
+    let answer = async (sent: Mark) => stored(sent);
+    const queue = markQueue(store, async (_routeId, sent) => await answer(sent));
+    await queue.add(9, subio);
+    await queue.flush();
+    answer = async () => json({ error: "This Recorrido is closed" }, 409);
+    await queue.add(9, ausente);
+    await queue.flush();
+
+    let items = await store.marks();
+    expect(latestMarks(items)[3]).toMatchObject({ mark: subio, state: "confirmed" });
+    expect(refusedMarks(items)[3]).toMatchObject({ mark: ausente, state: "pending", note: "This Recorrido is closed" });
+
+    // A Marca saved after the refusal has no answer yet: it is the Chofer's newest, in the order the queue sends it.
+    answer = async () => {
+      throw new TypeError("Failed to fetch");
+    };
+    await queue.add(9, entregado);
+    await queue.flush();
+    items = await store.marks();
+    expect(latestMarks(items)[3]).toMatchObject({ mark: entregado, state: "pending", note: null });
+    expect(refusedMarks(items)[3].mark).toEqual(ausente);
+  });
+
+  it("#81 rule 2: Deshacer of a Marca that never left the phone cancels it, and the API never gets an undo of a Marca it does not hold", async () => {
+    const { store, marks } = memoryStore();
+    const sent: string[] = [];
+    let answer: (body: Mark) => Promise<Response> = async () => {
+      throw new TypeError("Failed to fetch");
+    };
+    let check = async (): Promise<Response> => {
+      throw new TypeError("Failed to fetch");
+    };
+    const queue = markQueue(store, async (_routeId, body) => {
+      sent.push(body.id);
+      return await answer(body);
+    }, async () => await check());
+    const subio = mark(1);
+    const undo = undoMark(subio, 1, null, new Date("2026-10-23T12:02:00.000Z"), "00000000-0000-4000-8000-000000000009");
+
+    // Without signal the session check fails first, so the Subió never left the phone.
+    await queue.add(9, subio);
+    await queue.flush();
+    expect(await queue.undo(9, undo)).toBe("cancelled");
+    expect(marks.size).toBe(0);
+    // A second tap finds nothing left to undo and queues nothing.
+    expect(await queue.undo(9, undo)).toBe("cancelled");
+    expect(marks.size).toBe(0);
+    check = async () => json({ user: { id: 7, role: "driver" } }, 200);
+    answer = async (body) => stored(body);
+    expect(await queue.flush()).toEqual({ result: "done", confirmed: 0 });
+    expect(sent).toEqual([]);
+
+    // A Marca whose send was tried may have reached the server: Deshacer queues the undo, sent only once the server
+    // confirms that Marca, never after a refusal of it.
+    answer = async () => {
+      throw new TypeError("Failed to fetch");
+    };
+    await queue.add(9, subio);
+    await queue.flush();
+    expect(sent).toEqual([subio.id]);
+    expect(await queue.undo(9, undo)).toBe("queued");
+    answer = async () => json({ error: "This Recorrido is closed" }, 409);
+    await queue.flush();
+    expect(sent).toEqual([subio.id, subio.id]);
+    expect(marks.get(undo.id)).toMatchObject({ state: "pending", note: null });
+    answer = async (body) => stored(body);
+    expect(await queue.flush()).toEqual({ result: "done", confirmed: 2 });
+    expect(sent).toEqual([subio.id, subio.id, subio.id, undo.id]);
+  });
+
+  it("#81: Deshacer still works without signal within the 2 minutes: the undo of a confirmed Marca waits on the phone and is sent later", async () => {
+    const { store, marks } = memoryStore();
+    const sent: string[] = [];
+    let online = true;
+    const queue = markQueue(store, async (_routeId, body) => {
+      if (!online) throw new TypeError("Failed to fetch");
+      sent.push(body.id);
+      return stored(body);
+    });
+    const subio = mark(1);
+    await queue.add(9, subio);
+    await queue.flush();
+    online = false;
+    const undo = undoMark(subio, 1, null, new Date("2026-10-23T12:02:30.000Z"), "00000000-0000-4000-8000-000000000009");
+    expect(await queue.undo(9, undo)).toBe("queued");
+    expect(await queue.flush()).toEqual({ result: "offline", confirmed: 0 });
+    expect(latestMarks([...marks.values()])[1]).toMatchObject({ mark: undo, state: "pending" });
+    online = true;
+    expect(await queue.flush()).toEqual({ result: "done", confirmed: 1 });
+    expect(sent).toEqual([subio.id, undo.id]);
+    expect(marks.get(subio.id)).toMatchObject({ state: "confirmed" });
   });
 
   it("rule 1: a 401 when the app opens or loads the plan keeps the queue on an expired session and wipes it only on a revoked device", async () => {
@@ -286,5 +406,128 @@ describe("Cerrar sesión and revocation", () => {
     expect(marks.size).toBe(0);
     expect(getPlan()).toBeNull();
     expect(logout).not.toHaveBeenCalled();
+  });
+});
+
+describe("Server epoch and the end-of-day wipe", () => {
+  const signedInAt = (epoch: string | null) => async () => new Response(JSON.stringify({ user: { id: 7, role: "driver" } }), {
+    status: 200, headers: { "Content-Type": "application/json", ...(epoch ? { "X-Server-Epoch": epoch } : {}) },
+  });
+  const offline = async (): Promise<Response> => {
+    throw new TypeError("Failed to fetch");
+  };
+  const twoDays: CachedPlan = {
+    userId: 7, days: [{ date: "2026-10-23", routes: [] }, { date: "2026-10-24", routes: [] }], handovers: {}, fetchedAt: "2026-10-23T11:00:00.000Z",
+  };
+
+  it("#28 rule 1: the end-of-day wipe never runs while a Marca on the phone is unconfirmed, and keeps the day's confirmed Marcas", async () => {
+    const { store, marks, getPlan } = memoryStore();
+    await store.putPlan(twoDays);
+    let answer: (body: Mark) => Promise<Response> = async (body) => stored(body);
+    const queue = markQueue(store, async (_routeId, body) => await answer(body), signedInAt("epoch"));
+    await queue.add(9, mark(1));
+    await queue.flush();
+    answer = offline;
+    await queue.add(9, mark(2));
+    await queue.flush();
+
+    // The day is over, but the Ausente of the 23rd is still only on the phone: nothing is wiped, without signal or after a refusal.
+    vi.setSystemTime(new Date("2026-10-25T15:00:00.000Z"));
+    expect(await queue.flush()).toEqual({ result: "offline", confirmed: 0 });
+    answer = async () => json({ error: "This Recorrido is closed" }, 409);
+    expect(await queue.flush()).toEqual({ result: "done", confirmed: 0 });
+    expect([...marks.keys()]).toEqual([mark(1).id, mark(2).id]);
+    expect(marks.get(mark(2).id)).toMatchObject({ state: "pending", note: "This Recorrido is closed" });
+    expect(getPlan()).toEqual(twoDays);
+
+    // Back on the 24th with every Marca confirmed: the 23rd's Marcas go, the plan stays while one of its days is today.
+    vi.setSystemTime(new Date("2026-10-24T15:00:00.000Z"));
+    const today = newMark({ transferId: 5, kind: "subio", location: null, version: 1 }, new Date(), "00000000-0000-4000-8000-000000000024");
+    answer = async (body) => stored(body);
+    await queue.add(9, today);
+    expect(await queue.flush()).toEqual({ result: "done", confirmed: 2 });
+    expect([...marks.keys()]).toEqual([today.id]);
+    expect(marks.get(today.id)).toMatchObject({ state: "confirmed" });
+    expect(getPlan()).toEqual(twoDays);
+
+    // Once every day of the plan is over, the plan and the 24th's confirmed Marca are wiped too.
+    vi.setSystemTime(new Date("2026-10-25T15:00:00.000Z"));
+    expect(await queue.flush()).toEqual({ result: "done", confirmed: 0 });
+    expect(marks.size).toBe(0);
+    expect(getPlan()).toBeNull();
+  });
+
+  it("#28 rule 2: only a revoked-device response wipes the phone before its Marcas are confirmed", async () => {
+    const { store, marks, getPlan } = memoryStore();
+    await store.putPlan(twoDays);
+    await markQueue(store, offline).add(9, mark(1));
+    // The day is over, so only the unconfirmed Marca keeps the end-of-day wipe from running.
+    vi.setSystemTime(new Date("2026-10-25T15:00:00.000Z"));
+    const expired = async () => json({ error: "Authentication required", code: "session_expired" }, 401);
+    const results = [
+      await markQueue(store, offline, signedInAt("epoch")).flush(),
+      await markQueue(store, async () => json({}, 200), expired).flush(),
+      await markQueue(store, expired, signedInAt("epoch")).flush(),
+      await markQueue(store, async () => json({ error: "This Recorrido belongs to another Chofer" }, 403), signedInAt("epoch")).flush(),
+      await markQueue(store, async () => json({}, 200), async () => new Response(null, { status: 500 })).flush(),
+    ].map((outcome) => outcome.result);
+    expect(results).toEqual(["offline", "signed_out", "signed_out", "done", "done"]);
+    expect(await signOut(store, markQueue(store, offline, expired), { session: expired, logout: async () => new Response(null, { status: 204 }) }))
+      .toEqual({ result: "expired" });
+    expect(marks.get(mark(1).id)).toMatchObject({ state: "pending", mark: mark(1) });
+    expect(getPlan()).toEqual(twoDays);
+
+    const revoked = async () => json({ error: "Authentication required", code: "session_revoked" }, 401);
+    expect(await markQueue(store, offline, revoked).flush()).toEqual({ result: "revoked", confirmed: 0 });
+    expect(marks.size).toBe(0);
+    expect(getPlan()).toBeNull();
+  });
+
+  it("#28: a response with another server epoch makes the phone send the day's confirmed Marcas again, once, in the order the server stored them", async () => {
+    const { store, marks } = memoryStore();
+    const sent: string[] = [];
+    let online = true;
+    let check = signedInAt("epoch-one");
+    const asked = vi.fn(async () => await check());
+    const queue = markQueue(store, async (_routeId, body) => {
+      if (!online) throw new TypeError("Failed to fetch");
+      sent.push(body.id);
+      return stored(body);
+    }, asked);
+    // A phone holding no Marca asks the server nothing.
+    expect(await queue.flush()).toEqual({ result: "done", confirmed: 0 });
+    expect(asked).not.toHaveBeenCalled();
+
+    const subio = mark(1);
+    const undo = undoMark(subio, 1, null, new Date("2026-10-23T12:02:00.000Z"), "00000000-0000-4000-8000-000000000009");
+    await queue.add(9, subio);
+    await queue.flush();
+    expect(await queue.undo(9, undo)).toBe("queued");
+    await queue.flush();
+    expect(sent).toEqual([subio.id, undo.id]);
+    // The same epoch, or an answer without one, sends nothing again.
+    expect(await queue.flush()).toEqual({ result: "done", confirmed: 0 });
+    check = signedInAt(null);
+    expect(await queue.flush()).toEqual({ result: "done", confirmed: 0 });
+    expect(sent).toEqual([subio.id, undo.id]);
+
+    // The server was restored from a backup: its epoch changed. Without signal the Marcas wait on the phone as unconfirmed.
+    check = signedInAt("epoch-two");
+    online = false;
+    expect(await queue.flush()).toEqual({ result: "offline", confirmed: 0 });
+    expect([...marks.values()].map((item) => [item.id, item.state, item.sent])).toEqual([[subio.id, "pending", true], [undo.id, "pending", true]]);
+    expect(latestMarks([...marks.values()])[1]).toMatchObject({ mark: undo, state: "pending" });
+
+    // The app opens again with signal: the Subió goes before its Deshacer, and nothing is sent a second time.
+    online = true;
+    const reopened = markQueue(store, async (_routeId, body) => {
+      sent.push(body.id);
+      return stored(body);
+    }, asked);
+    expect(await reopened.flush()).toEqual({ result: "done", confirmed: 2 });
+    expect(sent).toEqual([subio.id, undo.id, subio.id, undo.id]);
+    expect([...marks.values()].map((item) => item.state)).toEqual(["confirmed", "confirmed"]);
+    expect(await reopened.flush()).toEqual({ result: "done", confirmed: 0 });
+    expect(sent).toHaveLength(4);
   });
 });
