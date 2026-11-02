@@ -3061,6 +3061,44 @@ export function createApp({ db, routing, router, geocoder, solver, travelTime, c
       });
       return found ? context.body(null, 204) : context.json({ error: "Session not found" }, 404);
     })
+    // After revoking a lost or stolen phone, the Traslados of that Chofer today with no Marca in force on the server: what the
+    // Oficina has to rebuild. The phone's queue is never read; an account without Recorridos has none.
+    .get("/users/:id/unconfirmed-transfers", async (context) => {
+      const actor = await requireOffice(context);
+      if (actor instanceof Response) return actor;
+      const id = parseId(context.req.param("id"));
+      if (!id) return context.json({ error: "Invalid request" }, 400);
+      const exists = await db.query("SELECT id FROM users WHERE id = $1", [id]) as QueryResult;
+      if (!exists.rows.length) return context.json({ error: "User not found" }, 404);
+      const [date] = driverDays(now());
+      // Each Recorrido as its latest Versión del plan, the one the Chofer's phone shows.
+      const result = await db.query(
+        `SELECT t.id AS transfer_id, latest.route_id, p.name AS passenger_name, t.direction, to_char(t.target_time, 'HH24:MI') AS target_time,
+                d.name AS destination_name
+           FROM (SELECT DISTINCT ON (pv.route_id) pv.id, pv.route_id, pv.driver_id
+                   FROM plan_versions pv JOIN routes r ON r.id = pv.route_id JOIN daily_plans dp ON dp.id = r.daily_plan_id
+                  WHERE dp.plan_date = $2 ORDER BY pv.route_id, pv.version DESC) latest
+           JOIN drivers dr ON dr.id = latest.driver_id
+           JOIN plan_version_transfers pvt ON pvt.plan_version_id = latest.id
+           JOIN transfers t ON t.id = pvt.transfer_id
+           JOIN passengers p ON p.id = t.passenger_id
+           JOIN destinations d ON d.id = t.destination_id
+          WHERE dr.user_id = $1 AND t.status = 'planificado'
+          ORDER BY t.target_time, t.id`,
+        [id, date],
+      ) as QueryResult;
+      return context.json({
+        date,
+        transfers: result.rows.map((row) => ({
+          transferId: Number(row.transfer_id),
+          routeId: Number(row.route_id),
+          passengerName: String(row.passenger_name),
+          direction: String(row.direction),
+          targetTime: String(row.target_time),
+          destinationName: String(row.destination_name),
+        })),
+      });
+    })
     .get("/destinations", async (context) => {
       const user = await requireOffice(context);
       if (user instanceof Response) return user;

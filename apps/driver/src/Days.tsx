@@ -4,8 +4,8 @@ import {
   type Handover, type Mark, type MarkKind, type Receiver,
 } from "./Marks";
 import {
-  indexedDbStore, latestMarks, markQueue, requestPersistentStorage, savedPlanFor, startFlushing, wipeIfRevoked, type CachedPlan,
-  type QueuedMark,
+  indexedDbStore, latestMarks, markQueue, requestPersistentStorage, savedPlanFor, signOut, startFlushing, wipeIfRevoked, type CachedPlan,
+  type QueuedMark, type SignOutOutcome,
 } from "./offline";
 
 export type DriverStop = {
@@ -274,6 +274,15 @@ export function DayView({ title, day, sending, onAcknowledge, marking }: {
   </section>;
 }
 
+/** Why "Cerrar sesión" left the session open. */
+export function signOutRefusal(outcome: SignOutOutcome) {
+  if (outcome.result !== "refused") return "Unable to reach the server: the session is still open";
+  const marks = outcome.pending === 1 ? "1 Marca is" : `${outcome.pending} Marcas are`;
+  return outcome.offline
+    ? `No signal: ${marks} saved only on this phone. Cerrar sesión once the server confirms them.`
+    : `${marks} not confirmed by the server yet. Cerrar sesión once the server confirms them.`;
+}
+
 /** The handover data of every home drop-off in the plan, so the handover rule works without signal; failures are skipped. */
 async function downloadHandovers(apiUrl: string, days: DriverDay[]) {
   const handovers: Record<number, Handover> = {};
@@ -293,7 +302,8 @@ async function downloadHandovers(apiUrl: string, days: DriverDay[]) {
 /**
  * Today's and tomorrow's Recorridos, fetched on open and on focus and saved on the phone, which shows the saved plan
  * without signal. Marcas go to the queue first and are sent on open, when the connection returns and when the app
- * becomes visible. A 401 sends the Chofer back to sign-in; a revoked device also wipes the phone.
+ * becomes visible. A 401 sends the Chofer back to sign-in; a revoked device also wipes the phone. "Cerrar sesión" sends
+ * the queue first and keeps the session open while a Marca is not confirmed.
  */
 export function DriverHome({ apiUrl, userId, onSignedOut }: { apiUrl: string; userId: number; onSignedOut: () => void }) {
   const [plan, setPlan] = useState<CachedPlan | null>(null);
@@ -305,7 +315,8 @@ export function DriverHome({ apiUrl, userId, onSignedOut }: { apiUrl: string; us
   const [handover, setHandover] = useState<Marking["handover"]>(null);
   const [refusedClose, setRefusedClose] = useState<Marking["refusedClose"]>(null);
   const [store] = useState(() => indexedDbStore());
-  const [queue] = useState(() => markQueue(store, (routeId, mark) => sendMark(apiUrl, routeId, mark)));
+  const [session] = useState(() => () => fetch(`${apiUrl}/auth/me`, { credentials: "include" }));
+  const [queue] = useState(() => markQueue(store, (routeId, mark) => sendMark(apiUrl, routeId, mark), session));
   const latestLoad = useRef(0);
   const signedOut = useRef(onSignedOut);
   signedOut.current = onSignedOut;
@@ -381,6 +392,28 @@ export function DriverHome({ apiUrl, userId, onSignedOut }: { apiUrl: string; us
   }, [store, userId, refreshLocal]);
   useEffect(() => startRefetching(window, document, () => void load()), [load]);
   useEffect(() => startFlushing(window, document, () => void flush()), [flush]);
+
+  async function closeSession() {
+    setSending(true);
+    try {
+      const outcome = await signOut(store, queue, {
+        session,
+        logout: () => fetch(`${apiUrl}/auth/logout`, { method: "POST", credentials: "include" }),
+      });
+      if (outcome.result === "revoked") {
+        setPlan(null);
+        setLocal([]);
+      } else {
+        await refreshLocal();
+      }
+      if (outcome.result === "refused" || outcome.result === "unreachable") return setMessage(signOutRefusal(outcome));
+      signedOut.current();
+    } catch {
+      setMessage("The phone could not check its Marcas: the session is still open");
+    } finally {
+      setSending(false);
+    }
+  }
 
   async function acknowledge(routeId: number, version: number) {
     setSending(true);
@@ -491,6 +524,7 @@ export function DriverHome({ apiUrl, userId, onSignedOut }: { apiUrl: string; us
   const [today] = driverDays();
   const days = plan ? visibleDays(plan.days) : null;
   return <>
+    <button type="button" disabled={sending} onClick={() => void closeSession()}>Cerrar sesión</button>
     {loadError && <p role="alert">{loadError}</p>}
     {message && <p role="status">{message}</p>}
     {days

@@ -136,7 +136,7 @@ function UsersPage() {
         </form>
         <button type="button" onClick={() => void disableUser(user.id)}>Disable user</button>
         {user.role === "office" && <PersistentSessionToggle userId={user.id} persistent={user.persistent_session} />}
-        <DeviceSessions userId={user.id} />
+        <DeviceSessions userId={user.id} driver={user.role === "driver"} />
       </>}
     </li>)}</ul>
   </main>;
