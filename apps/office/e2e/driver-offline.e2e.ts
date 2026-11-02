@@ -244,6 +244,26 @@ test("marks without signal, keeps the Marcas through a reload and confirms each 
   expect(await storedMarks(seeded.transferId)).toEqual(marks);
 });
 
+test("Deshacer without signal of a Marca that never left the phone cancels it there, so the server gets neither the Marca nor an undo", async ({ context, page }) => {
+  await markWithoutSignal(context, page);
+  const sentMarks: string[] = [];
+  page.on("request", (request) => {
+    if (request.method() === "POST" && request.url().includes("/marks")) sentMarks.push(request.url());
+  });
+
+  await page.getByRole("button", { name: "Deshacer" }).click();
+  await expect(page.getByText("Marca removed from the phone: it is not sent")).toBeVisible();
+  await expect(page.getByText("Saved on phone", { exact: true })).toHaveCount(0);
+  await expect(page.getByRole("button", { name: "Subió" })).toBeVisible();
+  expect(await savedOnPhone(page)).toEqual({ marks: 0, plan: true });
+
+  await regainSignal(context);
+  await page.reload();
+  await expect(page.getByRole("button", { name: "Subió" })).toBeVisible();
+  expect(sentMarks).toEqual([]);
+  expect(await storedMarks(seeded.transferId)).toEqual([]);
+});
+
 test("Cerrar sesión refuses without signal while a Marca is only on the phone, and ends the session once the server stored it", async ({ context, page }) => {
   await markWithoutSignal(context, page);
 
