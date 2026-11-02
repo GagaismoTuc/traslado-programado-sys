@@ -16,11 +16,11 @@ type Publication = { version?: { version: number }; error?: string; violations?:
 
 /**
  * Which Trasbordo the Oficina can record on a Traslado: a planned one on a Planificado Traslado without one, a handover
- * of a Pasajero on board unless their leg already started at a Trasbordo; otherwise none.
+ * of a Pasajero on board, also when their leg already started at a Trasbordo; otherwise none.
  */
 export function trasbordoMode(transfer: TrasbordoTransfer): "planned" | "handover" | null {
   if (transfer.status === "planificado" && !transfer.trasbordo && !transfer.chainedToTransferId) return "planned";
-  if (transfer.status === "subio" && transfer.trasbordo?.stop !== "pickup") return "handover";
+  if (transfer.status === "subio") return "handover";
   return null;
 }
 

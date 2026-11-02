@@ -724,6 +724,10 @@ function parseExitTime(value: unknown, originDestinationId: unknown, targetTime:
   return exitTime && exitTime < targetTime ? { exitTime } : { error: EXIT_TIME_REQUIRED };
 }
 
+// A leg that started at a Trasbordo and was handed over again (a chain of three or more legs) ends where its next leg
+// starts: its drop-off is a Trasbordo end at that leg's point and time. Joins that next leg as `nx` of the transfers row `t`.
+const NEXT_LEG_JOIN_SQL = "LEFT JOIN transfers nx ON nx.chained_from_transfer_id = t.id AND t.trasbordo_stop = 'pickup'";
+
 const TRANSFER_SELECT_SQL = `
   SELECT
     t.id,
@@ -834,7 +838,7 @@ const STOP_SELECT_SQL = `
     to_char(s.planned_time, 'HH24:MI') AS "plannedTime",
     p.name AS "passengerName",
     CASE
-      WHEN s.kind = t.trasbordo_stop THEN 'Trasbordo'
+      WHEN s.kind = t.trasbordo_stop OR (s.kind = 'dropoff' AND nx.id IS NOT NULL) THEN 'Trasbordo'
       WHEN s.kind = 'pickup' AND t.direction = 'entrada' THEN o.name
       WHEN s.kind = 'pickup' OR t.direction = 'entrada' THEN d.name
     END AS "placeName"
@@ -843,6 +847,7 @@ const STOP_SELECT_SQL = `
   JOIN passengers p ON p.id = t.passenger_id
   JOIN destinations d ON d.id = t.destination_id
   LEFT JOIN destinations o ON o.id = t.origin_destination_id
+  ${NEXT_LEG_JOIN_SQL}
 `;
 
 async function findPlanId(client: Queryable, date: string) {
@@ -1105,21 +1110,25 @@ const ORDER_TRANSFERS_SQL = `
          p.dropoff_duration_minutes, d.latitude AS d_lat, d.longitude AS d_lng, d.arrival_tolerance_minutes,
          o.latitude AS o_lat, o.longitude AS o_lng, t.trasbordo_stop, t.trasbordo_latitude, t.trasbordo_longitude,
          EXTRACT(EPOCH FROM t.trasbordo_time) / 60 AS trasbordo_minutes, ${rideStartMinutesSql()} AS ride_start_minutes,
+         nx.trasbordo_latitude AS next_trasbordo_latitude, nx.trasbordo_longitude AS next_trasbordo_longitude,
          ARRAY(SELECT feature_id FROM passenger_required_features f WHERE f.passenger_id = p.id ORDER BY feature_id) AS feature_ids
     FROM stops s
     JOIN transfers t ON t.id = s.transfer_id
     JOIN passengers p ON p.id = t.passenger_id
     JOIN destinations d ON d.id = t.destination_id
     LEFT JOIN destinations o ON o.id = t.origin_destination_id
+    ${NEXT_LEG_JOIN_SQL}
    WHERE s.route_id = $1 AND s.kind = 'pickup'
    ORDER BY s.position`;
 
 // Where the last Parada of a Recorrido is, its Traslado and when its service ends (null while it has no planned time).
 const LAST_STOP_SQL = `
   SELECT s.transfer_id,
-         CASE WHEN s.kind = t.trasbordo_stop THEN t.trasbordo_latitude
+         CASE WHEN s.kind = 'dropoff' AND nx.id IS NOT NULL THEN nx.trasbordo_latitude
+              WHEN s.kind = t.trasbordo_stop THEN t.trasbordo_latitude
               WHEN (s.kind = 'pickup') = (t.direction = 'entrada') THEN COALESCE(o.latitude, p.home_latitude) ELSE d.latitude END AS lat,
-         CASE WHEN s.kind = t.trasbordo_stop THEN t.trasbordo_longitude
+         CASE WHEN s.kind = 'dropoff' AND nx.id IS NOT NULL THEN nx.trasbordo_longitude
+              WHEN s.kind = t.trasbordo_stop THEN t.trasbordo_longitude
               WHEN (s.kind = 'pickup') = (t.direction = 'entrada') THEN COALESCE(o.longitude, p.home_longitude) ELSE d.longitude END AS lng,
          EXTRACT(EPOCH FROM s.planned_time) / 60
            + CASE s.kind WHEN 'pickup' THEN p.pickup_duration_minutes ELSE p.dropoff_duration_minutes END AS planned_end
@@ -1128,6 +1137,7 @@ const LAST_STOP_SQL = `
     JOIN passengers p ON p.id = t.passenger_id
     JOIN destinations d ON d.id = t.destination_id
     LEFT JOIN destinations o ON o.id = t.origin_destination_id
+    ${NEXT_LEG_JOIN_SQL}
    WHERE s.route_id = $1
    ORDER BY s.position DESC
    LIMIT 1`;
@@ -1193,6 +1203,9 @@ function resolveRouteEnds(route: Record<string, unknown>, { previous, last, next
 }
 
 function stopLocation(row: Record<string, unknown>, kind: "pickup" | "dropoff"): LngLat {
+  if (kind === "dropoff" && row.next_trasbordo_latitude !== null && row.next_trasbordo_latitude !== undefined) {
+    return lngLat(row.next_trasbordo_latitude, row.next_trasbordo_longitude);
+  }
   if (row.trasbordo_stop === kind) return lngLat(row.trasbordo_latitude, row.trasbordo_longitude);
   const home = lngLat(row.home_latitude, row.home_longitude);
   const destination = lngLat(row.d_lat, row.d_lng);
@@ -1285,15 +1298,17 @@ type Point = { lat: number; lng: number };
 
 // Where a Parada is: an entrada is picked up at its origin Destino or at home and dropped at its Destino;
 // a salida is picked up at its Destino and dropped at home. Expects aliases t (transfers), p (passengers),
-// d (destinations) and o (origin destinations), and the Parada kind as `kindSql`.
+// d (destinations), o (origin destinations) and nx (NEXT_LEG_JOIN_SQL), and the Parada kind as `kindSql`.
 function stopPointSql(kindSql: string) {
   const home = `${kindSql} = 'pickup' AND t.direction = 'entrada'`;
   return `
-    CASE WHEN ${kindSql} = t.trasbordo_stop THEN t.trasbordo_latitude
+    CASE WHEN ${kindSql} = 'dropoff' AND nx.id IS NOT NULL THEN nx.trasbordo_latitude
+         WHEN ${kindSql} = t.trasbordo_stop THEN t.trasbordo_latitude
          WHEN ${home} THEN COALESCE(o.latitude, p.home_latitude)
          WHEN ${kindSql} = 'dropoff' AND t.direction = 'salida' THEN p.home_latitude
          ELSE d.latitude END AS lat,
-    CASE WHEN ${kindSql} = t.trasbordo_stop THEN t.trasbordo_longitude
+    CASE WHEN ${kindSql} = 'dropoff' AND nx.id IS NOT NULL THEN nx.trasbordo_longitude
+         WHEN ${kindSql} = t.trasbordo_stop THEN t.trasbordo_longitude
          WHEN ${home} THEN COALESCE(o.longitude, p.home_longitude)
          WHEN ${kindSql} = 'dropoff' AND t.direction = 'salida' THEN p.home_longitude
          ELSE d.longitude END AS lng,
@@ -1304,7 +1319,8 @@ const TRANSFER_PLACES_SQL = `
   JOIN transfers t ON t.id = s.transfer_id
   JOIN passengers p ON p.id = t.passenger_id
   JOIN destinations d ON d.id = t.destination_id
-  LEFT JOIN destinations o ON o.id = t.origin_destination_id`;
+  LEFT JOIN destinations o ON o.id = t.origin_destination_id
+  ${NEXT_LEG_JOIN_SQL}`;
 
 type PublicationStop = {
   transferId: number;
@@ -1406,7 +1422,7 @@ async function loadPublicationSnapshot(client: Queryable, routeId: number): Prom
   if (!row) throw new PlanningError(404, "Recorrido not found");
   const stopResult = await client.query(
     `SELECT s.transfer_id AS "transferId", s.kind, ${stopPointSql("s.kind")},
-            CASE WHEN s.kind = t.trasbordo_stop THEN (
+            CASE WHEN s.kind = t.trasbordo_stop OR (s.kind = 'dropoff' AND nx.id IS NOT NULL) THEN (
               SELECT EXTRACT(EPOCH FROM (m.phone_time AT TIME ZONE '${LOCAL_TIME_ZONE}')::time) / 60 FROM marks m
                WHERE m.transfer_id = t.id AND m.kind = CASE s.kind WHEN 'pickup' THEN 'subio' ELSE 'entregado' END
                ORDER BY m.phone_time DESC, m.id DESC LIMIT 1) END AS "handoverMinutes"
@@ -1426,17 +1442,18 @@ async function loadPublicationSnapshot(client: Queryable, routeId: number): Prom
                  ELSE COALESCE(o.latitude, CASE WHEN t.direction = 'entrada' THEN p.home_latitude ELSE d.latitude END) END AS "fromLat",
             CASE WHEN t.trasbordo_stop = 'pickup' THEN t.trasbordo_longitude
                  ELSE COALESCE(o.longitude, CASE WHEN t.direction = 'entrada' THEN p.home_longitude ELSE d.longitude END) END AS "fromLng",
-            CASE WHEN t.trasbordo_stop = 'dropoff' THEN t.trasbordo_latitude
+            CASE WHEN nx.id IS NOT NULL THEN nx.trasbordo_latitude WHEN t.trasbordo_stop = 'dropoff' THEN t.trasbordo_latitude
                  WHEN t.direction = 'entrada' THEN d.latitude ELSE p.home_latitude END AS "toLat",
-            CASE WHEN t.trasbordo_stop = 'dropoff' THEN t.trasbordo_longitude
+            CASE WHEN nx.id IS NOT NULL THEN nx.trasbordo_longitude WHEN t.trasbordo_stop = 'dropoff' THEN t.trasbordo_longitude
                  WHEN t.direction = 'entrada' THEN d.longitude ELSE p.home_longitude END AS "toLng"
        FROM transfers t
        JOIN passengers p ON p.id = t.passenger_id
        JOIN destinations d ON d.id = t.destination_id
        LEFT JOIN destinations o ON o.id = t.origin_destination_id
+       ${NEXT_LEG_JOIN_SQL}
        LEFT JOIN passenger_required_features rf ON rf.passenger_id = p.id
       WHERE t.id IN (SELECT transfer_id FROM stops WHERE route_id = $1)
-      GROUP BY t.id, p.id, d.id, o.id ORDER BY t.id`,
+      GROUP BY t.id, p.id, d.id, o.id, nx.id ORDER BY t.id`,
     [routeId],
   ) as QueryResult;
   return {
@@ -1737,7 +1754,9 @@ async function loadDriverDay(client: Queryable, driverId: number, date: string) 
   const legs = await client.query(
     `SELECT l.plan_version_id, l.position, l.kind, to_char(l.planned_time, 'HH24:MI') AS planned_time, l.transfer_id, t.direction,
             t.status, t.destination_id, t.origin_destination_id, pvt.companions, p.name, p.home_address, p.access_notes AS home_notes, p.wheelchair, p.medical_alert,
-            t.trasbordo_stop, t.trasbordo_latitude, t.trasbordo_longitude,
+            CASE WHEN l.kind = 'dropoff' AND nx.id IS NOT NULL THEN 'dropoff' ELSE t.trasbordo_stop END AS trasbordo_stop,
+            CASE WHEN l.kind = 'dropoff' AND nx.id IS NOT NULL THEN nx.trasbordo_latitude ELSE t.trasbordo_latitude END AS trasbordo_latitude,
+            CASE WHEN l.kind = 'dropoff' AND nx.id IS NOT NULL THEN nx.trasbordo_longitude ELSE t.trasbordo_longitude END AS trasbordo_longitude,
             d.name AS d_name, d.address AS d_address, d.access_notes AS d_notes,
             o.name AS o_name, o.address AS o_address, o.access_notes AS o_notes
        FROM plan_version_legs l
@@ -1746,6 +1765,7 @@ async function loadDriverDay(client: Queryable, driverId: number, date: string) 
        JOIN passengers p ON p.id = t.passenger_id
        JOIN destinations d ON d.id = t.destination_id
        LEFT JOIN destinations o ON o.id = t.origin_destination_id
+       ${NEXT_LEG_JOIN_SQL}
       WHERE l.plan_version_id = ANY($1::int[]) ORDER BY l.plan_version_id, l.position`,
     [versions.rows.map((row) => Number(row.id))],
   ) as QueryResult;
@@ -1954,11 +1974,21 @@ function formatMarkReceiver(row: Record<string, unknown>): MarkReceiver | null {
   }
 }
 
-/** The Receptor as the history shows it: an Adulto autorizado or a Destino also by name, the adult with their relation. */
+/** Only the last 3 digits of a DNI, without its dots and spaces; a DNI with fewer than 4 digits gives none of them. */
+function maskDni(dni: string) {
+  const digits = normalizeDni(dni);
+  return digits.length < 4 ? "***" : `***${digits.slice(-3)}`;
+}
+
+/**
+ * The Receptor as the history shows it: an Adulto autorizado or a Destino also by name, the adult with their relation,
+ * another adult with a masked DNI. The Marca keeps the whole DNI, and the alerts still show it.
+ */
 function historyReceiver(receiver: MarkReceiver | null, row: Record<string, unknown>) {
   switch (receiver?.kind) {
     case "authorized_adult": return { ...receiver, name: String(row.receiver_adult_name), relation: String(row.receiver_relation) };
     case "destination": return { ...receiver, name: String(row.receiver_destination_name) };
+    case "other_adult": return { ...receiver, dni: maskDni(receiver.dni) };
     default: return receiver;
   }
 }
@@ -2640,8 +2670,9 @@ export function createApp({ db, routing, router, geocoder, solver, travelTime, c
    * A Trasbordo: the Pasajero on board (Subió) on leg A is handed to the Chofer of Recorrido `toRouteId` at `point`, now.
    * It records, linked, an Entregado to that Chofer (Receptor kind driver) in A's Recorrido and a Subió of leg B in the
    * receiving one, at the same place and time. A planned Trasbordo already has leg B there; otherwise (a breakdown) leg B
-   * is created, from the point to A's destination, in the receiving Recorrido after its done Paradas. Repeating the same
-   * Trasbordo returns the recorded one (`created: false`).
+   * is created, from the point to A's destination, in the receiving Recorrido after its done Paradas. Leg A may itself have
+   * started at a Trasbordo: the chain then gets one more leg. Repeating the same Trasbordo returns the recorded one
+   * (`created: false`).
    */
   async function recordTrasbordo(client: Queryable, actor: AuthenticatedUser, transferId: number, toRouteId: number, point: Point | null) {
     const leg = (await client.query(
@@ -2659,7 +2690,6 @@ export function createApp({ db, routing, router, geocoder, solver, travelTime, c
       return { created: false, fromRouteId: Number(leg.route_id), legBId: Number(next.id), marks: await trasbordoMarks(client, Number(next.id)) };
     }
     if (leg.status !== "subio") throw new PlanningError(409, "Only a Pasajero on board (Subió) can be handed over in a Trasbordo");
-    if (leg.trasbordo_stop === "pickup") throw new PlanningError(409, "This Traslado already started at a Trasbordo: it cannot be handed over again");
     if (next && Number(next.route_id) !== toRouteId) throw new PlanningError(409, "The planned Trasbordo of this Traslado hands it over in another Recorrido");
     const fromRouteId = Number(leg.route_id);
     if (fromRouteId === toRouteId) throw new PlanningError(409, "A Trasbordo hands the Pasajero over to another Recorrido");
@@ -2686,10 +2716,13 @@ export function createApp({ db, routing, router, geocoder, solver, travelTime, c
       await client.query("UPDATE transfers SET trasbordo_latitude = $3, trasbordo_longitude = $4 WHERE id IN ($1, $2)", [transferId, legBId, place.lat, place.lng]);
     } else {
       const localTime = new Intl.DateTimeFormat("en-GB", { timeZone: LOCAL_TIME_ZONE, hour: "2-digit", minute: "2-digit", second: "2-digit", hourCycle: "h23" }).format(at);
-      await client.query(
-        "UPDATE transfers SET trasbordo_stop = 'dropoff', trasbordo_latitude = $2, trasbordo_longitude = $3, trasbordo_time = $4 WHERE id = $1",
-        [transferId, place.lat, place.lng, localTime],
-      );
+      // A leg that started at a Trasbordo keeps that end: it now ends where the new leg starts (NEXT_LEG_JOIN_SQL).
+      if (leg.trasbordo_stop !== "pickup") {
+        await client.query(
+          "UPDATE transfers SET trasbordo_stop = 'dropoff', trasbordo_latitude = $2, trasbordo_longitude = $3, trasbordo_time = $4 WHERE id = $1",
+          [transferId, place.lat, place.lng, localTime],
+        );
+      }
       legBId = Number((await client.query(
         `INSERT INTO transfers (daily_plan_id, passenger_id, direction, destination_id, target_time, companions,
                                 chained_from_transfer_id, trasbordo_stop, trasbordo_latitude, trasbordo_longitude, trasbordo_time)
@@ -4703,7 +4736,7 @@ export function createApp({ db, routing, router, geocoder, solver, travelTime, c
       }
     })
     // Everything that happened to a Traslado: its planned times in each Versión del plan, every Marca and Corrección with
-    // who made it, and the Oficina's changes, each with its actor.
+    // who made it, and the Oficina's changes, each with its actor; with the Marcas of every leg of its Trasbordo chain.
     .get("/transfers/:id/history", async (context) => {
       const actor = await requireOffice(context);
       if (actor instanceof Response) return actor;
@@ -4722,13 +4755,32 @@ export function createApp({ db, routing, router, geocoder, solver, travelTime, c
           WHERE pvt.transfer_id = $1 ORDER BY pv.published_at, pv.id`,
         [id],
       ) as QueryResult;
-      const marks = await db.query(
+      // The legs of its Trasbordo chain, first to last: back to the first leg, then forward through the legs chained to it.
+      const chain = (await db.query(
+        `WITH RECURSIVE back(id, previous) AS (
+           SELECT id, chained_from_transfer_id FROM transfers WHERE id = $1
+           UNION ALL SELECT t.id, t.chained_from_transfer_id FROM transfers t JOIN back ON t.id = back.previous),
+         forward(id, n) AS (
+           SELECT id, 1 FROM back WHERE previous IS NULL
+           UNION ALL SELECT t.id, forward.n + 1 FROM transfers t JOIN forward ON t.chained_from_transfer_id = forward.id)
+         SELECT id FROM forward ORDER BY n`,
+        [id],
+      ) as QueryResult).rows.map((row) => Number(row.id));
+      const chainMarks = await db.query(
         `SELECT h.*, ra.name AS receiver_adult_name, ra.relation AS receiver_relation, rd.name AS receiver_destination_name
-           FROM (${MARK_SELECT_SQL} WHERE m.transfer_id = $1) h
+           FROM (${MARK_SELECT_SQL} WHERE m.transfer_id = ANY($1::int[])) h
            LEFT JOIN authorized_adults ra ON ra.id = h.receiver_adult_id LEFT JOIN destinations rd ON rd.id = h.receiver_destination_id
           ORDER BY h.id`,
-        [id],
+        [chain],
       ) as QueryResult;
+      const historyMarks = (transferId: number) => chainMarks.rows.filter((row) => Number(row.transfer_id) === transferId).map((row) => {
+        const mark = formatMark(row);
+        return {
+          ...mark,
+          receiver: historyReceiver(mark.receiver, row),
+          author: { userId: Number(row.author_user_id), username: String(row.author_username), role: String(row.author_role) },
+        };
+      });
       const changes = await db.query(
         `SELECT cl.action, cl.before_data, cl.after_data, cl.occurred_at, cl.actor_user_id, cl.actor_label, u.username
            FROM change_log cl LEFT JOIN users u ON u.id = cl.actor_user_id
@@ -4747,14 +4799,9 @@ export function createApp({ db, routing, router, geocoder, solver, travelTime, c
           pickupTime: (row.pickup as string | null) ?? null,
           dropoffTime: (row.dropoff as string | null) ?? null,
         })),
-        marks: marks.rows.map((row) => {
-          const mark = formatMark(row);
-          return {
-            ...mark,
-            receiver: historyReceiver(mark.receiver, row),
-            author: { userId: Number(row.author_user_id), username: String(row.author_username), role: String(row.author_role) },
-          };
-        }),
+        marks: historyMarks(id),
+        // A leg of a Trasbordo: every leg of the chain, first to last, with its Marcas.
+        ...(chain.length > 1 ? { chain: chain.map((transferId) => ({ transferId, marks: historyMarks(transferId) })) } : {}),
         changes: changes.rows.map((row) => ({
           action: String(row.action),
           before: row.before_data,

@@ -31,7 +31,6 @@ describe("Trasbordo in the Plan diario", () => {
   // AC1 / AC2: a Pasajero on board is handed over to another Recorrido's Chofer; the receiving Recorrido may need forcing.
   it("offers the handover of a Pasajero on board and says whether the receiving Recorrido was published", () => {
     expect(trasbordoMode(transfer(1, { status: "subio" }))).toBe("handover");
-    expect(trasbordoMode(transfer(2, { status: "subio", trasbordo: { stop: "pickup", ...point } }))).toBe(null);
     const breakdown = renderToStaticMarkup(<TrasbordoForm transfer={transfer(1, { status: "subio" })} mode="handover" routes={routes} />);
     expect(breakdown).toMatch(/<select[^>]*name="routeId"[^>]*required=""|<select[^>]*required=""[^>]*name="routeId"/);
     expect(breakdown).toMatch(/<input[^>]*required=""[^>]*name="lat" value=""/);

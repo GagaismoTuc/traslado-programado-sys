@@ -44,19 +44,36 @@ describe("Traslado history", () => {
     expect(renderToStaticMarkup(<App />)).toContain("<h1>Traslado 3 history</h1>");
   });
 
-  it("Rule 3 (#83): shows who received the Pasajero in each Entregado, never their DNI", () => {
-    const entregado = (id: string, receiver: HistoryMark["receiver"]) => mark(id, "entregado", "2026-10-23T12:05:00.000Z", { receiver });
-    const markup = renderToStaticMarkup(<TransferHistoryView history={{ ...history, status: "entregado", marks: [
+  const entregado = (id: string, receiver: HistoryMark["receiver"]) => mark(id, "entregado", "2026-10-23T12:05:00.000Z", { receiver });
+  const otherAdult = (id: string, dni: string | null) => entregado(id, { kind: "other_adult", name: "Tía Sintética", dni, authorizationId: null });
+  const receivers = (marks: HistoryMark[]) => renderToStaticMarkup(<TransferHistoryView history={{ ...history, status: "entregado", marks }} onCorrect={() => undefined} />);
+
+  it("Rule 3 (#95): shows an Adulto autorizado by name and relation without a DNI, and a Destino by name", () => {
+    const markup = receivers([
       entregado("00000000-0000-4000-8000-000000000011", { kind: "authorized_adult", adultId: 7, name: "Madre Sintética", relation: "madre" }),
-      entregado("00000000-0000-4000-8000-000000000012", { kind: "other_adult", name: "Tía Sintética", dni: "-3000001", authorizationId: null }),
       entregado("00000000-0000-4000-8000-000000000013", { kind: "destination", destinationId: 2, name: "Escuela Sintética" }),
       entregado("00000000-0000-4000-8000-000000000014", { kind: "base_staff" }),
-    ] }} onCorrect={() => undefined} />);
+    ]);
     expect(markup).toContain("Entregado, Receptor: Madre Sintética (madre) by chofer-sintetico");
-    expect(markup).toContain("Entregado, Receptor: Tía Sintética (another adult) by chofer-sintetico");
     expect(markup).toContain("Entregado, Receptor: Escuela Sintética (Destino) by chofer-sintetico");
     expect(markup).toContain("Entregado, Receptor: company staff at the base by chofer-sintetico");
-    expect(markup).not.toContain("3000001");
+    expect(markup).not.toContain("DNI");
+  });
+
+  it("Rule 1 (#95): shows another adult's masked DNI as the digits it ends in", () => {
+    expect(receivers([otherAdult("00000000-0000-4000-8000-000000000012", "***456")]))
+      .toContain("Entregado, Receptor: Tía Sintética (another adult), DNI terminado en 456 by chofer-sintetico");
+  });
+
+  it("Rule 2 (#95): says the DNI was recorded when too short to mask, and shows no DNI line when it is empty or null", () => {
+    const markup = receivers([
+      otherAdult("00000000-0000-4000-8000-000000000015", "***"),
+      otherAdult("00000000-0000-4000-8000-000000000016", ""),
+      otherAdult("00000000-0000-4000-8000-000000000017", null),
+    ]);
+    expect(markup).toContain("Entregado, Receptor: Tía Sintética (another adult), DNI registrado by chofer-sintetico");
+    expect(markup.match(/Entregado, Receptor: Tía Sintética \(another adult\) by chofer-sintetico/g)).toHaveLength(2);
+    expect(markup.match(/DNI/g)).toHaveLength(1);
   });
 
   it("#33: keeps the receiving driver visible in a Trasbordo's Entregado", () => {
@@ -70,6 +87,30 @@ describe("Traslado history", () => {
     const markup = renderToStaticMarkup(<TransferHistoryView history={handover} onCorrect={() => undefined} />);
     expect(markup).toContain("Entregado, Receptor: driver 7 (Chofer receptor) by chofer-sintetico");
     expect(markup).not.toContain("undefined");
+  });
+
+  it("#87 AC3: shows the whole Trasbordo chain, with each Entregado to the receiving Chofer and each Subió", () => {
+    const leg = (id: string, kind: HistoryMark["kind"], time: string, routeId: number, driverId?: number) => mark(id, kind, time, {
+      routeId, author: oficina, ...(driverId ? { receiver: { kind: "driver" as const, driverId } } : {}),
+    });
+    const chain = [
+      { transferId: 3, marks: [mark("00000000-0000-4000-8000-000000000031", "subio", "2026-10-23T10:00:00.000Z"),
+        leg("00000000-0000-4000-8000-000000000032", "entregado", "2026-10-23T10:50:00.000Z", 9, 7)] },
+      { transferId: 5, marks: [leg("00000000-0000-4000-8000-000000000033", "subio", "2026-10-23T10:50:00.000Z", 10),
+        leg("00000000-0000-4000-8000-000000000034", "entregado", "2026-10-23T10:55:00.000Z", 10, 8)] },
+      { transferId: 6, marks: [leg("00000000-0000-4000-8000-000000000035", "subio", "2026-10-23T10:55:00.000Z", 11)] },
+    ];
+    // Built from JSON, as the API returns it, for the middle leg.
+    const middle = JSON.parse(JSON.stringify({ ...history, transferId: 5, status: "entregado", marks: chain[1].marks, chain })) as TransferHistory;
+    const markup = renderToStaticMarkup(<TransferHistoryView history={middle} onCorrect={() => undefined} />);
+    expect(markup).toContain("<h2>Trasbordo chain</h2>");
+    expect(markup).toContain("<li>Leg 1: Traslado 3<ul><li>Subió by chofer-sintetico (driver), phone 23/10/2026, 07:00:00");
+    expect(markup).toContain("<li>Entregado, Receptor: driver 7 (Chofer receptor) by oficina-sintetica (office), phone 23/10/2026, 07:50:00");
+    expect(markup).toContain("<li>Leg 2: Traslado 5 (this one)<ul><li>Subió by oficina-sintetica (office), phone 23/10/2026, 07:50:00");
+    expect(markup).toContain("<li>Entregado, Receptor: driver 8 (Chofer receptor) by oficina-sintetica (office), phone 23/10/2026, 07:55:00");
+    expect(markup).toContain("<li>Leg 3: Traslado 6<ul><li>Subió by oficina-sintetica (office), phone 23/10/2026, 07:55:00");
+    // A Traslado without a Trasbordo shows no chain.
+    expect(renderToStaticMarkup(<TransferHistoryView history={history} onCorrect={() => undefined} />)).not.toContain("Trasbordo chain");
   });
 
   it("offers a Corrección of the Marca in force only, always with a required reason", () => {

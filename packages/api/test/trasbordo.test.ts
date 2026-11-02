@@ -324,6 +324,119 @@ describe("Trasbordo", () => {
   });
 });
 
+/**
+ * #87: the receiving Vehículo breaks down too. The Pasajero got on at 07:00 (leg A), was handed over at 07:50 near the
+ * school to the second Chofer (leg B), who had picked up their own Pasajero at 07:45; a third Chofer has a published
+ * Recorrido with their own entrada at 08:45.
+ */
+async function secondBreakdownDay(name: string) {
+  const { s, giving, receiving, legA } = await breakdownDay(name);
+  const third = await s.served((await s.passenger()).passengerId, "entrada", "08:45");
+  at("07:45");
+  await h.answer(h.mark(receiving.driver.cookie, receiving.routeId, h.markBody(receiving.transferId, "subio")), 201);
+  at("07:50");
+  const first = await trasbordo(s, legA, { routeId: receiving.routeId, ...NEAR_SCHOOL, overrideReason: "Breakdown" });
+  return { s, giving, receiving, third, legA, legB: first.legB.id as number, first };
+}
+
+describe("A second Trasbordo when the receiving Vehículo breaks down too (#87)", () => {
+  it("Regla 1: a Pasajero who arrived by a Trasbordo is handed over again to a third Chofer, the new leg starting where and when that Trasbordo happened", async () => {
+    const { s, receiving, third, legA, legB } = await secondBreakdownDay("chain-rule-1");
+    at("07:55");
+    const result = await trasbordo(s, legB, { routeId: third.routeId, ...FAR, overrideReason: "Second breakdown" });
+    const legC = result.legB.id as number;
+    expect(result.legA).toMatchObject({
+      id: legB, status: "entregado", routeId: receiving.routeId, chainedFromTransferId: legA, chainedToTransferId: legC,
+      trasbordo: { stop: "pickup", ...NEAR_SCHOOL, time: "07:50" },
+    });
+    expect(result.legB).toMatchObject({
+      status: "subio", routeId: third.routeId, chainedFromTransferId: legB, chainedToTransferId: null, trasbordo: { stop: "pickup", ...FAR, time: "07:55" },
+    });
+    // The middle leg ends at the second Trasbordo point, in the Plan diario and in the broken Recorrido's day.
+    const plan = await day(s);
+    expect(plan.transfers.filter((transfer: { passengerId: number }) => transfer.passengerId === result.legB.passengerId)).toHaveLength(3);
+    expect(plan.routes.find((route: { id: number }) => route.id === receiving.routeId).stops
+      .filter((stop: { transferId: number }) => stop.transferId === legB).map((stop: { placeName: string }) => stop.placeName)).toEqual(["Trasbordo", "Trasbordo"]);
+    const brokenDay = await h.answer(h.request(`/driver/days/${TODAY}`, "GET", undefined, receiving.driver.cookie), 200);
+    expect(brokenDay.routes[0].stops.filter((stop: { transferId: number }) => stop.transferId === legB)
+      .map((stop: { kind: string; transferStatus: string; place: { name: string; address: string } }) => [stop.kind, stop.transferStatus, stop.place.name, stop.place.address]))
+      .toEqual([["pickup", "entregado", "Trasbordo", `${NEAR_SCHOOL.lat}, ${NEAR_SCHOOL.lng}`], ["dropoff", "entregado", "Trasbordo", `${FAR.lat}, ${FAR.lng}`]]);
+    const thirdDay = await h.answer(h.request(`/driver/days/${TODAY}`, "GET", undefined, third.driver.cookie), 200);
+    expect(thirdDay.routes[0].stops[0]).toMatchObject({
+      transferId: legC, kind: "pickup", transferStatus: "subio", place: { name: "Trasbordo", address: `${FAR.lat}, ${FAR.lng}` },
+    });
+    // Republished, the broken Recorrido keeps the middle leg between both Trasbordos, at their times.
+    const republished = await s.post(`/routes/${receiving.routeId}/publish`, { overrideReason: "After the second breakdown" });
+    expect(republished.version.legs.filter((leg: { transferId: number }) => leg.transferId === legB)
+      .map((leg: { kind: string; plannedTime: string }) => [leg.kind, leg.plannedTime])).toEqual([["pickup", "07:50"], ["dropoff", "07:55"]]);
+    // Ordered again, the broken Recorrido goes on from the second Trasbordo point, where the middle leg ended.
+    await h.answer(h.request(`/routes/${receiving.routeId}/order`, "POST", undefined, s.office), 200);
+    expect((engine.problems.at(-1) as unknown as { vehicles: { start: number[] }[] }).vehicles[0].start).toEqual([FAR.lng, FAR.lat]);
+    // A repeated Trasbordo returns the recorded one instead of a fourth leg.
+    const again = await trasbordo(s, legB, { routeId: third.routeId, ...FAR }, 200);
+    expect([again.legB.id, again.marks]).toEqual([legC, result.marks]);
+  });
+
+  it("Regla 2: the third leg's Tiempo máximo a bordo counts from the first Subió of the chain", async () => {
+    const { s, third, legB } = await secondBreakdownDay("chain-rule-2");
+    at("07:55");
+    const result = await trasbordo(s, legB, { routeId: third.routeId, ...FAR });
+    // The third leg's drop-off service ends at 08:16:40: 76.67 min since the Subió at 07:00, over the 60-minute limit.
+    // From the second leg's Subió (07:50) it would be 26.67 minutes, from its own (07:55) 21.67.
+    expect(result.publication).toMatchObject({ error: "The Recorrido breaks limits: fix it or publish it with a reason" });
+    expect(result.publication.violations).toContainEqual(expect.objectContaining({
+      violations: expect.arrayContaining([
+        expect.objectContaining({ rule: "max_ride_time_exceeded", transferId: result.legB.id, message: expect.stringContaining("(76.6") }),
+      ]),
+    }));
+  });
+
+  it("Regla 3: records an Entregado to the third Chofer in the broken Recorrido and a Subió in the receiving one, same place and time", async () => {
+    const { s, receiving, third, legB, first } = await secondBreakdownDay("chain-rule-3");
+    at("07:55");
+    const result = await trasbordo(s, legB, { routeId: third.routeId, ...FAR, overrideReason: "Second breakdown" });
+    const time = new Date(`${TODAY}T07:55:00-03:00`).toISOString();
+    expect(result.marks.entregado).toMatchObject({
+      transferId: legB, routeId: receiving.routeId, kind: "entregado", phoneTime: time, location: FAR,
+      receiver: { kind: "driver", driverId: third.driver.driverId },
+    });
+    expect(result.marks.subio).toMatchObject({
+      transferId: result.legB.id, routeId: third.routeId, kind: "subio", phoneTime: time, location: FAR, receiver: null,
+      trasbordoOf: result.marks.entregado.id,
+    });
+    // The first Trasbordo's Marcas stay as they were.
+    expect((await history(s, legB)).marks.map((mark: { id: string }) => mark.id)).toEqual([first.marks.subio.id, result.marks.entregado.id]);
+  });
+
+  it("AC3: the history of any leg shows the whole chain, with each Entregado to the receiving Chofer and each Subió", async () => {
+    const { s, giving, receiving, third, legA, legB } = await secondBreakdownDay("chain-ac-3");
+    at("07:55");
+    const result = await trasbordo(s, legB, { routeId: third.routeId, ...FAR, overrideReason: "Second breakdown" });
+    const legC = result.legB.id as number;
+    const expected = [
+      { transferId: legA, marks: [["subio", giving.routeId, null], ["entregado", giving.routeId, receiving.driver.driverId]] },
+      { transferId: legB, marks: [["subio", receiving.routeId, null], ["entregado", receiving.routeId, third.driver.driverId]] },
+      { transferId: legC, marks: [["subio", third.routeId, null]] },
+    ];
+    for (const leg of [legA, legB, legC]) {
+      const { chain } = await history(s, leg);
+      expect(chain.map((item: { transferId: number; marks: { kind: string; routeId: number; receiver: { driverId?: number } | null }[] }) => ({
+        transferId: item.transferId, marks: item.marks.map((mark) => [mark.kind, mark.routeId, mark.receiver?.driverId ?? null]),
+      }))).toEqual(expected);
+    }
+  });
+
+  it("PRESERVE GET /daily-plans/:date: the Paradas of a two-leg Trasbordo stay at home, at the point and at the Destino", async () => {
+    const { s, giving, receiving, legA, legB } = await secondBreakdownDay("chain-preserve-day");
+    const places = (routeId: number, transferId: number) => (
+      (day_: { routes: { id: number; stops: { transferId: number; placeName: string | null }[] }[] }) =>
+        day_.routes.find((route) => route.id === routeId)!.stops.filter((stop) => stop.transferId === transferId).map((stop) => stop.placeName));
+    const plan = await day(s);
+    expect([places(giving.routeId, legA)(plan), places(receiving.routeId, legB)(plan)])
+      .toEqual([[null, "Trasbordo"], ["Trasbordo", "Escuela chain-preserve-day"]]);
+  });
+});
+
 describe("Trasbordo authorization", () => {
   it("lets only the Oficina plan and record a Trasbordo", async () => {
     const { s, giving, receiving, legA } = await breakdownDay("authorization");
