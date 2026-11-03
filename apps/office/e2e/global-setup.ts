@@ -1,27 +1,16 @@
-import { execFile, spawn } from "node:child_process";
+import { execFile } from "node:child_process";
 import { randomBytes } from "node:crypto";
 import { mkdtemp, rm } from "node:fs/promises";
-import { createServer as createNetServer } from "node:net";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { promisify } from "node:util";
 import { PostgreSqlContainer } from "@testcontainers/postgresql";
-import { createServer as createViteServer, preview } from "vite";
 import { startFakeVroom } from "./fake-vroom";
+import { apiRoot, randomPort, startApi, startDriver, startOffice } from "./servers";
 
 const run = promisify(execFile);
-const officeRoot = fileURLToPath(new URL("..", import.meta.url));
 const driverRoot = fileURLToPath(new URL("../../driver", import.meta.url));
-const apiRoot = fileURLToPath(new URL("../../../packages/api", import.meta.url));
-
-async function freePort() {
-  const server = createNetServer();
-  await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
-  const { port } = server.address() as { port: number };
-  await new Promise((resolve) => server.close(resolve));
-  return port;
-}
 
 function withCredentials(uri: string, username: string, password: string) {
   const url = new URL(uri);
@@ -33,16 +22,6 @@ function withCredentials(uri: string, username: string, password: string) {
 // Runs an API script the same way its package script does, with tsx as the loader.
 function apiScript(script: string, env: Record<string, string>) {
   return run(process.execPath, ["--import", "tsx", script], { cwd: apiRoot, env: { ...process.env, ...env } });
-}
-
-async function waitForApi(url: string, api: ReturnType<typeof spawn>, output: () => string) {
-  for (let attempt = 0; attempt < 100; attempt++) {
-    if (api.exitCode !== null) throw new Error(`The API exited before answering:\n${output()}`);
-    const response = await fetch(url).catch(() => null);
-    if (response?.status === 401) return;
-    await new Promise((resolve) => setTimeout(resolve, 200));
-  }
-  throw new Error(`The API did not answer ${url}:\n${output()}`);
 }
 
 export default async function globalSetup() {
@@ -58,32 +37,17 @@ export default async function globalSetup() {
   await apiScript("src/bootstrap.ts", { BOOTSTRAP_DATABASE_URL: rootUrl, MIGRATION_PASSWORD: migrationPassword, APPLICATION_PASSWORD: applicationPassword });
   await apiScript("src/migrate.ts", { MIGRATION_DATABASE_URL: migrationUrl });
 
-  const [apiPort, webPort, driverPort] = [await freePort(), await freePort(), await freePort()];
   const vroom = await startFakeVroom();
-  let apiOutput = "";
-  const api = spawn(process.execPath, ["--import", "tsx", "src/server.ts"], {
-    cwd: apiRoot,
-    env: {
-      ...process.env,
-      SERVER_EPOCH: "c3-e2e",
-      DATABASE_URL: withCredentials(rootUrl, "traslado_app", applicationPassword),
-      // OSRM is only probed by /health, which the C3 tests never call; "Order" goes to the fake VROOM.
-      OSRM_URL: "http://127.0.0.1:9",
-      VROOM_URL: vroom.url,
-      PORT: String(apiPort),
-      GEOCODER: "off",
-    },
+  const api = await startApi(randomPort(), {
+    SERVER_EPOCH: "c3-e2e",
+    DATABASE_URL: withCredentials(rootUrl, "traslado_app", applicationPassword),
+    // OSRM is only probed by /health, which the C3 tests never call; "Order" goes to the fake VROOM.
+    OSRM_URL: "http://127.0.0.1:9",
+    VROOM_URL: vroom.url,
+    GEOCODER: "off",
   });
-  api.stdout.on("data", (chunk) => { apiOutput += chunk; });
-  api.stderr.on("data", (chunk) => { apiOutput += chunk; });
-  await waitForApi(`http://127.0.0.1:${apiPort}/auth/me`, api, () => apiOutput);
 
-  const baseUrl = `http://localhost:${webPort}`;
-  process.env.API_PROXY_TARGET = `http://127.0.0.1:${apiPort}`;
-  process.env.VITE_API_URL = "/api";
-  process.env.VITE_MAP_STYLE_URL = `${baseUrl}/e2e/map-style.json`;
-  const web = await createViteServer({ root: officeRoot, server: { host: "localhost", port: webPort, strictPort: true } });
-  await web.listen();
+  const web = await startOffice(randomPort(), api.url);
 
   // The driver app as a phone runs it: the production build with its service worker, so a tab reloads without signal.
   const driverOut = await mkdtemp(join(tmpdir(), "driver-e2e-"));
@@ -93,24 +57,16 @@ export default async function globalSetup() {
     cwd: driverRoot,
     env: { ...process.env, NODE_ENV: "production" },
   });
-  const driver = await preview({
-    root: driverRoot,
-    logLevel: "warn",
-    build: { outDir: driverOut },
-    preview: {
-      host: "localhost", port: driverPort, strictPort: true,
-      proxy: { "/api": { target: process.env.API_PROXY_TARGET, rewrite: (path) => path.replace(/^\/api/, "") } },
-    },
-  });
+  const driver = await startDriver(randomPort(), driverOut, api.url);
 
-  process.env.E2E_BASE_URL = baseUrl;
-  process.env.E2E_DRIVER_URL = `http://localhost:${driverPort}`;
+  process.env.E2E_BASE_URL = web.url;
+  process.env.E2E_DRIVER_URL = driver.url;
   process.env.E2E_DATABASE_URL = migrationUrl;
   return async () => {
     await web.close();
     await driver.close();
     await rm(driverOut, { recursive: true, force: true });
-    api.kill();
+    await api.close();
     await vroom.close();
     await container.stop();
   };
