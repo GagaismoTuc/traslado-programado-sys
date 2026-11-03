@@ -198,8 +198,6 @@ finish() {
 # the whole file before the first prompt, so an edit mid-run can't break it.
 # ──────────────────────────────────────────────────────────────────────────
 
-# shellcheck disable=SC1087,SC2329
-
 TOTAL_STAGES=9
 
 get_contract_secrets() {
@@ -292,8 +290,6 @@ _get_repo_root() {
 _create_secure_tmp_dir() {
   local repo_root
   repo_root=$(_get_repo_root)
-  local current_pwd
-  current_pwd=$(pwd -P 2>/dev/null || pwd)
   local safe_base=""
   local candidates=("${TMPDIR:-}" "/tmp" "/var/tmp" "$HOME/.cache" "$HOME/.config" "$HOME")
   for c in "${candidates[@]}"; do
@@ -408,18 +404,38 @@ halt_verification() {
 check_port_22() {
   local host="$1"
   if command -v ssh >/dev/null 2>&1; then
-    local out
-    out=$(ssh -o ConnectTimeout=3 -o BatchMode=yes "$host" 2>&1 || true)
-    if [[ "$out" != *"Connection timed out"* && "$out" != *"Connection refused"* && "$out" != *"Could not resolve"* && "$out" != *"Network is unreachable"* ]]; then
+    local ssh_out=""
+    local ssh_rc=0
+    ssh_out=$(ssh -o ConnectTimeout=3 -o BatchMode=yes -o StrictHostKeyChecking=accept-new "$host" 2>&1) || ssh_rc=$?
+    if [[ $ssh_rc -eq 0 ]]; then
       return 0
     fi
+    # Positive evidence of reaching an SSH daemon (rejection or banner from sshd)
+    if [[ "$ssh_out" == *"Permission denied"* || \
+          "$ssh_out" == *"Host key verification"* || \
+          "$ssh_out" == *"remote host identification"* || \
+          "$ssh_out" == *"authenticity of host"* || \
+          "$ssh_out" == *"SSH-"* ]]; then
+      if [[ "$ssh_out" != *"connect to host"* && \
+            "$ssh_out" != *"No route to host"* && \
+            "$ssh_out" != *"Connection timed out"* && \
+            "$ssh_out" != *"Connection refused"* && \
+            "$ssh_out" != *"Network is unreachable"* && \
+            "$ssh_out" != *"Operation timed out"* && \
+            "$ssh_out" != *"Could not resolve"* ]]; then
+        return 0
+      fi
+    fi
+    # Indeterminate or connection failure from ssh is treated as failure
   fi
   if command -v nc >/dev/null 2>&1 && nc -z -w 3 "$host" 22 >/dev/null 2>&1; then
     return 0
   fi
-  if (exec 3<>/dev/tcp/"$host"/22) 2>/dev/null; then
-    exec 3>&-
-    return 0
+  if command -v timeout >/dev/null 2>&1; then
+    # shellcheck disable=SC2016
+    if timeout 3 bash -c 'exec 3<>/dev/tcp/"$1"/22' _ "$host" 2>/dev/null; then
+      return 0
+    fi
   fi
   return 1
 }
@@ -445,6 +461,7 @@ _verify_uptimerobot_response() {
   local target_url="https://${expected_host}/health"
 
   if command -v node >/dev/null 2>&1; then
+    local node_code=0
     TARGET_URL="$target_url" JSON_STR="$json" node -e '
       try {
         const raw = process.env.JSON_STR || "";
@@ -462,13 +479,45 @@ _verify_uptimerobot_response() {
         });
         process.exit(found ? 0 : 1);
       } catch (e) {
-        process.exit(1);
+        process.exit(2);
       }
-    ' >/dev/null 2>&1 && return 0
+    ' >/dev/null 2>&1 || node_code=$?
+    if [[ $node_code -eq 0 ]]; then
+      return 0
+    else
+      return 1
+    fi
+  fi
+
+  if command -v jq >/dev/null 2>&1; then
+    local jq_code=0
+    printf '%s' "$json" | jq -e --arg target "$target_url" '
+      if .stat != "ok" or (.monitors | type != "array") then
+        false
+      else
+        .monitors | any(
+          ((.url == $target) or (.url == ($target + "/"))) and
+          ((.interval == 300) or (.interval == 5) or (.interval == "300") or (.interval == "5"))
+        )
+      end
+    ' >/dev/null 2>&1 || jq_code=$?
+    if [[ $jq_code -eq 0 ]]; then
+      return 0
+    else
+      return 1
+    fi
   fi
 
   if echo "$json" | grep -q '"stat"[[:space:]]*:[[:space:]]*"ok"'; then
-    if echo "$json" | grep -Fq "$target_url" && (echo "$json" | grep -qE '"interval"[[:space:]]*:[[:space:]]*(300|5)'); then
+    if echo "$json" | awk -v target="$target_url" '
+      BEGIN { RS = "[{}]"; found = 0 }
+      {
+        url_ok = ($0 ~ ("\"url\"[[:space:]]*:[[:space:]]*\"" target "(\"|/\")"))
+        int_ok = ($0 ~ "\"interval\"[[:space:]]*:[[:space:]]*\"?(300|5)\"?([^0-9]|$)")
+        if (url_ok && int_ok) { found = 1 }
+      }
+      END { exit (found ? 0 : 1) }
+    ' >/dev/null 2>&1; then
       return 0
     fi
   fi
@@ -841,9 +890,9 @@ run_wizard() {
       local scw_check_ok=false
       local http_code=""
       if command -v curl >/dev/null 2>&1; then
-        http_code=$(curl -s -o /dev/null -w '%{http_code}' --connect-timeout 5 \
+        http_code=$(printf 'user = "%s:%s"\n' "$SCW_ACCESS_KEY" "$SCW_SECRET_KEY" | curl -s -o /dev/null -w '%{http_code}' --connect-timeout 5 \
           --aws-sigv4 "aws:amz:${SCW_REGION}:s3" \
-          --user "${SCW_ACCESS_KEY}:${SCW_SECRET_KEY}" \
+          -K - \
           "https://${SCW_BUCKET}.s3.${SCW_REGION}.scw.cloud" || true)
         if [[ "$http_code" == "200" ]]; then
           scw_check_ok=true
@@ -974,10 +1023,10 @@ run_wizard() {
       local monitor_err=""
       local response=""
       if command -v curl >/dev/null 2>&1; then
-        response=$(curl -s -X POST \
+        response=$(printf 'data = "api_key=%s&format=json"\n' "$UPTIMEROBOT_API_KEY" | curl -s -X POST \
           -H "Content-Type: application/x-www-form-urlencoded" \
           -H "Cache-Control: no-cache" \
-          -d "api_key=${UPTIMEROBOT_API_KEY}&format=json" \
+          -K - \
           --connect-timeout 5 \
           "https://api.uptimerobot.com/v2/getMonitors" 2>&1 || true)
       fi

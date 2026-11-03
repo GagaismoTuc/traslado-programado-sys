@@ -115,6 +115,13 @@ check "$t" $?
 
 wizard=$scripts/../../infra/wizard/hosting.sh
 
+t="hosting.sh passes shellcheck"
+ok=0
+if command -v shellcheck > /dev/null 2>&1; then
+  shellcheck "$wizard" > /dev/null 2>&1 || ok=1
+fi
+check "$t" $ok
+
 t="hosting.sh --check lists exactly 9 stages and the contract secrets for #36 and #37"
 ok=0
 out=$(bash "$wizard" --check 2>&1) || ok=1
@@ -144,6 +151,7 @@ t="hosting.sh region validation permits Germany and Paris and rejects others cit
 ok=0
 bash "$wizard" --validate-vps-region nbg1 > /dev/null 2>&1 || ok=1
 bash "$wizard" --validate-vps-region fsn1 > /dev/null 2>&1 || ok=1
+bash "$wizard" --validate-vps-region Nuremberg > /dev/null 2>&1 || ok=1
 out_fsn_hel=$(bash "$wizard" --validate-vps-region fsn1-hel1 2>&1)
 res_fsn_hel=$?
 [ $res_fsn_hel -ne 0 ] && printf '%s' "$out_fsn_hel" | grep -q 'Ley 25.326' || ok=1
@@ -154,6 +162,7 @@ out_ash=$(bash "$wizard" --validate-vps-region ash 2>&1)
 res_ash=$?
 [ $res_ash -ne 0 ] && printf '%s' "$out_ash" | grep -q 'Ley 25.326' || ok=1
 bash "$wizard" --validate-bucket-region fr-par > /dev/null 2>&1 || ok=1
+bash "$wizard" --validate-bucket-region Paris > /dev/null 2>&1 || ok=1
 out_fr_ams=$(bash "$wizard" --validate-bucket-region fr-par-nl-ams 2>&1)
 res_fr_ams=$?
 [ $res_fr_ams -ne 0 ] && printf '%s' "$out_fr_ams" | grep -q 'Ley 25.326' || ok=1
@@ -228,7 +237,8 @@ echo 'Address: 192.0.2.1'
 EOF
 chmod +x "$test_bin/"*
 
-git_status_before=$(git status --porcelain)
+repo_root=$(cd "$scripts/../.." && pwd -P)
+git_status_before=$(git -C "$repo_root" status --porcelain --ignored)
 
 full_run_input=$(printf '%s\n' \
   "" \
@@ -266,10 +276,13 @@ if ! grep -q 'SCW_ACCESS_KEY=SCW_SYNTHETIC_ACCESS_KEY_SENTINEL' "$test_secrets";
 if ! grep -q 'SCW_SECRET_KEY=SCW_SYNTHETIC_SECRET_KEY_SENTINEL' "$test_secrets"; then ok=1; fi
 if ! grep -q 'DEPLOY_SSH_KEY=SYNTHETIC_PRIVATE_KEY_SENTINEL' "$test_secrets"; then ok=1; fi
 if grep -rq 'SENTINEL' "$test_state" "$test_home" "$test_tmp"; then ok=1; fi
+if printf '%s' "$full_out" | grep -E -q 'SYNTHETIC_PRIVATE_KEY_SENTINEL|SCW_SYNTHETIC_SECRET_KEY_SENTINEL|UR_SYNTHETIC_KEY_SENTINEL|SCW_SYNTHETIC_ACCESS_KEY_SENTINEL'; then ok=1; fi
 
-git_status_after=$(git status --porcelain)
+git_status_after=$(git -C "$repo_root" status --porcelain --ignored)
 [ "$git_status_before" = "$git_status_after" ] || ok=1
 [ ! -f "$scripts/../../.env" ] || ok=1
+[ ! -f "$scripts/../../infra/wizard/.env" ] || ok=1
+if git -C "$repo_root" grep -q 'SYNTHETIC_PRIVATE_KEY_SENTINEL' -- ':!.github/scripts/test-ci-scripts.sh' 2>/dev/null; then ok=1; fi
 check "$t" $ok
 
 t="hosting.sh halts on verification failure and does not continue to next stage"
@@ -293,20 +306,21 @@ printf 'STAGE_1_CONFIRMED=true\nHETZNER_IPV4=192.0.2.1\nSTAGE_2_CONFIRMED=true\n
 resume_out=$(printf '\ny\ny\n' | HOME="$test_resume_home" WIZARD_STATE_FILE="$test_resume_state" bash "$wizard" 2>&1 || true)
 if ! printf '%s' "$resume_out" | grep -q 'Stage 3/9'; then ok=1; fi
 
-# Interruption test while temporary deploy key exists on disk
-test_sig_dir=$tmp/sig_test
-test_sig_bin=$test_sig_dir/bin
-test_sig_home=$test_sig_dir/home
-test_sig_tmp=$test_sig_dir/tmp
-test_sig_state=$test_sig_dir/state
-mkdir -p "$test_sig_bin" "$test_sig_home" "$test_sig_tmp"
-for c in xdg-open explorer.exe wslview open; do
-  printf '#!/bin/sh\nexit 0\n' > "$test_sig_bin/$c"
-done
+# Interruption test while temporary deploy key exists on disk (covers INT and HUP)
+for test_sig in INT HUP; do
+  test_sig_dir=$tmp/sig_test_${test_sig}
+  test_sig_bin=$test_sig_dir/bin
+  test_sig_home=$test_sig_dir/home
+  test_sig_tmp=$test_sig_dir/tmp
+  test_sig_state=$test_sig_dir/state
+  mkdir -p "$test_sig_bin" "$test_sig_home" "$test_sig_tmp"
+  for c in xdg-open explorer.exe wslview open; do
+    printf '#!/bin/sh\nexit 0\n' > "$test_sig_bin/$c"
+  done
 
-printf 'STAGE_1_CONFIRMED=true\nHETZNER_IPV4=192.0.2.1\nSTAGE_2_CONFIRMED=true\nSTAGE_3_CONFIRMED=true\nSTAGE_4_CONFIRMED=true\nSTAGE_5_CONFIRMED=true\nSCW_BUCKET=bkt\nSTAGE_6_CONFIRMED=true\nPRODUCTION_HOST=example.test\nSTAGING_HOST=staging.example.test\nSTAGE_7_CONFIRMED=true\n' > "$test_sig_state"
+  printf 'STAGE_1_CONFIRMED=true\nHETZNER_IPV4=192.0.2.1\nSTAGE_2_CONFIRMED=true\nSTAGE_3_CONFIRMED=true\nSTAGE_4_CONFIRMED=true\nSTAGE_5_CONFIRMED=true\nSCW_BUCKET=bkt\nSTAGE_6_CONFIRMED=true\nPRODUCTION_HOST=example.test\nSTAGING_HOST=staging.example.test\nSTAGE_7_CONFIRMED=true\n' > "$test_sig_state"
 
-cat > "$test_sig_bin/gh" <<'EOF'
+  cat > "$test_sig_bin/gh" <<'EOF'
 #!/bin/sh
 case "$1 $2" in
   'auth status') exit 0;;
@@ -315,51 +329,136 @@ case "$1 $2" in
 esac
 EOF
 
-cat > "$test_sig_bin/ssh-keygen" <<'EOF'
+  cat > "$test_sig_bin/ssh-keygen" <<'EOF'
 #!/bin/sh
 while [ "$1" != -f ]; do shift; done; shift
 printf '%s\n' "$1" > "$KEY_RECORD"
 printf 'PRIVATE_KEY_SENTINEL_DURING_RUN\n' > "$1"
-printf 'PUBLIC_KEY_SENTINEL_DURING_RUN\n' > "$1.pub"
+printf 'ssh-ed25519 PUBLIC_KEY_SENTINEL_DURING_RUN deploy-actions\n' > "$1.pub"
 EOF
 
-cat > "$test_sig_bin/ssh-keyscan" <<'EOF'
+  cat > "$test_sig_bin/ssh-keyscan" <<EOF
 #!/bin/sh
-key_file=$(cat "$KEY_RECORD" 2>/dev/null || true)
-if [ -n "$key_file" ] && [ -f "$key_file" ]; then
-  printf 'KEY_EXISTED_ON_DISK\n' > "$KEY_EXISTED_RECORD"
+key_file=\$(cat "\$KEY_RECORD" 2>/dev/null || true)
+if [ -n "\$key_file" ] && [ -f "\$key_file" ]; then
+  printf 'KEY_EXISTED_ON_DISK\n' > "\$KEY_EXISTED_RECORD"
 fi
-target_pid="${WIZARD_PID:-$PPID}"
-if [ -n "$target_pid" ]; then
-  kill -INT "$target_pid" 2>/dev/null || kill -15 "$target_pid" 2>/dev/null || true
+target_pid="\${WIZARD_PID:-\$PPID}"
+if [ -n "\$target_pid" ]; then
+  kill -$test_sig "\$target_pid" 2>/dev/null || true
 fi
 exit 1
 EOF
-chmod +x "$test_sig_bin/"*
+  chmod +x "$test_sig_bin/"*
 
-sig_inputs=$(printf '%s\n' "" "y" "y" "y" "y" "y" "y" "y" "access" "secret" "")
-printf '%s' "$sig_inputs" | KEY_RECORD="$test_sig_dir/key_file" KEY_EXISTED_RECORD="$test_sig_dir/key_existed" PATH="$test_sig_bin:$PATH" HOME="$test_sig_home" TMPDIR="$test_sig_tmp" WIZARD_STATE_FILE="$test_sig_state" bash "$wizard" >/dev/null 2>&1 || true
+  sig_inputs=$(printf '%s\n' "" "y" "y" "y" "y" "y" "y" "y" "access" "secret" "")
+  printf '%s' "$sig_inputs" | KEY_RECORD="$test_sig_dir/key_file" KEY_EXISTED_RECORD="$test_sig_dir/key_existed" PATH="$test_sig_bin:$PATH" HOME="$test_sig_home" TMPDIR="$test_sig_tmp" WIZARD_STATE_FILE="$test_sig_state" bash "$wizard" >/dev/null 2>&1 || true
 
-if [ ! -f "$test_sig_dir/key_existed" ] || ! grep -q 'KEY_EXISTED_ON_DISK' "$test_sig_dir/key_existed"; then
-  ok=1
-fi
-key_path=$(cat "$test_sig_dir/key_file" 2>/dev/null || true)
-if [ -n "$key_path" ] && [ -e "$key_path" ]; then
-  ok=1
-fi
-if grep -rq 'PRIVATE_KEY_SENTINEL_DURING_RUN' "$test_sig_home" "$test_sig_tmp" "$test_sig_state"; then
-  ok=1
-fi
-if grep -q '^STAGE_8_CONFIRMED=true' "$test_sig_state"; then
-  ok=1
-fi
+  if [ ! -f "$test_sig_dir/key_existed" ] || ! grep -q 'KEY_EXISTED_ON_DISK' "$test_sig_dir/key_existed"; then
+    ok=1
+  fi
+  key_path=$(cat "$test_sig_dir/key_file" 2>/dev/null || true)
+  if [ -n "$key_path" ] && [ -e "$key_path" ]; then
+    ok=1
+  fi
+  if grep -rq 'PRIVATE_KEY_SENTINEL_DURING_RUN' "$test_sig_home" "$test_sig_tmp" "$test_sig_state"; then
+    ok=1
+  fi
+  if grep -q '^STAGE_8_CONFIRMED=true' "$test_sig_state"; then
+    ok=1
+  fi
 
-retest_inputs=$(printf '%s\n' "" "y" "y" "y" "y" "y" "y" "y")
-retest_out=$(printf '%s' "$retest_inputs" | PATH="$test_sig_bin:$PATH" HOME="$test_sig_home" TMPDIR="$test_sig_tmp" WIZARD_STATE_FILE="$test_sig_state" bash "$wizard" 2>&1 || true)
-if ! printf '%s' "$retest_out" | grep -q 'Stage 8/9'; then
+  retest_inputs=$(printf '%s\n' "" "y" "y" "y" "y" "y" "y" "y")
+  retest_out=$(printf '%s' "$retest_inputs" | PATH="$test_sig_bin:$PATH" HOME="$test_sig_home" TMPDIR="$test_sig_tmp" WIZARD_STATE_FILE="$test_sig_state" bash "$wizard" 2>&1 || true)
+  if ! printf '%s' "$retest_out" | grep -q 'Stage 8/9'; then
+    ok=1
+  fi
+done
+
+check "$t" $ok
+
+t="hosting.sh stage 7 halts when monitor interval does not match within the same object"
+ok=0
+test_ur_dir=$tmp/ur_test
+mkdir -p "$test_ur_dir/bin" "$test_ur_dir/home"
+for c in wslview explorer.exe xdg-open open; do printf '#!/bin/sh\nexit 0\n' > "$test_ur_dir/bin/$c"; done
+cat > "$test_ur_dir/bin/curl" <<'EOF'
+#!/bin/sh
+printf '%s' '{"stat":"ok","monitors":[{"url":"https://example.test/health","interval":600},{"url":"https://other.test/health","interval":300}]}'
+EOF
+chmod +x "$test_ur_dir/bin/"*
+test_ur_state=$test_ur_dir/state
+printf "HETZNER_IPV4='192.0.2.1'\nSCW_BUCKET='bucket'\nDOMAIN_NAME='example.test'\nPRODUCTION_HOST='example.test'\nSTAGING_HOST='staging.example.test'\n" > "$test_ur_state"
+for i in 1 2 3 4 5 6; do echo "STAGE_${i}_CONFIRMED=true" >> "$test_ur_state"; done
+printf '\ny\ny\ny\ny\ny\ny\nalerts@external.test\nsynthetic-key\nn\n' | \
+  PATH="$test_ur_dir/bin:$PATH" HOME="$test_ur_dir/home" WIZARD_STATE_FILE="$test_ur_state" bash "$wizard" >/dev/null 2>&1 || true
+if grep -q '^STAGE_7_CONFIRMED=true' "$test_ur_state"; then
   ok=1
 fi
+check "$t" $ok
 
+t="hosting.sh stage 1 halts when port 22 is unreachable with No route to host"
+ok=0
+test_p22_dir=$tmp/p22_test
+mkdir -p "$test_p22_dir/bin" "$test_p22_dir/home"
+for c in wslview explorer.exe xdg-open open; do printf '#!/bin/sh\nexit 0\n' > "$test_p22_dir/bin/$c"; done
+cat > "$test_p22_dir/bin/ssh" <<'EOF'
+#!/bin/sh
+echo 'ssh: connect to host 192.0.2.1 port 22: No route to host' >&2
+exit 255
+EOF
+chmod +x "$test_p22_dir/bin/"*
+test_p22_state=$test_p22_dir/state
+printf '\nfsn1\n192.0.2.1\nn\n' | \
+  PATH="$test_p22_dir/bin:$PATH" HOME="$test_p22_dir/home" WIZARD_STATE_FILE="$test_p22_state" bash "$wizard" >/dev/null 2>&1 || true
+if [ -f "$test_p22_state" ] && grep -q '^STAGE_1_CONFIRMED=true' "$test_p22_state"; then
+  ok=1
+fi
+check "$t" $ok
+
+t="hosting.sh stage 3 halts if root login with ssh key is accepted"
+ok=0
+test_root_dir=$tmp/root_test
+mkdir -p "$test_root_dir/bin" "$test_root_dir/home"
+for c in wslview explorer.exe xdg-open open; do printf '#!/bin/sh\nexit 0\n' > "$test_root_dir/bin/$c"; done
+cat > "$test_root_dir/bin/ssh" <<'EOF'
+#!/bin/sh
+case "$*" in
+  *root@*) echo 'Linux hetzner 6.8.0'; exit 0;;
+  *deploy@*) echo 'Docker version 27.0.0'; exit 0;;
+  *) exit 0;;
+esac
+EOF
+chmod +x "$test_root_dir/bin/"*
+test_root_state=$test_root_dir/state
+printf 'STAGE_1_CONFIRMED=true\nHETZNER_IPV4=192.0.2.1\nSTAGE_2_CONFIRMED=true\n' > "$test_root_state"
+printf '\ny\ny\ny\nn\n' | \
+  PATH="$test_root_dir/bin:$PATH" HOME="$test_root_dir/home" WIZARD_STATE_FILE="$test_root_state" bash "$wizard" >/dev/null 2>&1 || true
+if grep -q '^STAGE_3_CONFIRMED=true' "$test_root_state"; then
+  ok=1
+fi
+check "$t" $ok
+
+t="hosting.sh stage 5 halts on Scaleway HTTP 403 Forbidden"
+ok=0
+test_s3_dir=$tmp/s3_test
+mkdir -p "$test_s3_dir/bin" "$test_s3_dir/home"
+for c in wslview explorer.exe xdg-open open; do printf '#!/bin/sh\nexit 0\n' > "$test_s3_dir/bin/$c"; done
+cat > "$test_s3_dir/bin/curl" <<'EOF'
+#!/bin/sh
+case "$*" in
+  *s3.fr-par.scw.cloud*) printf 403;;
+  *) printf 200;;
+esac
+EOF
+chmod +x "$test_s3_dir/bin/"*
+test_s3_state=$test_s3_dir/state
+printf 'STAGE_1_CONFIRMED=true\nHETZNER_IPV4=192.0.2.1\nSTAGE_2_CONFIRMED=true\nSTAGE_3_CONFIRMED=true\nSTAGE_4_CONFIRMED=true\n' > "$test_s3_state"
+printf '\nfr-par\nbkt\nscw_key\nscw_secret\nn\n' | \
+  PATH="$test_s3_dir/bin:$PATH" HOME="$test_s3_dir/home" WIZARD_STATE_FILE="$test_s3_state" bash "$wizard" >/dev/null 2>&1 || true
+if grep -q '^STAGE_5_CONFIRMED=true' "$test_s3_state"; then
+  ok=1
+fi
 check "$t" $ok
 
 [ $failures -eq 0 ] || { echo "$failures test(s) failed" >&2; exit 1; }
