@@ -1,6 +1,7 @@
 import { spawnSync } from "node:child_process";
 import { afterAll, describe, expect, it, vi } from "vitest";
-import type { RoutingHealth } from "../src/app.js";
+import type { AppConfig, RoutingHealth } from "../src/app.js";
+import { readConfig } from "../src/config.js";
 import { createPool } from "../src/db.js";
 
 // The login limiter keeps its counts in module state: each test loads a fresh app module so its limits start empty.
@@ -9,10 +10,14 @@ const routingUp: RoutingHealth = { osrm: async () => undefined, vroom: async () 
 let app: Awaited<ReturnType<typeof loadApp>>;
 let usernames = 0;
 
-async function loadApp(trustedProxyCidrs?: string[]) {
+const environment = {
+  SERVER_EPOCH: "client-ip-test", DATABASE_URL: "postgres://app:secret@localhost:5432/app", OSRM_URL: "http://127.0.0.1:5000", VROOM_URL: "http://127.0.0.1:3001",
+} as NodeJS.ProcessEnv;
+
+async function loadApp(trustedProxyCidrs?: string[], config: AppConfig = { serverEpoch: "client-ip-test", trustedProxyCidrs }) {
   vi.resetModules();
   const { createApp } = await import("../src/app.js");
-  return createApp({ db: appPool, routing: routingUp, config: { serverEpoch: "client-ip-test", trustedProxyCidrs } });
+  return createApp({ db: appPool, routing: routingUp, config });
 }
 
 // A failed login from a socket peer, as the Node server sees it, with an optional X-Forwarded-For header.
@@ -79,6 +84,39 @@ describe("client address behind trusted proxies", () => {
       expect((await failLogin(peer, header)).status).toBe(429);
       // Another proxy peer with the same header is not limited: the key was the socket address, never `unknown`.
       expect((await failLogin(`172.18.2.${index + 1}`, header)).status).toBe(401);
+    }
+  });
+
+  it("falls back to the socket address when any X-Forwarded-For entry is malformed", async () => {
+    app = await loadApp(["172.16.0.0/12"]);
+    // A valid rightmost address does not rescue a header with a malformed entry: each try varies it and still counts on the peer.
+    await failFiveTimes("172.18.0.3", (attempt) => `bad-${attempt}, 203.0.113.${attempt + 1}`);
+    expect((await failLogin("172.18.0.3", "bad-5, 203.0.113.6")).status).toBe(429);
+    expect((await failLogin("172.18.0.3", "203.0.113.7, not-an-address")).status).toBe(429);
+    expect((await failLogin("172.18.0.4", "bad-5, 203.0.113.6")).status).toBe(401);
+  });
+
+  it("reads TRUSTED_PROXY_CIDRS from the environment, trusting no proxy when it is unset or empty", async () => {
+    expect(readConfig(environment).trustedProxyCidrs).toEqual([]);
+    expect(readConfig({ ...environment, TRUSTED_PROXY_CIDRS: " " }).trustedProxyCidrs).toEqual([]);
+    expect(readConfig({ ...environment, TRUSTED_PROXY_CIDRS: "172.16.0.0/12, 10.0.0.0/8" }).trustedProxyCidrs).toEqual(["172.16.0.0/12", "10.0.0.0/8"]);
+
+    for (const value of [undefined, ""]) {
+      app = await loadApp(undefined, readConfig({ ...environment, TRUSTED_PROXY_CIDRS: value }));
+      await failFiveTimes("172.18.0.3", (attempt) => `203.0.113.${attempt + 1}`);
+      expect((await failLogin("172.18.0.3", "198.51.100.7")).status).toBe(429);
+    }
+
+    app = await loadApp(undefined, readConfig({ ...environment, TRUSTED_PROXY_CIDRS: "10.0.0.0/8, 172.16.0.0/12" }));
+    await failFiveTimes("172.18.0.3", "203.0.113.5");
+    expect((await failLogin("172.18.0.3", "203.0.113.5")).status).toBe(429);
+    expect((await failLogin("172.18.0.3", "198.51.100.7")).status).toBe(401);
+  });
+
+  it("refuses a TRUSTED_PROXY_CIDRS that trusts every address", () => {
+    for (const value of ["0.0.0.0/0", "::/0", "172.16.0.0/12, 10.0.0.0/0"]) {
+      expect(() => readConfig({ ...environment, TRUSTED_PROXY_CIDRS: value }), value)
+        .toThrow("TRUSTED_PROXY_CIDRS must not trust every address (a /0 such as 0.0.0.0/0 or ::/0)");
     }
   });
 

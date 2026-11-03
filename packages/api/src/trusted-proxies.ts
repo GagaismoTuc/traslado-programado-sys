@@ -1,6 +1,7 @@
 import { BlockList, isIP } from "node:net";
 
 const INVALID = "TRUSTED_PROXY_CIDRS must be a comma-separated list of CIDRs such as 172.16.0.0/12";
+const TRUSTS_EVERYONE = "TRUSTED_PROXY_CIDRS must not trust every address (a /0 such as 0.0.0.0/0 or ::/0)";
 
 // Empty or unset trusts no proxy: the API keeps the socket address and ignores X-Forwarded-For.
 export function readTrustedProxyCidrs(value: string | undefined) {
@@ -18,6 +19,8 @@ export function createTrustedProxies(cidrs: string[]) {
     const family = match ? isIP(match[1]!) : 0;
     const prefix = Number(match?.[2]);
     if (!match || !family || prefix > (family === 4 ? 32 : 128)) throw new Error(INVALID);
+    // A /0 would let any client name its own address and dodge the login limiter.
+    if (prefix === 0) throw new Error(TRUSTS_EVERYONE);
     proxies.addSubnet(match[1]!, prefix, family === 4 ? "ipv4" : "ipv6");
   }
   return proxies;
@@ -30,13 +33,11 @@ function isTrustedProxy(proxies: BlockList, address: string) {
 }
 
 // Only a trusted peer may name the client. X-Forwarded-For is walked from the right, skipping trusted proxies, so
-// addresses a client prepends are never reached; anything unusable falls back to the socket address.
+// addresses a client prepends are never reached. A header with any malformed entry is unusable as a whole and, like a
+// missing one, falls back to the socket address.
 export function forwardedClientIp(socketAddress: string, forwardedFor: string | undefined, proxies: BlockList) {
   if (!isTrustedProxy(proxies, socketAddress)) return socketAddress;
-  for (const entry of (forwardedFor ?? "").split(",").reverse()) {
-    const address = entry.trim();
-    if (!isIP(address)) return socketAddress;
-    if (!isTrustedProxy(proxies, address)) return address;
-  }
-  return socketAddress;
+  const addresses = (forwardedFor ?? "").split(",").map((entry) => entry.trim());
+  if (!addresses.every((address) => isIP(address))) return socketAddress;
+  return addresses.reverse().find((address) => !isTrustedProxy(proxies, address)) ?? socketAddress;
 }
