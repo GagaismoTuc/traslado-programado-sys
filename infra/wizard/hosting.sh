@@ -455,6 +455,78 @@ resolve_host_ip() {
   printf '%s' "$ip"
 }
 
+_verify_hetzner_firewall_response() {
+  local json="$1"
+  [[ -z "$json" ]] && return 1
+
+  if command -v node >/dev/null 2>&1; then
+    local node_code=0
+    JSON_STR="$json" node -e '
+      try {
+        const raw = process.env.JSON_STR || "";
+        const data = JSON.parse(raw);
+        if (!Array.isArray(data.firewalls)) process.exit(1);
+        const allowedPorts = new Set(["22", "80", "443"]);
+        const found = data.firewalls.some(fw => {
+          if (!Array.isArray(fw.applied_to) || fw.applied_to.length === 0) return false;
+          if (!Array.isArray(fw.rules)) return false;
+          const inbound = fw.rules.filter(r => r.direction === "in");
+          if (inbound.length === 0) return false;
+          const ports = new Set();
+          for (const r of inbound) {
+            if (r.protocol !== "tcp") return false;
+            const p = String(r.port);
+            if (!allowedPorts.has(p)) return false;
+            ports.add(p);
+          }
+          return ports.size === 3;
+        });
+        process.exit(found ? 0 : 1);
+      } catch (e) {
+        process.exit(2);
+      }
+    ' >/dev/null 2>&1 || node_code=$?
+    if [[ $node_code -eq 0 ]]; then
+      return 0
+    else
+      return 1
+    fi
+  fi
+
+  if command -v jq >/dev/null 2>&1; then
+    local jq_code=0
+    printf '%s' "$json" | jq -e '
+      if (.firewalls | type != "array") then
+        false
+      else
+        .firewalls | any(
+          ((.applied_to | length) > 0) and
+          ([.rules[]? | select(.direction == "in")] as $in |
+            ($in | length > 0) and
+            ($in | all(.protocol == "tcp" and (.port == "22" or .port == "80" or .port == "443" or .port == 22 or .port == 80 or .port == 443))) and
+            ([$in[].port | tostring] | unique | sort == ["22", "443", "80"])
+          )
+        )
+      end
+    ' >/dev/null 2>&1 || jq_code=$?
+    if [[ $jq_code -eq 0 ]]; then
+      return 0
+    else
+      return 1
+    fi
+  fi
+
+  if echo "$json" | grep -q '"firewalls"'; then
+    if echo "$json" | grep -q '"applied_to"[[:space:]]*:[[:space:]]*\[' && \
+       echo "$json" | grep -q '"port"[[:space:]]*:[[:space:]]*"22"' && \
+       echo "$json" | grep -q '"port"[[:space:]]*:[[:space:]]*"80"' && \
+       echo "$json" | grep -q '"port"[[:space:]]*:[[:space:]]*"443"'; then
+      return 0
+    fi
+  fi
+  return 1
+}
+
 _verify_uptimerobot_response() {
   local json="$1"
   local expected_host="$2"
@@ -474,7 +546,7 @@ _verify_uptimerobot_response() {
           const u = m.url || "";
           const urlMatches = (u === target || u === target + "/");
           const intervalNum = Number(m.interval);
-          const intervalMatches = (intervalNum === 300 || intervalNum === 5);
+          const intervalMatches = (intervalNum === 300);
           return urlMatches && intervalMatches;
         });
         process.exit(found ? 0 : 1);
@@ -497,7 +569,7 @@ _verify_uptimerobot_response() {
       else
         .monitors | any(
           ((.url == $target) or (.url == ($target + "/"))) and
-          ((.interval == 300) or (.interval == 5) or (.interval == "300") or (.interval == "5"))
+          ((.interval == 300) or (.interval == "300"))
         )
       end
     ' >/dev/null 2>&1 || jq_code=$?
@@ -513,7 +585,7 @@ _verify_uptimerobot_response() {
       BEGIN { RS = "[{}]"; found = 0 }
       {
         url_ok = ($0 ~ ("\"url\"[[:space:]]*:[[:space:]]*\"" target "(\"|/\")"))
-        int_ok = ($0 ~ "\"interval\"[[:space:]]*:[[:space:]]*\"?(300|5)\"?([^0-9]|$)")
+        int_ok = ($0 ~ "\"interval\"[[:space:]]*:[[:space:]]*\"?300\"?([^0-9]|$)")
         if (url_ok && int_ok) { found = 1 }
       }
       END { exit (found ? 0 : 1) }
@@ -660,13 +732,46 @@ run_wizard() {
     step "   • TCP 443 (HTTPS) from Any IPv4 / IPv6"
     step "4. Remove any other inbound rules."
     step "5. Under 'Apply to', select the server 'traslado-prod' and click 'Create Firewall'."
+    step "6. In Hetzner Cloud Console, go to Security ▸ API Tokens."
+    step "   Generate or copy a Read-Only API token to verify the firewall."
+    note "The API token is read hidden and passed on stdin to curl; it is never saved to disk."
 
-    pause "Press Enter once the firewall is created and attached."
-
+    local HETZNER_API_TOKEN=""
     while true; do
+      ask_secret HETZNER_API_TOKEN "Paste Hetzner Cloud Read-Only API Token:" || true
+      if [[ -z "$HETZNER_API_TOKEN" ]]; then
+        halt_verification 2 \
+          "Hetzner Cloud API Token is required to verify the firewall." \
+          "Generate a read-only API token in Hetzner Cloud Console under Security > API Tokens."
+        continue
+      fi
+
+      say "Verifying firewall configuration via Hetzner Cloud API..."
+      local fw_check_ok=false
+      local fw_err=""
+      local response=""
+      if command -v curl >/dev/null 2>&1; then
+        response=$(printf 'header = "Authorization: Bearer %s"\n' "$HETZNER_API_TOKEN" | curl -s -K - \
+          --connect-timeout 5 \
+          "https://api.hetzner.cloud/v1/firewalls" 2>&1 || true)
+      fi
+
+      if [[ -n "$response" ]] && _verify_hetzner_firewall_response "$response"; then
+        fw_check_ok=true
+      else
+        fw_err="Firewall is not attached to a server, or inbound rules do not restrict exclusively to TCP 22, 80, 443."
+      fi
+
+      if [[ "$fw_check_ok" != "true" ]]; then
+        halt_verification 2 \
+          "Hetzner firewall verification failed: $fw_err" \
+          "Ensure a firewall is attached to the server with inbound rules allowing only TCP 22, 80, and 443."
+        continue
+      fi
+
       say "Verifying SSH port 22 is still reachable through the firewall..."
       if check_port_22 "$HETZNER_IPV4"; then
-        note "✓ Port 22 reachable on $HETZNER_IPV4 with firewall active"
+        note "✓ Hetzner firewall attached and inbound rules verified (TCP 22, 80, 443 only)"
         break
       else
         halt_verification 2 \
@@ -807,16 +912,36 @@ run_wizard() {
     step "   and paste the token when prompted for password."
     note "The token is typed directly on the server side and is never saved to the repository or locally."
 
-    pause "Press Enter once 'Login Succeeded' appears on the server."
+    pause "Press Enter once 'docker login ghcr.io' succeeded on the server."
 
     while true; do
-      if confirm "Did 'docker login ghcr.io' print 'Login Succeeded' on the server?"; then
-        note "✓ GHCR authentication verified"
+      say "Verifying GHCR authenticated access on server as user deploy..."
+      local ghcr_check_ok=false
+      local ghcr_err=""
+      local ghcr_out=""
+      local test_image="ghcr.io/gagaismotuc/traslado-osrm:tucuman-260101-osrm26.4.0-r1"
+
+      if command -v ssh >/dev/null 2>&1; then
+        local ssh_rc=0
+        ghcr_out=$(ssh -o BatchMode=yes -o ConnectTimeout=10 -o StrictHostKeyChecking=accept-new "deploy@$HETZNER_IPV4" \
+          "docker manifest inspect $test_image 2>&1 || docker pull $test_image 2>&1" 2>&1) || ssh_rc=$?
+
+        if [[ $ssh_rc -eq 0 ]] && echo "$ghcr_out" | grep -qE '"schemaVersion"|"mediaType"|Digest:|Status:|sha256:'; then
+          ghcr_check_ok=true
+        else
+          ghcr_err="${ghcr_out:-empty response from server}"
+        fi
+      else
+        ghcr_err="ssh command not available"
+      fi
+
+      if [[ "$ghcr_check_ok" == "true" ]]; then
+        note "✓ Authenticated GHCR access verified for user deploy on server"
         break
       else
         halt_verification 4 \
-          "GHCR docker login was not completed." \
-          "Create a token with read:packages and run 'docker login ghcr.io' as deploy user."
+          "GHCR access verification failed on server: $ghcr_err" \
+          "Log into server as deploy, run 'docker login ghcr.io' with a PAT having read:packages scope, and retry."
       fi
     done
 
@@ -1085,6 +1210,26 @@ run_wizard() {
     step "Command on server: echo '$deploy_pub_key' >> /home/deploy/.ssh/authorized_keys"
 
     pause "Press Enter once the public key has been added to the server's authorized_keys."
+
+    while true; do
+      say "Verifying dedicated deploy SSH key authentication on deploy@$HETZNER_IPV4..."
+      local key_auth_ok=false
+      local key_auth_out=""
+      if command -v ssh >/dev/null 2>&1; then
+        if key_auth_out=$(ssh -i "$deploy_key_file" -o IdentitiesOnly=yes -o BatchMode=yes -o ConnectTimeout=5 -o StrictHostKeyChecking=accept-new "deploy@$HETZNER_IPV4" true 2>&1); then
+          key_auth_ok=true
+        fi
+      fi
+
+      if [[ "$key_auth_ok" == "true" ]]; then
+        note "✓ Dedicated deploy SSH key verified on server"
+        break
+      else
+        halt_verification 8 \
+          "Server rejected authentication with the new dedicated deploy SSH key (response: ${key_auth_out:-no response})." \
+          "Ensure the public key is appended to /home/deploy/.ssh/authorized_keys on the server."
+      fi
+    done
 
     say "Gathering SSH host keys for DEPLOY_KNOWN_HOSTS via ssh-keyscan..."
     local deploy_known_hosts=""

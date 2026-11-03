@@ -119,6 +119,9 @@ t="hosting.sh passes shellcheck"
 ok=0
 if command -v shellcheck > /dev/null 2>&1; then
   shellcheck "$wizard" > /dev/null 2>&1 || ok=1
+else
+  echo "shellcheck not found in PATH" >&2
+  ok=1
 fi
 check "$t" $ok
 
@@ -189,6 +192,10 @@ cat > "$test_bin/ssh" <<'EOF'
 case "$*" in
   *PubkeyAuthentication=no*) echo 'Permission denied (publickey).' >&2; exit 255;;
   *root@*) echo 'Permission denied (publickey).' >&2; exit 255;;
+  *docker\ manifest*|*docker\ pull*)
+    echo '{"schemaVersion": 2, "mediaType": "application/vnd.docker.distribution.manifest.v2+json", "config": {"digest": "sha256:synthetic"}}'
+    exit 0
+    ;;
   *deploy@*) echo 'Docker version 27.0.0'; exit 0;;
   *) exit 0;;
 esac
@@ -223,6 +230,7 @@ cat > "$test_bin/curl" <<'EOF'
 case "$*" in
   *s3.fr-par.scw.cloud*) printf 200;;
   *api.uptimerobot.com*) printf '{"stat":"ok","pagination":{"total":1},"monitors":[{"id":1,"friendly_name":"traslado-prod-health","url":"https://example.test/health","interval":300}]}';;
+  *api.hetzner.cloud*) printf '{"firewalls":[{"id":1,"name":"traslado-firewall","applied_to":[{"type":"server","server":{"id":1}}],"rules":[{"direction":"in","protocol":"tcp","port":"22"},{"direction":"in","protocol":"tcp","port":"80"},{"direction":"in","protocol":"tcp","port":"443"}]}]}';;
   *) printf 200;;
 esac
 EOF
@@ -238,6 +246,8 @@ EOF
 chmod +x "$test_bin/"*
 
 repo_root=$(cd "$scripts/../.." && pwd -P)
+preexisting_ignored=$repo_root/.env.preexisting_ignored_sentinel_test
+printf 'PREEXISTING_KEY=preexisting_value\n' > "$preexisting_ignored"
 git_status_before=$(git -C "$repo_root" status --porcelain --ignored)
 
 full_run_input=$(printf '%s\n' \
@@ -245,12 +255,11 @@ full_run_input=$(printf '%s\n' \
   "fsn1" \
   "192.0.2.1" \
   "" \
+  "HETZNER_SYNTHETIC_API_TOKEN_SENTINEL" \
   "" \
   "" \
   "" \
   "" \
-  "" \
-  "y" \
   "" \
   "fr-par" \
   "bkt-synthetic" \
@@ -276,13 +285,28 @@ if ! grep -q 'SCW_ACCESS_KEY=SCW_SYNTHETIC_ACCESS_KEY_SENTINEL' "$test_secrets";
 if ! grep -q 'SCW_SECRET_KEY=SCW_SYNTHETIC_SECRET_KEY_SENTINEL' "$test_secrets"; then ok=1; fi
 if ! grep -q 'DEPLOY_SSH_KEY=SYNTHETIC_PRIVATE_KEY_SENTINEL' "$test_secrets"; then ok=1; fi
 if grep -rq 'SENTINEL' "$test_state" "$test_home" "$test_tmp"; then ok=1; fi
-if printf '%s' "$full_out" | grep -E -q 'SYNTHETIC_PRIVATE_KEY_SENTINEL|SCW_SYNTHETIC_SECRET_KEY_SENTINEL|UR_SYNTHETIC_KEY_SENTINEL|SCW_SYNTHETIC_ACCESS_KEY_SENTINEL'; then ok=1; fi
+if printf '%s' "$full_out" | grep -E -q 'SYNTHETIC_PRIVATE_KEY_SENTINEL|SCW_SYNTHETIC_SECRET_KEY_SENTINEL|UR_SYNTHETIC_KEY_SENTINEL|SCW_SYNTHETIC_ACCESS_KEY_SENTINEL|HETZNER_SYNTHETIC_API_TOKEN_SENTINEL'; then ok=1; fi
 
 git_status_after=$(git -C "$repo_root" status --porcelain --ignored)
 [ "$git_status_before" = "$git_status_after" ] || ok=1
 [ ! -f "$scripts/../../.env" ] || ok=1
 [ ! -f "$scripts/../../infra/wizard/.env" ] || ok=1
 if git -C "$repo_root" grep -q 'SYNTHETIC_PRIVATE_KEY_SENTINEL' -- ':!.github/scripts/test-ci-scripts.sh' 2>/dev/null; then ok=1; fi
+
+if grep -q 'SENTINEL' "$preexisting_ignored" 2>/dev/null; then ok=1; fi
+rm -f "$preexisting_ignored"
+
+leaked_sentinel_files=$(find "$repo_root" -maxdepth 4 \( -name "node_modules" -o -name "dist" -o -name ".git" \) -prune -o -type f -print | while IFS= read -r f; do
+  case "$f" in
+    */test-ci-scripts.sh|*/pr-107-body.md|*/odd/tasks/issue-105.md) continue ;;
+    *)
+      if grep -q 'SENTINEL' "$f" 2>/dev/null; then
+        echo "$f"
+      fi
+      ;;
+  esac
+done)
+if [ -n "$leaked_sentinel_files" ]; then ok=1; fi
 check "$t" $ok
 
 t="hosting.sh halts on verification failure and does not continue to next stage"
@@ -317,6 +341,10 @@ for test_sig in INT HUP; do
   for c in xdg-open explorer.exe wslview open; do
     printf '#!/bin/sh\nexit 0\n' > "$test_sig_bin/$c"
   done
+  cat > "$test_sig_bin/ssh" <<'EOF'
+#!/bin/sh
+exit 0
+EOF
 
   printf 'STAGE_1_CONFIRMED=true\nHETZNER_IPV4=192.0.2.1\nSTAGE_2_CONFIRMED=true\nSTAGE_3_CONFIRMED=true\nSTAGE_4_CONFIRMED=true\nSTAGE_5_CONFIRMED=true\nSCW_BUCKET=bkt\nSTAGE_6_CONFIRMED=true\nPRODUCTION_HOST=example.test\nSTAGING_HOST=staging.example.test\nSTAGE_7_CONFIRMED=true\n' > "$test_sig_state"
 
@@ -384,15 +412,19 @@ mkdir -p "$test_ur_dir/bin" "$test_ur_dir/home"
 for c in wslview explorer.exe xdg-open open; do printf '#!/bin/sh\nexit 0\n' > "$test_ur_dir/bin/$c"; done
 cat > "$test_ur_dir/bin/curl" <<'EOF'
 #!/bin/sh
-printf '%s' '{"stat":"ok","monitors":[{"url":"https://example.test/health","interval":600},{"url":"https://other.test/health","interval":300}]}'
+# Monitor URL matches but interval is 5 instead of required 300 seconds
+printf '%s' '{"stat":"ok","monitors":[{"url":"https://example.test/health","interval":5},{"url":"https://other.test/health","interval":300}]}'
 EOF
 chmod +x "$test_ur_dir/bin/"*
 test_ur_state=$test_ur_dir/state
 printf "HETZNER_IPV4='192.0.2.1'\nSCW_BUCKET='bucket'\nDOMAIN_NAME='example.test'\nPRODUCTION_HOST='example.test'\nSTAGING_HOST='staging.example.test'\n" > "$test_ur_state"
 for i in 1 2 3 4 5 6; do echo "STAGE_${i}_CONFIRMED=true" >> "$test_ur_state"; done
-printf '\ny\ny\ny\ny\ny\ny\nalerts@external.test\nsynthetic-key\nn\n' | \
-  PATH="$test_ur_dir/bin:$PATH" HOME="$test_ur_dir/home" WIZARD_STATE_FILE="$test_ur_state" bash "$wizard" >/dev/null 2>&1 || true
+ur_out=$(printf '\ny\ny\ny\ny\ny\ny\nalerts@external.test\nsynthetic-key\nn\n' | \
+  PATH="$test_ur_dir/bin:$PATH" HOME="$test_ur_dir/home" WIZARD_STATE_FILE="$test_ur_state" bash "$wizard" 2>&1 || true)
 if grep -q '^STAGE_7_CONFIRMED=true' "$test_ur_state"; then
+  ok=1
+fi
+if ! printf '%s' "$ur_out" | grep -q 'UptimeRobot monitor verification failed'; then
   ok=1
 fi
 check "$t" $ok
@@ -416,6 +448,32 @@ if [ -f "$test_p22_state" ] && grep -q '^STAGE_1_CONFIRMED=true' "$test_p22_stat
 fi
 check "$t" $ok
 
+t="hosting.sh stage 2 halts when firewall is not attached or inbound rules are invalid"
+ok=0
+test_fw_dir=$tmp/fw_test
+mkdir -p "$test_fw_dir/bin" "$test_fw_dir/home"
+for c in wslview explorer.exe xdg-open open; do printf '#!/bin/sh\nexit 0\n' > "$test_fw_dir/bin/$c"; done
+cat > "$test_fw_dir/bin/ssh" <<'EOF'
+#!/bin/sh
+exit 0
+EOF
+cat > "$test_fw_dir/bin/curl" <<'EOF'
+#!/bin/sh
+printf '%s' '{"firewalls":[{"id":1,"name":"traslado-firewall","applied_to":[{"type":"server","server":{"id":1}}],"rules":[{"direction":"in","protocol":"tcp","port":"22"},{"direction":"in","protocol":"tcp","port":"8080"}]}]}'
+EOF
+chmod +x "$test_fw_dir/bin/"*
+test_fw_state=$test_fw_dir/state
+printf "STAGE_1_CONFIRMED=true\nHETZNER_IPV4='192.0.2.1'\n" > "$test_fw_state"
+fw_out=$(printf '\ny\nsynthetic_token\nn\n' | \
+  PATH="$test_fw_dir/bin:$PATH" HOME="$test_fw_dir/home" WIZARD_STATE_FILE="$test_fw_state" bash "$wizard" 2>&1 || true)
+if grep -q '^STAGE_2_CONFIRMED=true' "$test_fw_state"; then
+  ok=1
+fi
+if ! printf '%s' "$fw_out" | grep -q 'Hetzner firewall verification failed'; then
+  ok=1
+fi
+check "$t" $ok
+
 t="hosting.sh stage 3 halts if root login with ssh key is accepted"
 ok=0
 test_root_dir=$tmp/root_test
@@ -424,17 +482,65 @@ for c in wslview explorer.exe xdg-open open; do printf '#!/bin/sh\nexit 0\n' > "
 cat > "$test_root_dir/bin/ssh" <<'EOF'
 #!/bin/sh
 case "$*" in
-  *root@*) echo 'Linux hetzner 6.8.0'; exit 0;;
-  *deploy@*) echo 'Docker version 27.0.0'; exit 0;;
-  *) exit 0;;
+  *PreferredAuthentications=none*deploy@*)
+    echo 'Permission denied (publickey).' >&2
+    exit 255
+    ;;
+  *root@*)
+    echo 'Linux hetzner 6.8.0'
+    exit 0
+    ;;
+  *deploy@*)
+    echo 'Docker version 27.0.0'
+    exit 0
+    ;;
+  *)
+    exit 0
+    ;;
 esac
 EOF
 chmod +x "$test_root_dir/bin/"*
 test_root_state=$test_root_dir/state
 printf 'STAGE_1_CONFIRMED=true\nHETZNER_IPV4=192.0.2.1\nSTAGE_2_CONFIRMED=true\n' > "$test_root_state"
-printf '\ny\ny\ny\nn\n' | \
-  PATH="$test_root_dir/bin:$PATH" HOME="$test_root_dir/home" WIZARD_STATE_FILE="$test_root_state" bash "$wizard" >/dev/null 2>&1 || true
+root_out=$(printf '\ny\ny\ny\nn\n' | \
+  PATH="$test_root_dir/bin:$PATH" HOME="$test_root_dir/home" WIZARD_STATE_FILE="$test_root_state" bash "$wizard" 2>&1 || true)
 if grep -q '^STAGE_3_CONFIRMED=true' "$test_root_state"; then
+  ok=1
+fi
+if ! printf '%s' "$root_out" | grep -q 'Verifying root login'; then
+  ok=1
+fi
+if ! printf '%s' "$root_out" | grep -q 'Root login was accepted'; then
+  ok=1
+fi
+check "$t" $ok
+
+t="hosting.sh stage 4 halts when GHCR docker access check fails"
+ok=0
+test_ghcr_dir=$tmp/ghcr_test
+mkdir -p "$test_ghcr_dir/bin" "$test_ghcr_dir/home"
+for c in wslview explorer.exe xdg-open open; do printf '#!/bin/sh\nexit 0\n' > "$test_ghcr_dir/bin/$c"; done
+cat > "$test_ghcr_dir/bin/ssh" <<'EOF'
+#!/bin/sh
+case "$*" in
+  *docker\ manifest*|*docker\ pull*)
+    echo 'Error response from daemon: unauthorized: authentication required' >&2
+    exit 1
+    ;;
+  *)
+    exit 0
+    ;;
+esac
+EOF
+chmod +x "$test_ghcr_dir/bin/"*
+test_ghcr_state=$test_ghcr_dir/state
+printf 'STAGE_1_CONFIRMED=true\nHETZNER_IPV4=192.0.2.1\nSTAGE_2_CONFIRMED=true\nSTAGE_3_CONFIRMED=true\n' > "$test_ghcr_state"
+ghcr_out=$(printf '\ny\ny\ny\n\nn\n' | \
+  PATH="$test_ghcr_dir/bin:$PATH" HOME="$test_ghcr_dir/home" WIZARD_STATE_FILE="$test_ghcr_state" bash "$wizard" 2>&1 || true)
+if grep -q '^STAGE_4_CONFIRMED=true' "$test_ghcr_state"; then
+  ok=1
+fi
+if ! printf '%s' "$ghcr_out" | grep -q 'GHCR access verification failed'; then
   ok=1
 fi
 check "$t" $ok
@@ -457,6 +563,42 @@ printf 'STAGE_1_CONFIRMED=true\nHETZNER_IPV4=192.0.2.1\nSTAGE_2_CONFIRMED=true\n
 printf '\nfr-par\nbkt\nscw_key\nscw_secret\nn\n' | \
   PATH="$test_s3_dir/bin:$PATH" HOME="$test_s3_dir/home" WIZARD_STATE_FILE="$test_s3_state" bash "$wizard" >/dev/null 2>&1 || true
 if grep -q '^STAGE_5_CONFIRMED=true' "$test_s3_state"; then
+  ok=1
+fi
+check "$t" $ok
+
+t="hosting.sh stage 8 halts when dedicated deploy key is rejected by server"
+ok=0
+test_st8_dir=$tmp/st8_test
+mkdir -p "$test_st8_dir/bin" "$test_st8_dir/home" "$test_st8_dir/tmp"
+cat > "$test_st8_dir/bin/gh" <<'EOF'
+#!/bin/sh
+case "$1 $2" in
+  'auth status') exit 0;;
+  'secret set') exit 0;;
+  'secret list') printf '%s\n' DEPLOY_HOST DEPLOY_USER DEPLOY_SSH_KEY DEPLOY_KNOWN_HOSTS PRODUCTION_HOST STAGING_HOST SCW_ACCESS_KEY SCW_SECRET_KEY SCW_BUCKET; exit 0;;
+esac
+EOF
+cat > "$test_st8_dir/bin/ssh" <<'EOF'
+#!/bin/sh
+echo 'Permission denied (publickey).' >&2
+exit 255
+EOF
+cat > "$test_st8_dir/bin/ssh-keyscan" <<'EOF'
+#!/bin/sh
+echo '192.0.2.1 ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIDUMMY'
+EOF
+for c in wslview explorer.exe xdg-open open; do printf '#!/bin/sh\nexit 0\n' > "$test_st8_dir/bin/$c"; done
+chmod +x "$test_st8_dir/bin/"*
+test_st8_state=$test_st8_dir/state
+printf "HETZNER_IPV4='192.0.2.1'\nSCW_BUCKET='bucket'\nDOMAIN_NAME='example.test'\nPRODUCTION_HOST='example.test'\nSTAGING_HOST='staging.example.test'\n" > "$test_st8_state"
+for i in 1 2 3 4 5 6 7; do echo "STAGE_${i}_CONFIRMED=true" >> "$test_st8_state"; done
+st8_out=$(printf '\ny\ny\ny\ny\ny\ny\ny\nsynthetic_access\nsynthetic_secret\n\nn\n' | \
+  PATH="$test_st8_dir/bin:$PATH" HOME="$test_st8_dir/home" TMPDIR="$test_st8_dir/tmp" WIZARD_STATE_FILE="$test_st8_state" bash "$wizard" 2>&1 || true)
+if grep -q '^STAGE_8_CONFIRMED=true' "$test_st8_state"; then
+  ok=1
+fi
+if ! printf '%s' "$st8_out" | grep -q 'Server rejected authentication with the new dedicated deploy SSH key'; then
   ok=1
 fi
 check "$t" $ok
