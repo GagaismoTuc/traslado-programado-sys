@@ -19,13 +19,16 @@ afterEach(async () => {
   while (cleanups.length) await cleanups.pop()!();
 });
 
-// Listeners that accept connections and never answer them, on one port and every address a server could bind it on:
-// on Windows a listener on the wildcard address does not stop another bind on 0.0.0.0 or 127.0.0.1, on Linux it does
-// and those extra listens fail, which is fine.
-async function holdPort(): Promise<number> {
+// Listeners on one port and every address a server could bind it on: on Windows a listener on the wildcard address does
+// not stop another bind on 0.0.0.0 or 127.0.0.1, on Linux it does and those extra listens fail, which is fine. By default
+// they accept connections and never answer them.
+async function holdPort(answer?: (socket: Socket) => void): Promise<number> {
   const sockets = new Set<Socket>();
   const hold = async (port: number, host?: string) => {
-    const holder: Server = createServer((socket) => { sockets.add(socket); });
+    const holder: Server = createServer((socket) => {
+      sockets.add(socket);
+      answer?.(socket);
+    });
     await new Promise<void>((resolve, reject) => {
       holder.once("error", reject);
       holder.listen(port, host, resolve);
@@ -61,6 +64,17 @@ describe("e2e setup servers", () => {
     expect((await fetch(`${api.url}/auth/me`)).status).toBe(401);
     expect((await fetch(`${office.url}/api/auth/me`)).status).toBe(401);
     expect(await (await fetch(`${driver.url}/`)).text()).toContain("<title>driver</title>");
+  }, 60_000);
+
+  it("starts the API on another port when another API already answers on the first one", async () => {
+    const taken = await holdPort((socket) => {
+      socket.end("HTTP/1.1 401 Unauthorized\r\nX-Server-Epoch: another-run\r\nContent-Length: 0\r\nConnection: close\r\n\r\n");
+    });
+
+    const api = started(await startApi(taken, apiEnv));
+
+    expect(new URL(api.url).port).not.toBe(String(taken));
+    expect((await fetch(`${api.url}/auth/me`)).headers.get("x-server-epoch")).toBe(apiEnv.SERVER_EPOCH);
   }, 60_000);
 
   it("fails with the API output when the API exits for a reason other than a taken port", async () => {

@@ -3,14 +3,12 @@ import { randomBytes } from "node:crypto";
 import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { fileURLToPath } from "node:url";
 import { promisify } from "node:util";
 import { PostgreSqlContainer } from "@testcontainers/postgresql";
 import { startFakeVroom } from "./fake-vroom";
-import { apiRoot, randomPort, startApi, startDriver, startOffice } from "./servers";
+import { apiRoot, driverRoot, randomPort, startApi, startDriver, startOffice } from "./servers";
 
 const run = promisify(execFile);
-const driverRoot = fileURLToPath(new URL("../../driver", import.meta.url));
 
 function withCredentials(uri: string, username: string, password: string) {
   const url = new URL(uri);
@@ -39,7 +37,8 @@ export default async function globalSetup() {
 
   const vroom = await startFakeVroom();
   const api = await startApi(randomPort(), {
-    SERVER_EPOCH: "c3-e2e",
+    // Unique per run, so the setup knows its own API from one another run left on the same port.
+    SERVER_EPOCH: `c3-e2e-${randomBytes(4).toString("hex")}`,
     DATABASE_URL: withCredentials(rootUrl, "traslado_app", applicationPassword),
     // OSRM is only probed by /health, which the C3 tests never call; "Order" goes to the fake VROOM.
     OSRM_URL: "http://127.0.0.1:9",
