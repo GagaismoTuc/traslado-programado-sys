@@ -57,5 +57,6 @@ export function createDriverErrorTracker(options: DriverErrorTrackerOptions = {}
 }
 
 export function initDriverErrorTracking() {
-  return createDriverErrorTracker({ dsn: import.meta.env.VITE_GLITCHTIP_DSN, environment: import.meta.env.MODE, installGlobalHandlers: true });
+  const metaEnv = (import.meta as unknown as { env?: Record<string, string | undefined> }).env;
+  return createDriverErrorTracker({ dsn: metaEnv?.VITE_GLITCHTIP_DSN, environment: metaEnv?.MODE, installGlobalHandlers: true });
 }

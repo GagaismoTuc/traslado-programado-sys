@@ -25,6 +25,8 @@
 		}
 
 		# GlitchTip API tokens authenticate directly against GlitchTip.
+		# Note: Bearer tokens are delegated to GlitchTip's native token authentication for /api/0/*
+		# (e.g. project and event reading), while unauthenticated access to /api/0/ falls through to Basic Auth.
 		@bearer_api {
 			path /api/0/*
 			header Authorization "Bearer *"

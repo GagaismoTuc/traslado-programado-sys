@@ -57,7 +57,7 @@ const SENSITIVE_KEYS = new Set([
   "search", "params", "parameters", "args", "arguments", "bind", "variables", "input", "cookie", "cookies", "setcookie",
   "authorization", "proxyauthorization", "auth", "token", "tokenhash", "session", "sessiontoken", "rememberdevice", "secret",
   "totp", "totpsecret", "password", "passwordhash", "code", "recoverycode", "apikey", "xapikey", "xauthtoken", "xcsrftoken",
-  "xforwardedfor", "xrealip", "cfconnectingip", "ip", "ipaddress", "clientip", "lat", "lng", "lon", "latitude", "longitude",
+  "xforwardedfor", "forwarded", "trueclientip", "xclientip", "xrealip", "cfconnectingip", "ip", "ipaddress", "clientip", "lat", "lng", "lon", "latitude", "longitude",
   "homelat", "homelng", "homelatitude", "homelongitude", "startlat", "startlng", "startlatitude", "startlongitude", "endlat",
   "endlng", "coords", "coordinates", "location", "position", "pickup", "dropoff", "point", "points", "geo",
 ]);
@@ -76,7 +76,7 @@ function isCoordinatePair(value: unknown): boolean {
   if (!Array.isArray(value) || value.length !== 2) return false;
   const [a, b] = value;
   if (typeof a !== "number" || typeof b !== "number" || !Number.isFinite(a) || !Number.isFinite(b)) return false;
-  if (Number.isInteger(a) && Number.isInteger(b)) return false;
+
   return Math.abs(a) <= 180 && Math.abs(b) <= 180 && (Math.abs(a) <= 90 || Math.abs(b) <= 90);
 }
 
@@ -90,12 +90,19 @@ export function scrubString(input: string): string {
     .replace(/https?:\/\/[^\s"']+/gi, (match) => stripUrlQueryAndFragment(match))
     .replace(/(^|[\s"'(])(\/[A-Za-z0-9._~/%-;,-]*)[?#][^\s"')]+/g, (_, prefix: string, path: string) => `${prefix}${stripUrlQueryAndFragment(path)}`)
     .replace(/Key\s*\([^)]+\)=\([^)]*\)/gi, `Key (${REDACTED})=(${REDACTED})`)
+    .replace(/Failing row contains\s*\([^)]*\)/gi, `Failing row contains (${REDACTED})`)
+    .replace(/(invalid input (?:syntax|value)(?:\s+for\s+type|\s+for\s+enum|\s+for)?\s*[^:]*:\s*)("[^"]*"|'[^']*'|[^,\n\r]+)/gi, `$1"${REDACTED}"`)
     .replace(/"([a-zA-Z0-9_-]+)"\s*:\s*("[^"\\]*(?:\\.[^"\\]*)*"|-?\d+(?:\.\d+)?|true|false|null|\[\s*-?\d+(?:\.\d+)?(?:\s*,\s*-?\d+(?:\.\d+)?)+\s*\])/g, (full, key: string) =>
       isSensitiveKey(key) ? `"${key}":"${REDACTED}"` : full)
-    .replace(/\b([a-zA-Z0-9_-]+)\s*=\s*("[^"]*"|'[^']*'|[^\s,&;]+)/g, (full, key: string) =>
+    .replace(/\b([a-zA-Z0-9_-]+)\s*=\s*("[^"]*"|'[^']*'|[^\s,&;)]+(?:\s+(?![a-zA-Z0-9_-]+\s*=)[^\s,&;)]+)*)/g, (full, key: string) =>
       isSensitiveKey(key) ? `${key}=${REDACTED}` : full)
+    .replace(/\b(?:passenger|pasajero)\s+([^{,.;\r\n]+?)(?=(?:\s+(?:at|en|with|con|from|desde|to|hacia|for|para|in|\bKey\b)|[,.;\r\n)}\]]|$))/gi, `passenger ${REDACTED}`)
+    .replace(/(\bpassenger\s+\[REDACTED\]\s+(?:at|en)\s+)[^{,.;\r\n]+?(?=(?:\s+(?:with|con|from|desde|to|hacia|for|para|in|\bKey\b)|[,.;\r\n)}\]]|$))/gi, (full, prefix: string) => `${prefix}${REDACTED}`)
+    .replace(/\b(?:address|domicilio|calle|road|street)\s*[:=]?\s*([^{,.;\r\n]+?)(?=(?:\s+(?:with|con|from|desde|to|hacia|for|para|in|\bKey\b)|[,.;\r\n)}\]]|$))/gi, (full, value: string) =>
+      full.replace(value.trim(), REDACTED))
     .replace(/\b(Bearer|Basic)\s+[A-Za-z0-9._~+/-]+=*/gi, `$1 ${REDACTED}`)
     .replace(/(?<!\w)\+\d[\d\s().-]{7,}\d(?!\w)/g, REDACTED)
+    .replace(/(?<![0-9a-zA-Z])\d{10}(?![0-9a-zA-Z])/g, REDACTED)
     .replace(/-?\d{1,3}\.\d{2,}\s*,\s*-?\d{1,3}\.\d{2,}/g, REDACTED)
     .replace(/(?<![0-9a-zA-Z.])\d{1,2}\.\d{3}\.\d{3}(?![0-9a-zA-Z.])/g, REDACTED)
     .replace(/(?<![0-9a-zA-Z.-])\d{7,8}(?![0-9a-zA-Z.-])/g, REDACTED);

@@ -33,6 +33,9 @@ describe("scrubErrorEvent", () => {
           Authorization: "Bearer synthetic-secret-token",
           "X-Api-Key": "synthetic-api-key",
           "X-Forwarded-For": "203.0.113.10",
+          Forwarded: "for=203.0.113.11",
+          "True-Client-IP": "203.0.113.12",
+          "X-Client-IP": "203.0.113.13",
         },
       },
       exception: {
@@ -70,7 +73,7 @@ describe("scrubErrorEvent", () => {
       "Pasajero Sintético Uno", "Adulto Sintético Dos", "Receptor Sintético Tres", "Calle Inventada 202", "Portón verde",
       "llevar inhalador", "40123456", "40.123.456", "-456789", "3815550199", "-26.8302", "-65.2101", "-65.2205",
       "synthetic-session-cookie", "synthetic-remember-cookie", "synthetic-secret-token", "synthetic-api-key",
-      "chofer.sintetico", "203.0.113.10", "Inventada",
+      "chofer.sintetico", "203.0.113.10", "203.0.113.11", "203.0.113.12", "203.0.113.13", "Inventada",
     ]) {
       expect(serialized).not.toContain(forbidden);
     }
