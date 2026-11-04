@@ -77,7 +77,7 @@ describe("client address behind trusted proxies", () => {
 
   it("falls back to the socket address for a missing, empty, malformed or all-proxy X-Forwarded-For", async () => {
     app = await loadApp(["172.16.0.0/12"]);
-    const headers = [undefined, "", "not-an-address", "203.0.113.5:443", "172.18.0.2, 172.20.0.9"];
+    const headers = [undefined, "", "not-an-address", "203.0.113.5:443", "172.18.0.2, 172.20.0.9", "2001:db8:55::1%eth0"];
     for (const [index, header] of headers.entries()) {
       const peer = `172.18.1.${index + 1}`;
       await failFiveTimes(peer, header);

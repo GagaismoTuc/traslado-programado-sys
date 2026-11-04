@@ -50,10 +50,11 @@ function isTrustedProxy(proxies: BlockList, address: string) {
 
 // Only a trusted peer may name the client. X-Forwarded-For is walked from the right, skipping trusted proxies, so
 // addresses a client prepends are never reached. A header with any malformed entry is unusable as a whole and, like a
-// missing one, falls back to the socket address.
+// missing one, falls back to the socket address. An IPv6 zone suffix (`2001:db8::1%eth0`) is malformed there: it only
+// means something on the proxy's own host, and isIP accepts any suffix, so one client could take a new key per try.
 export function forwardedClientIp(socketAddress: string, forwardedFor: string | undefined, proxies: BlockList) {
   if (!isTrustedProxy(proxies, socketAddress)) return socketAddress;
   const addresses = (forwardedFor ?? "").split(",").map((entry) => entry.trim());
-  if (!addresses.every((address) => isIP(address))) return socketAddress;
+  if (!addresses.every((address) => isIP(address) && !address.includes("%"))) return socketAddress;
   return addresses.reverse().find((address) => !isTrustedProxy(proxies, address)) ?? socketAddress;
 }
