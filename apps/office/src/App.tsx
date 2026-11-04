@@ -7,6 +7,7 @@ import { TransferHistoryPage } from "./TransferHistoryPage";
 import { DestinationsPage } from "./DestinationsPage";
 import { DriversPage } from "./DriversPage";
 import { ExpiriesPage } from "./Expiries";
+import { LiveMapPage } from "./LiveMapPage";
 import { OfficeNav } from "./OfficeNav";
 import { PassengersPage } from "./PassengersPage";
 import { PlanPage } from "./PlanPage";
@@ -25,6 +26,12 @@ function SignInPage() {
   const [error, setError] = useState("");
   const [loading, setLoading] = useState(false);
 
+  useEffect(() => {
+    void send("/auth/me", "GET").then((res) => {
+      if (res.ok) window.location.assign("/live");
+    }).catch(() => undefined);
+  }, []);
+
   async function submit(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
     setError("");
@@ -41,7 +48,7 @@ function SignInPage() {
         setError(result.error ?? "Sign-in failed");
       } else {
         const result = await response.json() as { secondFactor?: string };
-        window.location.assign(result.secondFactor ? "/second-factor" : "/users");
+        window.location.assign(result.secondFactor ? "/second-factor" : "/live");
       }
     } catch {
       setError("Unable to reach the server");
@@ -144,6 +151,7 @@ function UsersPage() {
 
 export function App() {
   const path = typeof window !== "undefined" ? window.location.pathname : "/";
+  if (path === "/live" || path === "/map") return <LiveMapPage />;
   if (path === "/second-factor") return <SecondFactorPage />;
   if (path === "/destinations") return <DestinationsPage />;
   if (path === "/vehicle-features") return <VehicleFeaturesPage />;
