@@ -8,12 +8,26 @@ export const apiRoot = fileURLToPath(new URL("../../../packages/api", import.met
 
 export type StartedServer = { url: string; close: () => Promise<void> };
 
-const PORT_ATTEMPTS = 20;
+export const PORT_ATTEMPTS = 20;
 
 // A first port to try, below the ephemeral ranges of Linux and Windows. It is never probed: a probe closed and bound
 // again later leaves a window for another listener, so a taken port is found by the server's own bind instead.
 export function randomPort() {
   return 20_000 + Math.floor(Math.random() * 10_000);
+}
+
+// A random port that neither is nor sits next to one already tried, so a block of taken ports is not walked port by port.
+function retryPort(tried: number[]) {
+  for (;;) {
+    const port = randomPort();
+    if (tried.every((other) => Math.abs(other - port) > 1)) return port;
+  }
+}
+
+function portTaken(message: string) {
+  const error: NodeJS.ErrnoException = new Error(message);
+  error.code = "EADDRINUSE";
+  return error;
 }
 
 function isPortInUse(error: unknown) {
@@ -22,19 +36,26 @@ function isPortInUse(error: unknown) {
   return (error as NodeJS.ErrnoException).code === "EADDRINUSE" || /^Port \d+ is already in use$/.test(error.message);
 }
 
-// Starts a server on `port`, or on the next port each time that one is taken. Any other error fails at once.
-async function onFirstFreePort(port: number, start: (port: number) => Promise<StartedServer>) {
-  for (let attempt = 0; ; attempt++) {
+// Starts a server on `port`, or on a random port each time the last one is taken, up to PORT_ATTEMPTS ports. Any
+// other error fails at once.
+export async function onFreePort(port: number, start: (port: number) => Promise<StartedServer>) {
+  const tried: number[] = [];
+  for (let next = port; ; next = retryPort(tried)) {
+    tried.push(next);
     try {
-      return await start(port + attempt);
+      return await start(next);
     } catch (error) {
-      if (!isPortInUse(error) || attempt === PORT_ATTEMPTS - 1) throw error;
+      if (!isPortInUse(error)) throw error;
+      if (tried.length === PORT_ATTEMPTS) {
+        throw new Error(`No free port after ${PORT_ATTEMPTS} attempts; tried ${tried.join(", ")}`, { cause: error });
+      }
     }
   }
 }
 
 // `closed` turns true once the API exited and its output was read in full, so a bind error is never cut off.
 async function waitForApi(url: string, epoch: string, closed: () => boolean, output: () => string) {
+  let unanswered = 0;
   for (let attempt = 0; attempt < 100; attempt++) {
     if (closed()) {
       const error: NodeJS.ErrnoException = new Error(`The API exited before answering:\n${output()}`);
@@ -43,38 +64,50 @@ async function waitForApi(url: string, epoch: string, closed: () => boolean, out
       throw error;
     }
     // Bounded, because the listener that holds a taken port may accept the request and never answer it.
-    const response = await fetch(url, { signal: AbortSignal.timeout(1_000) }).catch(() => null);
-    // Every answer of the API names its epoch, so another API that holds the port is not taken for this one.
-    if (response?.status === 401 && response.headers.get("x-server-epoch") === epoch) return;
+    const response = await fetch(url, { signal: AbortSignal.timeout(1_000) }).catch((error: unknown) => {
+      // A refused connection only means the API is not listening yet; a timeout means another listener took it.
+      if (error instanceof Error && error.name === "TimeoutError") unanswered++;
+      return null;
+    });
+    // Every answer of the API names its epoch. On Windows the API can bind 0.0.0.0 while another server holds
+    // 127.0.0.1 on the same port and gets every request, so an answer without this epoch means the port is taken.
+    if (response && response.headers.get("x-server-epoch") !== epoch) throw portTaken(`Port of ${url} answers for another server`);
+    if (unanswered === 3) throw portTaken(`Port of ${url} accepts requests and never answers them`);
+    if (response?.status === 401) return;
     await new Promise((resolve) => setTimeout(resolve, 200));
   }
   throw new Error(`The API did not answer ${url}:\n${output()}`);
 }
 
 export function startApi(port: number, env: Record<string, string>) {
-  return onFirstFreePort(port, async (port) => {
+  return onFreePort(port, async (port) => {
     let output = "";
     const api = spawn(process.execPath, ["--import", "tsx", "src/server.ts"], {
       cwd: apiRoot,
       env: { ...process.env, ...env, PORT: String(port) },
     });
     let closed = false;
+    const exited = new Promise<void>((resolve) => api.on("close", () => { closed = true; resolve(); }));
     api.stdout.on("data", (chunk) => { output += chunk; });
     api.stderr.on("data", (chunk) => { output += chunk; });
-    api.on("close", () => { closed = true; });
+    // Waits for the process to be gone, so the next attempt or the test runner never meets it still holding the port.
+    const stop = async () => {
+      api.kill();
+      await exited;
+    };
     const url = `http://127.0.0.1:${port}`;
     try {
       await waitForApi(`${url}/auth/me`, env.SERVER_EPOCH, () => closed, () => output);
     } catch (error) {
-      api.kill();
+      await stop();
       throw error;
     }
-    return { url, close: async () => { api.kill(); } };
+    return { url, close: stop };
   });
 }
 
 export function startOffice(port: number, apiUrl: string) {
-  return onFirstFreePort(port, async (port) => {
+  return onFreePort(port, async (port) => {
     const url = `http://localhost:${port}`;
     // vite.config.ts and the Office read these from the environment; destinations.e2e.ts reads VITE_MAP_STYLE_URL too.
     process.env.API_PROXY_TARGET = apiUrl;
@@ -93,7 +126,7 @@ export function startOffice(port: number, apiUrl: string) {
 }
 
 export function startDriver(port: number, outDir: string, apiUrl: string) {
-  return onFirstFreePort(port, async (port) => {
+  return onFreePort(port, async (port) => {
     const server = await preview({
       root: driverRoot,
       logLevel: "warn",
