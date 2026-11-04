@@ -229,8 +229,9 @@ cat > "$test_bin/curl" <<'EOF'
 #!/bin/sh
 case "$*" in
   *s3.fr-par.scw.cloud*) printf 200;;
-  *api.uptimerobot.com*) printf '{"stat":"ok","pagination":{"total":1},"monitors":[{"id":1,"friendly_name":"traslado-prod-health","url":"https://example.test/health","interval":300}]}';;
-  *api.hetzner.cloud*) printf '{"firewalls":[{"id":1,"name":"traslado-firewall","applied_to":[{"type":"server","server":{"id":1}}],"rules":[{"direction":"in","protocol":"tcp","port":"22"},{"direction":"in","protocol":"tcp","port":"80"},{"direction":"in","protocol":"tcp","port":"443"}]}]}';;
+  *api.uptimerobot.com*) printf '{"stat":"ok","pagination":{"total":1},"monitors":[{"id":1,"friendly_name":"traslado-prod-health","url":"https://example.test/health","interval":300,"alert_contacts":[{"value":"alerts@external.test"}]}]}';;
+  *api.hetzner.cloud/v1/servers*) printf '{"servers":[{"id":1,"name":"traslado-prod","public_net":{"ipv4":{"ip":"192.0.2.1"}}}]}';;
+  *api.hetzner.cloud/v1/firewalls*) printf '{"firewalls":[{"id":1,"name":"traslado-firewall","applied_to":[{"type":"server","server":{"id":1}}],"rules":[{"direction":"in","protocol":"tcp","port":"22"},{"direction":"in","protocol":"tcp","port":"80"},{"direction":"in","protocol":"tcp","port":"443"}]}]}';;
   *) printf 200;;
 esac
 EOF
@@ -246,7 +247,7 @@ EOF
 chmod +x "$test_bin/"*
 
 repo_root=$(cd "$scripts/../.." && pwd -P)
-preexisting_ignored=$repo_root/.env.preexisting_ignored_sentinel_test
+preexisting_ignored=$(mktemp "$repo_root/.env.preexisting_ignored_XXXXXX")
 printf 'PREEXISTING_KEY=preexisting_value\n' > "$preexisting_ignored"
 git_status_before=$(git -C "$repo_root" status --porcelain --ignored)
 
@@ -429,6 +430,25 @@ if ! printf '%s' "$ur_out" | grep -q 'UptimeRobot monitor verification failed'; 
 fi
 check "$t" $ok
 
+t="hosting.sh stage 7 halts when monitor has empty alert contacts"
+ok=0
+test_ur_nocontacts_dir=$tmp/ur_nocontacts_test
+mkdir -p "$test_ur_nocontacts_dir/bin" "$test_ur_nocontacts_dir/home"
+for x in wslview explorer.exe xdg-open open; do printf '#!/bin/sh\nexit 0\n' > "$test_ur_nocontacts_dir/bin/$x"; done
+cat > "$test_ur_nocontacts_dir/bin/curl" <<'STUB'
+#!/bin/sh
+cat >/dev/null
+printf '%s' '{"stat":"ok","monitors":[{"url":"https://example.test/health","interval":300,"alert_contacts":[]}]}'
+STUB
+chmod +x "$test_ur_nocontacts_dir/bin/"*
+printf "HETZNER_IPV4='192.0.2.1'\nSCW_BUCKET='bucket'\nDOMAIN_NAME='example.test'\nPRODUCTION_HOST='example.test'\nSTAGING_HOST='staging.example.test'\n" > "$test_ur_nocontacts_dir/state"
+for i in 1 2 3 4 5 6; do echo "STAGE_${i}_CONFIRMED=true" >> "$test_ur_nocontacts_dir/state"; done
+printf '\ny\ny\ny\ny\ny\ny\nalerts@outside.test\ntoken\n\n' | PATH="$test_ur_nocontacts_dir/bin:$PATH" HOME="$test_ur_nocontacts_dir/home" WIZARD_STATE_FILE="$test_ur_nocontacts_dir/state" bash "$wizard" > "$test_ur_nocontacts_dir/out" 2>&1 || true
+if grep -q '^STAGE_7_CONFIRMED=true' "$test_ur_nocontacts_dir/state"; then
+  ok=1
+fi
+check "$t" $ok
+
 t="hosting.sh stage 1 halts when port 22 is unreachable with No route to host"
 ok=0
 test_p22_dir=$tmp/p22_test
@@ -459,7 +479,10 @@ exit 0
 EOF
 cat > "$test_fw_dir/bin/curl" <<'EOF'
 #!/bin/sh
-printf '%s' '{"firewalls":[{"id":1,"name":"traslado-firewall","applied_to":[{"type":"server","server":{"id":1}}],"rules":[{"direction":"in","protocol":"tcp","port":"22"},{"direction":"in","protocol":"tcp","port":"8080"}]}]}'
+case "$*" in
+  *v1/servers*) printf '%s' '{"servers":[{"id":1,"name":"traslado-prod","public_net":{"ipv4":{"ip":"192.0.2.1"}}}]}';;
+  *) printf '%s' '{"firewalls":[{"id":1,"name":"traslado-firewall","applied_to":[{"type":"server","server":{"id":1}}],"rules":[{"direction":"in","protocol":"tcp","port":"22"},{"direction":"in","protocol":"tcp","port":"8080"}]}]}';;
+esac
 EOF
 chmod +x "$test_fw_dir/bin/"*
 test_fw_state=$test_fw_dir/state
@@ -470,6 +493,49 @@ if grep -q '^STAGE_2_CONFIRMED=true' "$test_fw_state"; then
   ok=1
 fi
 if ! printf '%s' "$fw_out" | grep -q 'Hetzner firewall verification failed'; then
+  ok=1
+fi
+check "$t" $ok
+
+t="hosting.sh stage 2 halts when firewall is applied to another server"
+ok=0
+test_fw_other_dir=$tmp/fw_other_test
+mkdir -p "$test_fw_other_dir/bin" "$test_fw_other_dir/home"
+for x in wslview explorer.exe xdg-open open; do printf '#!/bin/sh\nexit 0\n' > "$test_fw_other_dir/bin/$x"; done
+cat > "$test_fw_other_dir/bin/curl" <<'STUB'
+#!/bin/sh
+cat >/dev/null
+printf '%s' '{"firewalls":[{"name":"other","applied_to":[{"type":"server","server":{"id":999}}],"rules":[{"direction":"in","protocol":"tcp","port":"22"},{"direction":"in","protocol":"tcp","port":"80"},{"direction":"in","protocol":"tcp","port":"443"}]}]}'
+STUB
+cat > "$test_fw_other_dir/bin/ssh" <<'STUB'
+#!/bin/sh
+echo 'Permission denied (publickey).' >&2
+exit 255
+STUB
+chmod +x "$test_fw_other_dir/bin/"*
+printf "STAGE_1_CONFIRMED=true\nHETZNER_IPV4='192.0.2.1'\n" > "$test_fw_other_dir/state"
+printf '\ny\nsynthetic-token\n\nn\n' | PATH="$test_fw_other_dir/bin:$PATH" HOME="$test_fw_other_dir/home" WIZARD_STATE_FILE="$test_fw_other_dir/state" bash "$wizard" > "$test_fw_other_dir/out" 2>&1 || true
+if grep -q '^STAGE_2_CONFIRMED=true' "$test_fw_other_dir/state"; then
+  ok=1
+fi
+check "$t" $ok
+
+t="hosting.sh stage 2 halts without node or jq when firewall is invalid"
+ok=0
+test_fw_noparser_dir=$tmp/fw_noparser_test
+mkdir -p "$test_fw_noparser_dir/bin" "$test_fw_noparser_dir/home"
+for x in wslview explorer.exe xdg-open open; do printf '#!/bin/sh\nexit 0\n' > "$test_fw_noparser_dir/bin/$x"; done
+cat > "$test_fw_noparser_dir/bin/curl" <<'STUB'
+#!/bin/sh
+cat >/dev/null
+printf '%s' '{"firewalls":[{"applied_to":[],"rules":[{"direction":"in","protocol":"udp","port":"22"},{"direction":"in","protocol":"tcp","port":"80"},{"direction":"in","protocol":"tcp","port":"443"},{"direction":"in","protocol":"tcp","port":"8080"}]}]}'
+STUB
+printf '#!/bin/sh\nexit 0\n' > "$test_fw_noparser_dir/bin/ssh"
+chmod +x "$test_fw_noparser_dir/bin/"*
+printf "STAGE_1_CONFIRMED=true\nHETZNER_IPV4='192.0.2.1'\n" > "$test_fw_noparser_dir/state"
+# Run in an environment whose /usr/bin and /bin do not contain node or jq.
+printf '\ny\ntoken\n\nn\n' | PATH="$test_fw_noparser_dir/bin:/usr/bin:/bin" HOME="$test_fw_noparser_dir/home" WIZARD_STATE_FILE="$test_fw_noparser_dir/state" bash "$wizard" > "$test_fw_noparser_dir/out" 2>&1 || true
+if grep -q '^STAGE_2_CONFIRMED=true' "$test_fw_noparser_dir/state"; then
   ok=1
 fi
 check "$t" $ok

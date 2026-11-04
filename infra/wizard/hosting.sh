@@ -238,6 +238,10 @@ STAGE_TITLES=(
   "Summary: what was created, existing secrets, and next steps for #36 and #37"
 )
 
+_has_json_parser() {
+  command -v node >/dev/null 2>&1 || command -v jq >/dev/null 2>&1
+}
+
 WIZARD_STATE_FILE="${WIZARD_STATE_FILE:-$HOME/.config/traslado-wizard/hosting.state}"
 WIZARD_TMP_DIR=""
 
@@ -455,20 +459,92 @@ resolve_host_ip() {
   printf '%s' "$ip"
 }
 
+_get_hetzner_server_id() {
+  local json="$1"
+  local target_ipv4="$2"
+  [[ -z "$json" || -z "$target_ipv4" ]] && return 1
+
+  if command -v node >/dev/null 2>&1; then
+    local node_code=0
+    local s_id=""
+    s_id=$(JSON_STR="$json" TARGET_IP="$target_ipv4" node -e '
+      try {
+        const raw = process.env.JSON_STR || "";
+        const data = JSON.parse(raw);
+        if (!Array.isArray(data.servers)) process.exit(1);
+        const target = process.env.TARGET_IP || "";
+        const found = data.servers.find(s => {
+          if (!s) return false;
+          const ip = s.public_net?.ipv4?.ip || s.ipv4 || s.ip || (typeof s.public_net?.ipv4 === "string" ? s.public_net.ipv4 : "");
+          return ip === target;
+        });
+        if (found && (found.id !== undefined && found.id !== null)) {
+          process.stdout.write(String(found.id));
+          process.exit(0);
+        }
+        process.exit(1);
+      } catch (e) {
+        process.exit(2);
+      }
+    ' 2>/dev/null) || node_code=$?
+    if [[ $node_code -eq 0 && -n "$s_id" ]]; then
+      printf '%s' "$s_id"
+      return 0
+    fi
+    return 1
+  fi
+
+  if command -v jq >/dev/null 2>&1; then
+    local jq_code=0
+    local s_id=""
+    s_id=$(printf '%s' "$json" | jq -r --arg ip "$target_ipv4" '
+      if (.servers | type != "array") then
+        empty
+      else
+        .servers[]? |
+        select(
+          ((.public_net?.ipv4?.ip == $ip) or (.ipv4 == $ip) or (.ip == $ip) or (.public_net?.ipv4 == $ip)) and
+          (.id != null)
+        ) |
+        .id
+      end
+    ' 2>/dev/null | head -n1) || jq_code=$?
+    if [[ $jq_code -eq 0 && -n "$s_id" && "$s_id" != "null" ]]; then
+      printf '%s' "$s_id"
+      return 0
+    fi
+    return 1
+  fi
+
+  return 1
+}
+
 _verify_hetzner_firewall_response() {
   local json="$1"
+  local server_id="${2:-}"
   [[ -z "$json" ]] && return 1
 
   if command -v node >/dev/null 2>&1; then
     local node_code=0
-    JSON_STR="$json" node -e '
+    JSON_STR="$json" SERVER_ID="$server_id" node -e '
       try {
         const raw = process.env.JSON_STR || "";
         const data = JSON.parse(raw);
         if (!Array.isArray(data.firewalls)) process.exit(1);
+        const sId = String(process.env.SERVER_ID || "").trim();
         const allowedPorts = new Set(["22", "80", "443"]);
         const found = data.firewalls.some(fw => {
           if (!Array.isArray(fw.applied_to) || fw.applied_to.length === 0) return false;
+          if (sId) {
+            const attached = fw.applied_to.some(a => {
+              if (!a) return false;
+              if (a.type === "server" && a.server && String(a.server.id) === sId) return true;
+              if (a.type === "server" && String(a.server) === sId) return true;
+              if (String(a.server_id) === sId) return true;
+              return false;
+            });
+            if (!attached) return false;
+          }
           if (!Array.isArray(fw.rules)) return false;
           const inbound = fw.rules.filter(r => r.direction === "in");
           if (inbound.length === 0) return false;
@@ -495,12 +571,22 @@ _verify_hetzner_firewall_response() {
 
   if command -v jq >/dev/null 2>&1; then
     local jq_code=0
-    printf '%s' "$json" | jq -e '
+    printf '%s' "$json" | jq -e --arg sid "$server_id" '
       if (.firewalls | type != "array") then
         false
       else
         .firewalls | any(
-          ((.applied_to | length) > 0) and
+          ((.applied_to | type == "array") and ((.applied_to | length) > 0)) and
+          (
+            if ($sid == "") then
+              true
+            else
+              .applied_to | any(
+                ((.type == "server") and ((.server.id | tostring) == $sid or (.server | tostring) == $sid)) or
+                ((.server_id | tostring) == $sid)
+              )
+            end
+          ) and
           ([.rules[]? | select(.direction == "in")] as $in |
             ($in | length > 0) and
             ($in | all(.protocol == "tcp" and (.port == "22" or .port == "80" or .port == "443" or .port == 22 or .port == 80 or .port == 443))) and
@@ -516,38 +602,46 @@ _verify_hetzner_firewall_response() {
     fi
   fi
 
-  if echo "$json" | grep -q '"firewalls"'; then
-    if echo "$json" | grep -q '"applied_to"[[:space:]]*:[[:space:]]*\[' && \
-       echo "$json" | grep -q '"port"[[:space:]]*:[[:space:]]*"22"' && \
-       echo "$json" | grep -q '"port"[[:space:]]*:[[:space:]]*"80"' && \
-       echo "$json" | grep -q '"port"[[:space:]]*:[[:space:]]*"443"'; then
-      return 0
-    fi
-  fi
   return 1
 }
 
 _verify_uptimerobot_response() {
   local json="$1"
   local expected_host="$2"
+  local expected_email="${3:-}"
   local target_url="https://${expected_host}/health"
+  [[ -z "$json" ]] && return 1
 
   if command -v node >/dev/null 2>&1; then
     local node_code=0
-    TARGET_URL="$target_url" JSON_STR="$json" node -e '
+    TARGET_URL="$target_url" EXPECTED_EMAIL="$expected_email" JSON_STR="$json" node -e '
       try {
         const raw = process.env.JSON_STR || "";
         const data = JSON.parse(raw);
         if (data.stat !== "ok" || !Array.isArray(data.monitors)) {
           process.exit(1);
         }
-        const target = process.env.TARGET_URL;
+        const target = process.env.TARGET_URL || "";
+        const email = (process.env.EXPECTED_EMAIL || "").toLowerCase().trim();
         const found = data.monitors.some(m => {
           const u = m.url || "";
           const urlMatches = (u === target || u === target + "/");
           const intervalNum = Number(m.interval);
           const intervalMatches = (intervalNum === 300);
-          return urlMatches && intervalMatches;
+          if (!urlMatches || !intervalMatches) return false;
+
+          if (!Array.isArray(m.alert_contacts) || m.alert_contacts.length === 0) {
+            return false;
+          }
+          if (!email) {
+            return true;
+          }
+          return m.alert_contacts.some(c => {
+            if (!c) return false;
+            if (typeof c === "string") return c.toLowerCase().trim() === email;
+            const val = (c.value || c.address || c.email || c.target || "").toLowerCase().trim();
+            return val === email;
+          });
         });
         process.exit(found ? 0 : 1);
       } catch (e) {
@@ -563,13 +657,28 @@ _verify_uptimerobot_response() {
 
   if command -v jq >/dev/null 2>&1; then
     local jq_code=0
-    printf '%s' "$json" | jq -e --arg target "$target_url" '
+    printf '%s' "$json" | jq -e --arg target "$target_url" --arg email "$expected_email" '
       if .stat != "ok" or (.monitors | type != "array") then
         false
       else
         .monitors | any(
           ((.url == $target) or (.url == ($target + "/"))) and
-          ((.interval == 300) or (.interval == "300"))
+          ((.interval == 300) or (.interval == "300")) and
+          (.alert_contacts | type == "array") and
+          ((.alert_contacts | length) > 0) and
+          (
+            if ($email == "") then
+              true
+            else
+              .alert_contacts | any(
+                if type == "string" then
+                  (. | ascii_downcase) == ($email | ascii_downcase)
+                else
+                  ((.value? // .address? // .email? // .target? // "") | ascii_downcase) == ($email | ascii_downcase)
+                end
+              )
+            end
+          )
         )
       end
     ' >/dev/null 2>&1 || jq_code=$?
@@ -580,19 +689,6 @@ _verify_uptimerobot_response() {
     fi
   fi
 
-  if echo "$json" | grep -q '"stat"[[:space:]]*:[[:space:]]*"ok"'; then
-    if echo "$json" | awk -v target="$target_url" '
-      BEGIN { RS = "[{}]"; found = 0 }
-      {
-        url_ok = ($0 ~ ("\"url\"[[:space:]]*:[[:space:]]*\"" target "(\"|/\")"))
-        int_ok = ($0 ~ "\"interval\"[[:space:]]*:[[:space:]]*\"?300\"?([^0-9]|$)")
-        if (url_ok && int_ok) { found = 1 }
-      }
-      END { exit (found ? 0 : 1) }
-    ' >/dev/null 2>&1; then
-      return 0
-    fi
-  fi
   return 1
 }
 
@@ -628,6 +724,19 @@ run_wizard() {
     fi
     validate_bucket_region "$2"
     return $?
+  fi
+
+  # ── Verify required JSON parser exists ──────────────────────────────────────
+  if ! _has_json_parser; then
+    warn "A JSON parser (node or jq) is required to run the hosting wizard."
+    say "Please install jq to continue:"
+    say "  • Debian/Ubuntu: sudo apt-get install -y jq"
+    say "  • Fedora/RHEL:   sudo dnf install -y jq"
+    say "  • Alpine:        apk add jq"
+    say "  • Arch Linux:    pacman -S jq"
+    say "  • macOS:         brew install jq"
+    say "  • Windows:       winget install jqlang.jq"
+    exit 1
   fi
 
   # ── Interactive wizard banner ───────────────────────────────────────────────
@@ -746,26 +855,48 @@ run_wizard() {
         continue
       fi
 
+      if ! _has_json_parser; then
+        halt_verification 2 \
+          "No JSON parser (node or jq) is available to verify the Hetzner firewall." \
+          "Install jq (e.g. apt-get install jq) to enable API verification."
+        continue
+      fi
+
       say "Verifying firewall configuration via Hetzner Cloud API..."
       local fw_check_ok=false
       local fw_err=""
-      local response=""
+      local servers_response=""
+      local firewalls_response=""
+
       if command -v curl >/dev/null 2>&1; then
-        response=$(printf 'header = "Authorization: Bearer %s"\n' "$HETZNER_API_TOKEN" | curl -s -K - \
+        servers_response=$(printf 'header = "Authorization: Bearer %s"\n' "$HETZNER_API_TOKEN" | curl -s -K - \
           --connect-timeout 5 \
-          "https://api.hetzner.cloud/v1/firewalls" 2>&1 || true)
+          "https://api.hetzner.cloud/v1/servers" 2>&1 || true)
       fi
 
-      if [[ -n "$response" ]] && _verify_hetzner_firewall_response "$response"; then
-        fw_check_ok=true
+      local server_id=""
+      server_id=$(_get_hetzner_server_id "$servers_response" "$HETZNER_IPV4" || true)
+
+      if [[ -z "$server_id" ]]; then
+        fw_err="Server with IPv4 $HETZNER_IPV4 was not found in the Hetzner Cloud project."
       else
-        fw_err="Firewall is not attached to a server, or inbound rules do not restrict exclusively to TCP 22, 80, 443."
+        if command -v curl >/dev/null 2>&1; then
+          firewalls_response=$(printf 'header = "Authorization: Bearer %s"\n' "$HETZNER_API_TOKEN" | curl -s -K - \
+            --connect-timeout 5 \
+            "https://api.hetzner.cloud/v1/firewalls" 2>&1 || true)
+        fi
+
+        if [[ -n "$firewalls_response" ]] && _verify_hetzner_firewall_response "$firewalls_response" "$server_id"; then
+          fw_check_ok=true
+        else
+          fw_err="Firewall is not attached to server ID $server_id (IPv4: $HETZNER_IPV4), or inbound rules do not restrict exclusively to TCP 22, 80, 443."
+        fi
       fi
 
       if [[ "$fw_check_ok" != "true" ]]; then
         halt_verification 2 \
           "Hetzner firewall verification failed: $fw_err" \
-          "Ensure a firewall is attached to the server with inbound rules allowing only TCP 22, 80, and 443."
+          "Ensure a firewall is attached to the server ($HETZNER_IPV4) with inbound rules allowing only TCP 22, 80, and 443."
         continue
       fi
 
@@ -919,7 +1050,17 @@ run_wizard() {
       local ghcr_check_ok=false
       local ghcr_err=""
       local ghcr_out=""
-      local test_image="ghcr.io/gagaismotuc/traslado-osrm:tucuman-260101-osrm26.4.0-r1"
+      local test_image="${OSRM_IMAGE:-}"
+      if [[ -z "$test_image" ]]; then
+        local repo_root
+        repo_root=$(_get_repo_root)
+        if [[ -n "$repo_root" && -f "$repo_root/compose.yaml" ]]; then
+          test_image=$(grep -E '^[[:space:]]*image:[[:space:]]*\$\{OSRM_IMAGE:-' "$repo_root/compose.yaml" 2>/dev/null | sed -E 's/.*:-(.*)\}.*/\1/' || true)
+        fi
+      fi
+      if [[ -z "$test_image" ]]; then
+        test_image="ghcr.io/gagaismotuc/traslado-osrm:tucuman-260101-osrm26.4.0-r1"
+      fi
 
       if command -v ssh >/dev/null 2>&1; then
         local ssh_rc=0
@@ -1143,12 +1284,19 @@ run_wizard() {
         continue
       fi
 
+      if ! _has_json_parser; then
+        halt_verification 7 \
+          "No JSON parser (node or jq) is available to verify the UptimeRobot monitor." \
+          "Install jq (e.g. apt-get install jq) to enable API verification."
+        continue
+      fi
+
       say "Verifying UptimeRobot monitor for https://$PRODUCTION_HOST/health..."
       local monitor_check_ok=false
       local monitor_err=""
       local response=""
       if command -v curl >/dev/null 2>&1; then
-        response=$(printf 'data = "api_key=%s&format=json"\n' "$UPTIMEROBOT_API_KEY" | curl -s -X POST \
+        response=$(printf 'data = "api_key=%s&format=json&alert_contacts=1"\n' "$UPTIMEROBOT_API_KEY" | curl -s -X POST \
           -H "Content-Type: application/x-www-form-urlencoded" \
           -H "Cache-Control: no-cache" \
           -K - \
@@ -1156,19 +1304,19 @@ run_wizard() {
           "https://api.uptimerobot.com/v2/getMonitors" 2>&1 || true)
       fi
 
-      if [[ -n "$response" ]] && _verify_uptimerobot_response "$response" "$PRODUCTION_HOST"; then
+      if [[ -n "$response" ]] && _verify_uptimerobot_response "$response" "$PRODUCTION_HOST" "$ALERT_EMAIL"; then
         monitor_check_ok=true
       else
-        monitor_err="No monitor matching URL https://$PRODUCTION_HOST/health with 5-minute interval found in UptimeRobot response."
+        monitor_err="No monitor matching URL https://$PRODUCTION_HOST/health with 5-minute interval and alert contact $ALERT_EMAIL found in UptimeRobot response."
       fi
 
       if [[ "$monitor_check_ok" == "true" ]]; then
-        note "✓ UptimeRobot monitor verified for https://$PRODUCTION_HOST/health (interval: 5 minutes)"
+        note "✓ UptimeRobot monitor verified for https://$PRODUCTION_HOST/health (interval: 5 minutes, alert email: $ALERT_EMAIL)"
         break
       else
         halt_verification 7 \
           "UptimeRobot monitor verification failed: $monitor_err" \
-          "Ensure the monitor is created at uptimerobot.com with URL https://$PRODUCTION_HOST/health and interval 5 minutes."
+          "Ensure the monitor is created at uptimerobot.com with URL https://$PRODUCTION_HOST/health, interval 5 minutes, and alert contact $ALERT_EMAIL."
       fi
     done
 
@@ -1204,6 +1352,7 @@ run_wizard() {
     ssh-keygen -t ed25519 -N "" -f "$deploy_key_file" -C "github-actions-deploy" >/dev/null 2>&1
     local deploy_pub_key
     deploy_pub_key=$(cat "${deploy_key_file}.pub")
+    note "The dedicated deploy key is held in a secure directory outside the repo and will be shredded upon completion or interruption; avoid abrupt termination."
 
     step "Add this dedicated deploy public key to /home/deploy/.ssh/authorized_keys on the server:"
     printf '\n  %s%s%s\n\n' "$BOLD" "$deploy_pub_key" "$RESET"
