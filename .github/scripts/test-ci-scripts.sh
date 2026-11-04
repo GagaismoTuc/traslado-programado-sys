@@ -645,6 +645,21 @@ for image in 'ghcr.io/gagaismotuc/traslado-osrm:tucuman-260101-osrm26.4.0-r1' '[
 done
 check "$t" $ok
 
+t="hosting.sh stage 4 accepts valid registry hosts and digest algorithms"
+ok=0
+sha512=$(printf 'b%.0s' $(seq 128))
+for image in 'xn--80ak6aa92e.com:443/osrm:latest' 'my--registry.example.com:5000/osrm:latest' "registry.example.com/osrm@sha512:$sha512"; do
+  printf 'STAGE_1_CONFIRMED=true\nHETZNER_IPV4=192.0.2.1\nSTAGE_2_CONFIRMED=true\nSTAGE_3_CONFIRMED=true\n' > "$image_dir/state"
+  rm -f "$image_dir/calls"
+  printf '\ny\ny\ny\n\n\n\n' | PATH="$image_dir/bin:$PATH" HOME="$image_dir/home" WIZARD_STATE_FILE="$image_dir/state" SSH_CALLS="$image_dir/calls" OSRM_IMAGE="$image" bash "$wizard" > "$image_dir/out" 2>&1 || true
+  if ! grep -q '^STAGE_4_CONFIRMED=true' "$image_dir/state"; then
+    echo "rejected valid image: $image" >&2
+    ok=1
+  fi
+  grep -Fq "docker manifest inspect '$image' 2>&1 || docker pull '$image' 2>&1" "$image_dir/calls" || ok=1
+done
+check "$t" $ok
+
 t="hosting.sh stage 2 instructs direct firewall attachment without label selectors"
 grep -Fq 'not via a label selector' "$wizard"
 check "$t" $?
