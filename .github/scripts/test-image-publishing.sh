@@ -58,6 +58,10 @@ if sh "$script" ghcr.io/example/app:sha "$tmp/missing.tar" sha256:aaaaaaaaaaaaaa
 if sh "$script" ghcr.io/example/app:sha "$tmp/image.tar" sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb "$LOCAL_IMAGE" >/dev/null 2>&1; then exit 1; fi
 ! grep -q 'push ghcr.io' "$CALLS" || exit 1
 : > "$CALLS"
+if sh "$script" ghcr.io/example/app:sha "$tmp/image.tar" "" "$LOCAL_IMAGE" >/dev/null 2>&1; then echo "not ok - empty recorded digest"; exit 1; fi
+! grep -q 'login ghcr.io\|push ghcr.io' "$CALLS" || exit 1
+echo 'ok - an empty recorded digest never reaches GHCR'
+: > "$CALLS"
 sh "$script" ghcr.io/example/app:sha "$tmp/image.tar" sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa "$LOCAL_IMAGE" >/dev/null
 grep -q 'push ghcr.io/example/app:sha' "$CALLS" || exit 1
 echo 'ok - missing or mismatched artifact never reaches GHCR'

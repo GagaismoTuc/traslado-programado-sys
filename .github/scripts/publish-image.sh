@@ -12,6 +12,7 @@ docker load --input "$archive"
 docker tag "$image" "$local_image"
 docker push "$local_image" > "$log"
 actual=$(sed -n 's/.*digest: \(sha256:[0-9a-f]*\) size:.*/\1/p' "$log")
-test -n "$expected" && test "$actual" = "$expected"
+test -n "$expected"
+test "$actual" = "$expected"
 printf '%s' "$GH_TOKEN" | docker login ghcr.io --username "$GITHUB_ACTOR" --password-stdin
 docker push "$image"
