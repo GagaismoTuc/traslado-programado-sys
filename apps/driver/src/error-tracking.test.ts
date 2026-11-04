@@ -57,4 +57,23 @@ describe("driver error tracking SDK", () => {
       expect(envelopeText).not.toContain(forbidden);
     }
   });
+
+  it("redacts unstructured free text errors containing passenger names or addresses by default", async () => {
+    const envelopes: string[] = [];
+    const tracker = createDriverErrorTracker({
+      dsn: `https://${"b".repeat(32)}@glitchtip.example/_glitchtip/1`,
+      fetchImpl: async (_input, init) => {
+        const body = init?.body;
+        envelopes.push(typeof body === "string" ? body : new TextDecoder().decode(body as Uint8Array));
+        return new Response("{}", { status: 200, headers: { "Content-Type": "application/json" } });
+      },
+    });
+
+    tracker.captureError(new Error("Failed processing record: Synthetic Person, Example Avenue 19"));
+    await tracker.flush();
+
+    expect(envelopes).toHaveLength(1);
+    expect(envelopes[0]).not.toContain("Synthetic Person");
+    expect(envelopes[0]).not.toContain("Example Avenue 19");
+  });
 });

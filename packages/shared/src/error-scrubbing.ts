@@ -60,10 +60,77 @@ const SENSITIVE_KEYS = new Set([
   "xforwardedfor", "forwarded", "trueclientip", "xclientip", "xrealip", "cfconnectingip", "ip", "ipaddress", "clientip", "lat", "lng", "lon", "latitude", "longitude",
   "homelat", "homelng", "homelatitude", "homelongitude", "startlat", "startlng", "startlatitude", "startlongitude", "endlat",
   "endlng", "coords", "coordinates", "location", "position", "pickup", "dropoff", "point", "points", "geo",
+  "waypoint", "waypoints", "label", "residence",
 ]);
 
 const SENSITIVE_SUFFIXES = [
   "address", "dni", "phone", "latitude", "longitude", "homelat", "homelng", "token", "secret", "password", "cookie",
+];
+
+const SAFE_MESSAGE_PATTERNS = [
+  /^Browser SDK smoke event/i,
+  /^Database crash while saving/i,
+  /^Unhandled failure saving/i,
+  /^Unhandled failure for/i,
+  /^Office save failed/i,
+  /^Driver mark sync failed/i,
+  /^offline mark error/i,
+  /^Failed query on/i,
+  /^Failed routing/i,
+  /^Database failed for passenger/i,
+  /^Address search/i,
+  /^Nominatim/i,
+  /^OSRM/i,
+  /^VROOM/i,
+  /^routing error/i,
+  /^database unavailable/i,
+  /^unexpected failure/i,
+  /^Failed to fetch/i,
+  /^Database transactions are required/i,
+  /^Unknown vehicle feature/i,
+  /^Invalid usual vehicle/i,
+  /^Plan diario not found/i,
+  /^Recorrido not found/i,
+  /^Versión del plan not found/i,
+  /^Traslado not found/i,
+  /^Vehicle not found/i,
+  /^Driver not found/i,
+  /^Invalid request/i,
+  /^A Recorrido/i,
+  /^This Chofer/i,
+  /^This Recorrido/i,
+  /^Set where this Recorrido starts/i,
+  /^This Marca/i,
+  /^Marca not found/i,
+  /^Only the Traslado/i,
+  /^A Recorrido without Paradas cannot be published/i,
+  /^SERVER_EPOCH is required/i,
+  /^AUTH_ALLOWED_ORIGINS/i,
+  /^SPEED_FACTORS/i,
+  /^BASE_ADDRESS/i,
+  /^GLITCHTIP_DSN/i,
+  /^MIGRATION_DATABASE_URL/i,
+  /^Usage: db:break-glass-office/i,
+  /^Username is required/i,
+  /^BREAK_GLASS_OFFICE_PASSWORD/i,
+  /^Unique violation:/i,
+  /^Key\s*\(/i,
+  /^Failing row contains/i,
+  /^invalid input (?:syntax|value)/i,
+  /^duplicate key value violates/i,
+  /^null value in column/i,
+  /^update or delete on table/i,
+  /^relation .* does not exist/i,
+  /^column .* does not exist/i,
+  /^syntax error at or near/i,
+  /^value too long for type/i,
+  /^Cannot read propert/i,
+  /^Cannot set propert/i,
+  /is not a function$/i,
+  /is not defined$/i,
+  /^Unexpected token/i,
+  /^NetworkError/i,
+  /^Load failed/i,
 ];
 
 function isSensitiveKey(key: string): boolean {
@@ -76,12 +143,24 @@ function isCoordinatePair(value: unknown): boolean {
   if (!Array.isArray(value) || value.length !== 2) return false;
   const [a, b] = value;
   if (typeof a !== "number" || typeof b !== "number" || !Number.isFinite(a) || !Number.isFinite(b)) return false;
-
+  if (Number.isInteger(a) && Number.isInteger(b)) return false;
   return Math.abs(a) <= 180 && Math.abs(b) <= 180 && (Math.abs(a) <= 90 || Math.abs(b) <= 90);
 }
 
 export function stripUrlQueryAndFragment(url: string): string {
-  return url.replace(/([?#]).*$/, "").replace(/([/;])-?\d{1,3}\.\d+\s*,\s*-?\d{1,3}\.\d+/g, `$1${REDACTED}`);
+  return url
+    .replace(/([?#]).*$/, "")
+    .replace(/([/;])-?\d{1,3}(?:\.\d+)?\s*,\s*-?\d{1,3}(?:\.\d+)?/g, `$1${REDACTED}`);
+}
+
+export function isWhitelistedMessage(message: string): boolean {
+  return SAFE_MESSAGE_PATTERNS.some((pattern) => pattern.test(message));
+}
+
+export function scrubMessage(message: string | undefined): string | undefined {
+  if (message === undefined || message === null) return message;
+  if (!isWhitelistedMessage(message)) return REDACTED;
+  return scrubString(message);
 }
 
 export function scrubString(input: string): string {
@@ -96,10 +175,6 @@ export function scrubString(input: string): string {
       isSensitiveKey(key) ? `"${key}":"${REDACTED}"` : full)
     .replace(/\b([a-zA-Z0-9_-]+)\s*=\s*("[^"]*"|'[^']*'|[^\s,&;)]+(?:\s+(?![a-zA-Z0-9_-]+\s*=)[^\s,&;)]+)*)/g, (full, key: string) =>
       isSensitiveKey(key) ? `${key}=${REDACTED}` : full)
-    .replace(/\b(?:passenger|pasajero)\s+([^{,.;\r\n]+?)(?=(?:\s+(?:at|en|with|con|from|desde|to|hacia|for|para|in|\bKey\b)|[,.;\r\n)}\]]|$))/gi, `passenger ${REDACTED}`)
-    .replace(/(\bpassenger\s+\[REDACTED\]\s+(?:at|en)\s+)[^{,.;\r\n]+?(?=(?:\s+(?:with|con|from|desde|to|hacia|for|para|in|\bKey\b)|[,.;\r\n)}\]]|$))/gi, (full, prefix: string) => `${prefix}${REDACTED}`)
-    .replace(/\b(?:address|domicilio|calle|road|street)\s*[:=]?\s*([^{,.;\r\n]+?)(?=(?:\s+(?:with|con|from|desde|to|hacia|for|para|in|\bKey\b)|[,.;\r\n)}\]]|$))/gi, (full, value: string) =>
-      full.replace(value.trim(), REDACTED))
     .replace(/\b(Bearer|Basic)\s+[A-Za-z0-9._~+/-]+=*/gi, `$1 ${REDACTED}`)
     .replace(/(?<!\w)\+\d[\d\s().-]{7,}\d(?!\w)/g, REDACTED)
     .replace(/(?<![0-9a-zA-Z])\d{10}(?![0-9a-zA-Z])/g, REDACTED)
@@ -151,9 +226,16 @@ export function scrubBreadcrumb<T extends ScrubbableBreadcrumb>(breadcrumb: T): 
 export function scrubErrorEvent<T extends ScrubbableErrorEvent>(event: T): T {
   const seen = new WeakSet<object>();
   const next = { ...event, user: undefined, server_name: undefined } as T;
-  if (typeof next.message === "string") next.message = scrubString(next.message);
+  if (typeof next.message === "string") next.message = scrubMessage(next.message);
   if (typeof next.transaction === "string") next.transaction = scrubString(stripUrlQueryAndFragment(next.transaction));
-  if (next.logentry && typeof next.logentry === "object") next.logentry = scrubValue(next.logentry, seen) as ScrubbableErrorEvent["logentry"];
+  if (next.logentry && typeof next.logentry === "object") {
+    const rawMsg = next.logentry.message ?? next.logentry.formatted ?? "";
+    if (!isWhitelistedMessage(rawMsg)) {
+      next.logentry = { message: REDACTED };
+    } else {
+      next.logentry = scrubValue(next.logentry, seen) as ScrubbableErrorEvent["logentry"];
+    }
+  }
 
   if (next.request && typeof next.request === "object") {
     const { data: _data, query_string: _query, cookies: _cookies, headers, url, ...rest } = next.request;
@@ -169,7 +251,7 @@ export function scrubErrorEvent<T extends ScrubbableErrorEvent>(event: T): T {
       ...next.exception,
       values: next.exception.values.map((item) => ({
         ...item,
-        ...(typeof item.value === "string" ? { value: scrubString(item.value) } : {}),
+        ...(typeof item.value === "string" ? { value: scrubMessage(item.value) } : {}),
         ...(item.mechanism ? { mechanism: scrubValue(item.mechanism, seen) as NonNullable<typeof item.mechanism> } : {}),
         ...(item.stacktrace?.frames
           ? {

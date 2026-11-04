@@ -57,6 +57,5 @@ export function createOfficeErrorTracker(options: BrowserErrorTrackerOptions = {
 }
 
 export function initOfficeErrorTracking() {
-  const metaEnv = (import.meta as unknown as { env?: Record<string, string | undefined> }).env;
-  return createOfficeErrorTracker({ dsn: metaEnv?.VITE_GLITCHTIP_DSN, environment: metaEnv?.MODE, installGlobalHandlers: true });
+  return createOfficeErrorTracker({ dsn: import.meta.env.VITE_GLITCHTIP_DSN, environment: import.meta.env.MODE, installGlobalHandlers: true });
 }

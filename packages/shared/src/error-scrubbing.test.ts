@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { scrubBreadcrumb, scrubErrorEvent } from "./index";
+import { scrubBreadcrumb, scrubErrorEvent, scrubString, stripUrlQueryAndFragment } from "./index";
 
 describe("scrubErrorEvent", () => {
   it("strips Pasajero personal data, request bodies, query strings, cookies, auth headers and locations while keeping stack frames", () => {
@@ -137,5 +137,46 @@ describe("scrubErrorEvent", () => {
     }
     expect(scrubbed.transaction).toBe("GET /");
     expect(scrubbed.breadcrumbs?.[0]?.data).toEqual({ from: "/", to: "/passengers" });
+  });
+
+  it("does not keep a Receptor name or a domicilio written in free text", () => {
+    const event = scrubErrorEvent({
+      exception: { values: [{ type: "Error", value: "Receptor Rosario Ficticia Gómez no figura entre los adultos de Avenida Imaginaria 4455" }] },
+      extra: { record: { label: "Rosario Ficticia Gómez", residence: "Avenida Imaginaria 4455" } },
+    });
+    expect(JSON.stringify(event)).not.toMatch(/Rosario Ficticia|Avenida Imaginaria/);
+  });
+
+  it("does not send patient data in arbitrary extra payload or unstructured error message", () => {
+    const event = scrubErrorEvent({
+      exception: { values: [{ type: "Error", value: "Failed processing record: Synthetic Person, Example Avenue 19" }] },
+      extra: { record: { label: "Synthetic Person", residence: "Example Avenue 19" } },
+    });
+    expect(JSON.stringify(event)).not.toMatch(/Synthetic Person|Example Avenue 19/);
+  });
+
+  it("redacts passenger payload in exception, database errors, unquoted keys and waypoint coordinates", () => {
+    const passenger = { name: "Synthetic Passenger", homeAddress: "Synthetic Road 42", dni: "45678901" };
+    const event = scrubErrorEvent({
+      exception: { values: [{ value: `Database failed for passenger ${JSON.stringify(passenger)}` }] },
+    });
+    for (const value of Object.values(passenger)) {
+      expect(JSON.stringify(event)).not.toContain(value);
+    }
+
+    const dbEvent = scrubErrorEvent({
+      exception: { values: [{ value: "Failing row contains (Synthetic Passenger, Synthetic Road 42)." }] },
+    });
+    expect(JSON.stringify(dbEvent)).not.toMatch(/Synthetic Passenger|Synthetic Road 42/);
+
+    expect(scrubString("failed name=Synthetic Passenger")).not.toContain("Passenger");
+
+    expect(JSON.stringify(scrubErrorEvent({ extra: { waypoint: [-65, -26] } }))).not.toMatch(/-65|-26/);
+    expect(scrubErrorEvent({ extra: { stopIds: [3, 5] } })).toEqual({ extra: { stopIds: [3, 5] } });
+
+    expect(stripUrlQueryAndFragment("https://example.invalid/a?name=Synthetic#x")).toBe("https://example.invalid/a");
+    expect(stripUrlQueryAndFragment("http://localhost/route/v1/driving/-65,-26;-66,-27")).not.toMatch(/-65,-26|-66,-27/);
+    expect(scrubBreadcrumb({ category: "navigation", data: { from: "/a?name=Synthetic", to: "/b#Synthetic" } })?.data)
+      .toEqual({ from: "/a", to: "/b" });
   });
 });

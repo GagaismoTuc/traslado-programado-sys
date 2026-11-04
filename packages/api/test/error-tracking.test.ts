@@ -257,4 +257,46 @@ describe("error tracking and container log rotation", () => {
       await compose("down", "-v", "--remove-orphans").catch(() => undefined);
     }
   }, 240_000);
+
+  it("redacts unstructured free text errors containing passenger names or addresses by default in API envelopes", async () => {
+    const bodies: string[] = [];
+    const tracker = createApiErrorTracker({
+      dsn: `http://${"a".repeat(32)}@127.0.0.1:8080/1`,
+      sendEnvelope: async (payload) => {
+        bodies.push(payload);
+        return { statusCode: 200 };
+      },
+    });
+
+    const error = new Error("Failed processing record: Synthetic Person, Example Avenue 19");
+    tracker.captureRequestError(error, { method: "GET", url: "http://localhost/example", headers: {} });
+    expect(await tracker.flush()).toBe(true);
+    await tracker.close();
+
+    expect(bodies).toHaveLength(1);
+    expect(bodies[0]).not.toContain("Synthetic Person");
+    expect(bodies[0]).not.toContain("Example Avenue 19");
+  });
+
+  it("does not transmit integer coordinates in request.url", async () => {
+    const bodies: string[] = [];
+    const tracker = createApiErrorTracker({
+      dsn: `http://${"a".repeat(32)}@127.0.0.1:8080/1`,
+      sendEnvelope: async (payload) => {
+        bodies.push(payload);
+        return { statusCode: 200 };
+      },
+    });
+
+    tracker.captureRequestError(new Error("routing error"), {
+      method: "GET",
+      url: "http://localhost/route/v1/driving/-65,-26;-66,-27",
+      headers: {},
+    });
+    expect(await tracker.flush()).toBe(true);
+    await tracker.close();
+
+    expect(bodies).toHaveLength(1);
+    expect(bodies[0]).not.toMatch(/-65,-26|-66,-27/);
+  });
 });
