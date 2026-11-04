@@ -96,6 +96,36 @@ describe("client address behind trusted proxies", () => {
     expect((await failLogin("172.18.0.4", "bad-5, 203.0.113.6")).status).toBe(401);
   });
 
+  it("keeps one limit for equivalent spellings of a client address", async () => {
+    app = await loadApp(undefined, readConfig({ ...environment, TRUSTED_PROXY_CIDRS: "172.16.0.0/12" }));
+    await failFiveTimes("172.18.5.1", "2001:db8::1");
+    expect((await failLogin("172.18.5.1", "2001:0db8:0:0:0:0:0:1")).status).toBe(429);
+    expect((await failLogin("172.18.5.1", "2001:DB8::1")).status).toBe(429);
+    expect((await failLogin("172.18.5.1", "2001:db8::2")).status).toBe(401);
+
+    // An IPv4-mapped IPv6 address is the same client as its IPv4 address, in X-Forwarded-For and on the socket.
+    await failFiveTimes("172.18.5.1", "::ffff:203.0.113.5");
+    expect((await failLogin("172.18.5.1", "203.0.113.5")).status).toBe(429);
+    expect((await failLogin("172.18.5.1", "::FFFF:cb00:7105")).status).toBe(429);
+    await failFiveTimes("::ffff:203.0.113.9");
+    expect((await failLogin("203.0.113.9")).status).toBe(429);
+    expect((await failLogin("203.0.113.10")).status).toBe(401);
+  });
+
+  it("accepts a single address without a CIDR suffix in TRUSTED_PROXY_CIDRS as a /32 or /128", async () => {
+    app = await loadApp(undefined, readConfig({ ...environment, TRUSTED_PROXY_CIDRS: "172.18.0.3, fd00::3" }));
+    for (const [index, proxy] of ["172.18.0.3", "fd00::3"].entries()) {
+      await failFiveTimes(proxy, `203.0.113.${index + 1}`);
+      expect((await failLogin(proxy, `203.0.113.${index + 1}`)).status).toBe(429);
+      expect((await failLogin(proxy, `198.51.100.${index + 1}`)).status).toBe(401);
+    }
+    // Its neighbours are not trusted: their X-Forwarded-For is ignored and the limit stays on the socket address.
+    for (const peer of ["172.18.0.4", "fd00::4"]) {
+      await failFiveTimes(peer, (attempt) => `198.51.100.${attempt + 10}`);
+      expect((await failLogin(peer, "198.51.100.99")).status).toBe(429);
+    }
+  });
+
   it("reads TRUSTED_PROXY_CIDRS from the environment, trusting no proxy when it is unset or empty", async () => {
     expect(readConfig(environment).trustedProxyCidrs).toEqual([]);
     expect(readConfig({ ...environment, TRUSTED_PROXY_CIDRS: " " }).trustedProxyCidrs).toEqual([]);

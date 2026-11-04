@@ -18,7 +18,7 @@ import {
 } from "./sessions.js";
 import type { GeocodeResult, Geocoder } from "./geocoding.js";
 import type { TravelTime } from "./routing.js";
-import { createTrustedProxies, forwardedClientIp } from "./trusted-proxies.js";
+import { canonicalIp, createTrustedProxies, forwardedClientIp } from "./trusted-proxies.js";
 import { planRoute, speedFactorAt, type LngLat, type PlannerSettings, type PlanResult, type PlanTransfer, type VroomSolver } from "./planner.js";
 
 type QueryResult = { rows: Record<string, unknown>[]; rowCount: number | null };
@@ -111,7 +111,7 @@ function clientIp(context: Context, config: AppConfig, trustedProxies: ReturnTyp
   } catch {
     return "unknown";
   }
-  return trustedProxies ? forwardedClientIp(socketAddress, context.req.header("X-Forwarded-For"), trustedProxies) : socketAddress;
+  return canonicalIp(trustedProxies ? forwardedClientIp(socketAddress, context.req.header("X-Forwarded-For"), trustedProxies) : socketAddress);
 }
 
 function reserveLoginAttempt(username: string, ip: string) {
