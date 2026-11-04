@@ -13,7 +13,7 @@ corepack enable
 pnpm install
 ```
 
-Set `SERVER_EPOCH`, `DATABASE_URL`, `OSRM_URL` and `VROOM_URL` before starting the API; `/health` answers 200 only when PostgreSQL, OSRM and VROOM all answer. Database connections use UTC. To create the migration and application roles, connect as a PostgreSQL administrator and run `pnpm --filter @traslado/api db:bootstrap` with `BOOTSTRAP_DATABASE_URL`, `MIGRATION_PASSWORD`, and `APPLICATION_PASSWORD` set. Run `pnpm db:migrate` as the migration role.
+Set `SERVER_EPOCH`, `DATABASE_URL`, `OSRM_URL` and `VROOM_URL` before starting the API; it listens on `PORT` (default `3000`) of `HOST` (default `0.0.0.0`, every interface); `/health` answers 200 only when PostgreSQL, OSRM and VROOM all answer. Database connections use UTC. To create the migration and application roles, connect as a PostgreSQL administrator and run `pnpm --filter @traslado/api db:bootstrap` with `BOOTSTRAP_DATABASE_URL`, `MIGRATION_PASSWORD`, and `APPLICATION_PASSWORD` set. Run `pnpm db:migrate` as the migration role.
 
 ## Routing (OSRM + VROOM)
 
@@ -44,6 +44,20 @@ The Office plans each day at `/plan`. Giving a Chofer their whole day cuts it in
 "Order" on a Borrador Recorrido (`POST /routes/:id/order`) sends it to VROOM. The engine minimises km and keeps every Pasajero within their Tiempo máximo a bordo minus `RIDE_TIME_BUFFER_MINUTES` (default 5). VROOM's durations are scaled by the factor of the time band the Recorrido starts in, set with `SPEED_FACTORS` as `HH:MM=factor,...` (default `00:00=1`, factors above 0 and up to 5). Traslados the engine cannot place leave the Recorrido, and the response gives the reason for each. The start is not before the previous Recorrido's planned end: OSRM's `/route` adds the drive from its last Parada to where it ends (the Chofer's home when the Oficina set it to end there) and from there to this start, when they differ. If VROOM or OSRM does not answer, Order returns 502 and changes nothing; if anything the engine was given changes while it works (the Recorrido, the Chofer's Recorridos right before and after it, their Traslados, Pasajeros, Destinos or the Vehículo), it returns 409 and changes nothing; a change sent after that last check waits until Order has saved. The start and end of each Recorrido default to the Chofer's home, or to where the previous Recorrido ended, and the Oficina can override them. Each Destino has a Tolerancia de llegada that the Oficina can edit.
 
 During the day the Oficina can change a Recorrido En curso and publish it again as the next Versión del plan. A done Parada (a pickup marked Subió, Ausente or Entregado, or a drop-off marked Entregado) never changes: done Paradas stay first, in the order of the latest version, with its legs and planned times, and moving one by hand returns 409. The Oficina can add a Traslado to it, such as an early pickup at a Destino, and change its Vehículo when the same Chofer carries on in a replacement van; its Chofer stays. The validator checks what is still to come: Entregado and Ausente Traslados are left out, and a Pasajero on board rides from their actual Subió. "Order" on a Recorrido En curso goes on from its last done Parada; each Pasajero on board is only a drop-off, in this Vehículo, by their Subió plus the Tiempo máximo a bordo minus `RIDE_TIME_BUFFER_MINUTES`, and is never left out. From version 2 on, the Chofer app lists what changed (Vehículo, Traslados added or removed, planned times) since the version the Chofer acknowledged, or since the previous one.
+
+## Hosting and infrastructure setup
+
+To set up the production and staging accounts and infrastructure (Hetzner VPS in Germany, firewall rules, server hardening over SSH, Docker and Compose, GHCR access, Scaleway backup bucket in Paris, DNS records, UptimeRobot monitoring, and GitHub deploy secrets), run the committed bash wizard:
+
+```sh
+bash infra/wizard/hosting.sh
+```
+
+To inspect the 9 stages and the required deploy secrets contract non-interactively:
+
+```sh
+bash infra/wizard/hosting.sh --check
+```
 
 ## Checks
 
