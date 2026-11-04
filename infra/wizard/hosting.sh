@@ -889,7 +889,7 @@ run_wizard() {
     step "   • TCP 80 (HTTP) from Any IPv4 / IPv6"
     step "   • TCP 443 (HTTPS) from Any IPv4 / IPv6"
     step "4. Remove any other inbound rules."
-    step "5. Under 'Apply to', select the server 'traslado-prod' and click 'Create Firewall'."
+    step "5. Under 'Apply to', select the server 'traslado-prod' directly, not via a label selector, and click 'Create Firewall'."
     step "6. In Hetzner Cloud Console, go to Security ▸ API Tokens."
     step "   Generate or copy a Read-Only API token to verify the firewall."
     note "The API token is read hidden and passed on stdin to curl; it is never saved to disk."
@@ -1103,10 +1103,15 @@ run_wizard() {
         test_image="ghcr.io/gagaismotuc/traslado-osrm:tucuman-260101-osrm26.4.0-r1"
       fi
 
+      if [[ ! "$test_image" =~ ^([a-z0-9]+(([._]|__|-+)[a-z0-9]+)*(:[0-9]+)?/)*[a-z0-9]+(([._]|__|-+)[a-z0-9]+)*(:[A-Za-z0-9_][A-Za-z0-9_.-]{0,127})?(@sha256:[a-f0-9]{64})?$ ]]; then
+        warn "Invalid OSRM_IMAGE: expected a container image reference."
+        exit 1
+      fi
+
       if command -v ssh >/dev/null 2>&1; then
         local ssh_rc=0
         ghcr_out=$(ssh -o BatchMode=yes -o ConnectTimeout=10 -o StrictHostKeyChecking=accept-new "deploy@$HETZNER_IPV4" \
-          "docker manifest inspect $test_image 2>&1 || docker pull $test_image 2>&1" 2>&1) || ssh_rc=$?
+          "docker manifest inspect '$test_image' 2>&1 || docker pull '$test_image' 2>&1" 2>&1) || ssh_rc=$?
 
         if [[ $ssh_rc -eq 0 ]] && echo "$ghcr_out" | grep -qE '"schemaVersion"|"mediaType"|Digest:|Status:|sha256:'; then
           ghcr_check_ok=true
