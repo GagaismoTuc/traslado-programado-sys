@@ -7,11 +7,12 @@ on:
 
 permissions:
   contents: read
-  packages: write
 
 jobs:
   image:
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
     strategy:
       matrix:
         target: [api, office, driver]
@@ -22,11 +23,24 @@ jobs:
           IMAGE: ghcr.io/gagaismotuc/traslado-${{ matrix.target }}:${{ github.sha }}
           TARGET: ${{ matrix.target }}
         run: docker build --target "$TARGET" --tag "$IMAGE" .
-      - name: Publish image
-        if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+  publish:
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    needs: image
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+    strategy:
+      matrix:
+        target: [api, office, driver]
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build and publish image
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           IMAGE: ghcr.io/gagaismotuc/traslado-${{ matrix.target }}:${{ github.sha }}
+          TARGET: ${{ matrix.target }}
         run: |
+          docker build --target "$TARGET" --tag "$IMAGE" .
           printf '%s' "$GH_TOKEN" | docker login ghcr.io --username "${{ github.actor }}" --password-stdin
           docker push "$IMAGE"

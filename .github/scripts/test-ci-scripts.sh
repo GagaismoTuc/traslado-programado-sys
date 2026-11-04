@@ -5,6 +5,7 @@
 scripts=$(cd "$(dirname "$0")" && pwd)
 hook=$scripts/../../.githooks/commit-msg
 workflow=$scripts/../workflows/ci.yml
+images_workflow=$scripts/../workflows/images.yml
 tmp=$(mktemp -d)
 trap 'rm -rf "$tmp"' EXIT
 failures=0
@@ -30,6 +31,25 @@ commit() { # commit <repo> <message>: prints the new sha
 job() { # job <name>: the lines of that job in the workflow
   awk -v start="  $1:" '$0 == start { found = 1; next } /^  [a-z-]+:$/ { found = 0 } found' "$workflow"
 }
+
+image_job() { # image_job <name>: the lines of that job in the image workflow
+  awk -v start="  $1:" '$0 == start { found = 1; next } /^  [a-z-]+:$/ { found = 0 } found' "$images_workflow"
+}
+
+t="image builds are read-only and publishing is restricted to pushes to main"
+ok=0
+! sed -n '1,/^jobs:/p' "$images_workflow" | grep -q 'packages: write' || ok=1
+image_job image | grep -q 'contents: read' || ok=1
+image_job image | grep -qF 'target: [api, office, driver]' || ok=1
+image_job image | grep -qF 'docker build --target "$TARGET" --tag "$IMAGE" .' || ok=1
+! image_job image | grep -q 'packages: write\|docker push' || ok=1
+image_job publish | grep -q 'packages: write' || ok=1
+image_job publish | grep -qF "if: github.event_name == 'push' && github.ref == 'refs/heads/main'" || ok=1
+image_job publish | grep -q 'needs: image' || ok=1
+image_job publish | grep -qF 'target: [api, office, driver]' || ok=1
+image_job publish | grep -qF 'docker build --target "$TARGET" --tag "$IMAGE" .' || ok=1
+image_job publish | grep -q 'docker push' || ok=1
+check "$t" $ok
 
 pr_range() { # pr_range <job> <script>: the job runs <script> on the PR's base..head
   job "$1" | grep -qF "run: sh .github/scripts/$2 \"\$BASE_SHA\" \"\$HEAD_SHA\"" \
