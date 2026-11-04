@@ -43,6 +43,20 @@ The Office plans each day at `/plan`. Giving a Chofer their whole day cuts it in
 
 During the day the Oficina can change a Recorrido En curso and publish it again as the next Versión del plan. A done Parada (a pickup marked Subió, Ausente or Entregado, or a drop-off marked Entregado) never changes: done Paradas stay first, in the order of the latest version, with its legs and planned times, and moving one by hand returns 409. The Oficina can add a Traslado to it, such as an early pickup at a Destino, and change its Vehículo when the same Chofer carries on in a replacement van; its Chofer stays. The validator checks what is still to come: Entregado and Ausente Traslados are left out, and a Pasajero on board rides from their actual Subió. "Order" on a Recorrido En curso goes on from its last done Parada; each Pasajero on board is only a drop-off, in this Vehículo, by their Subió plus the Tiempo máximo a bordo minus `RIDE_TIME_BUFFER_MINUTES`, and is never left out. From version 2 on, the Chofer app lists what changed (Vehículo, Traslados added or removed, planned times) since the version the Chofer acknowledged, or since the previous one.
 
+## Hosting and infrastructure setup
+
+To set up the production and staging accounts and infrastructure (Hetzner VPS in Germany, firewall rules, server hardening over SSH, Docker and Compose, GHCR access, Scaleway backup bucket in Paris, DNS records, UptimeRobot monitoring, and GitHub deploy secrets), run the committed bash wizard:
+
+```sh
+bash infra/wizard/hosting.sh
+```
+
+To inspect the 9 stages and the required deploy secrets contract non-interactively:
+
+```sh
+bash infra/wizard/hosting.sh --check
+```
+
 ## Checks
 
 ```sh
