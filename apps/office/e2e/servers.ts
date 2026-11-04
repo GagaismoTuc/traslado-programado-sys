@@ -24,12 +24,6 @@ function retryPort(tried: number[]) {
   }
 }
 
-function portTaken(message: string) {
-  const error: NodeJS.ErrnoException = new Error(message);
-  error.code = "EADDRINUSE";
-  return error;
-}
-
 function isPortInUse(error: unknown) {
   if (!(error instanceof Error)) return false;
   // Vite's strictPort turns EADDRINUSE into this message without a code.
@@ -55,7 +49,6 @@ export async function onFreePort(port: number, start: (port: number) => Promise<
 
 // `closed` turns true once the API exited and its output was read in full, so a bind error is never cut off.
 async function waitForApi(url: string, epoch: string, closed: () => boolean, output: () => string) {
-  let unanswered = 0;
   for (let attempt = 0; attempt < 100; attempt++) {
     if (closed()) {
       const error: NodeJS.ErrnoException = new Error(`The API exited before answering:\n${output()}`);
@@ -63,17 +56,11 @@ async function waitForApi(url: string, epoch: string, closed: () => boolean, out
       if (output().includes("EADDRINUSE")) error.code = "EADDRINUSE";
       throw error;
     }
-    // Bounded, because the listener that holds a taken port may accept the request and never answer it.
-    const response = await fetch(url, { signal: AbortSignal.timeout(1_000) }).catch((error: unknown) => {
-      // A refused connection only means the API is not listening yet; a timeout means another listener took it.
-      if (error instanceof Error && error.name === "TimeoutError") unanswered++;
-      return null;
-    });
-    // Every answer of the API names its epoch. On Windows the API can bind 0.0.0.0 while another server holds
-    // 127.0.0.1 on the same port and gets every request, so an answer without this epoch means the port is taken.
-    if (response && response.headers.get("x-server-epoch") !== epoch) throw portTaken(`Port of ${url} answers for another server`);
-    if (unanswered === 3) throw portTaken(`Port of ${url} accepts requests and never answers them`);
-    if (response?.status === 401) return;
+    // Until the API binds, another server may hold the port and take the request; the API then exits with EADDRINUSE.
+    // So no failed, unanswered or foreign answer counts, only one that names this run's epoch, as every answer of
+    // the API does. Bounded, because that other server may accept the request and never answer it.
+    const response = await fetch(url, { signal: AbortSignal.timeout(1_000) }).catch(() => null);
+    if (response?.status === 401 && response.headers.get("x-server-epoch") === epoch) return;
     await new Promise((resolve) => setTimeout(resolve, 200));
   }
   throw new Error(`The API did not answer ${url}:\n${output()}`);
@@ -84,7 +71,9 @@ export function startApi(port: number, env: Record<string, string>) {
     let output = "";
     const api = spawn(process.execPath, ["--import", "tsx", "src/server.ts"], {
       cwd: apiRoot,
-      env: { ...process.env, ...env, PORT: String(port) },
+      // On loopback only: on Windows a bind on 0.0.0.0 succeeds next to a listener on 127.0.0.1, which then takes
+      // every request to the URL below. Two binds on 127.0.0.1 fail with EADDRINUSE on every system.
+      env: { ...process.env, ...env, HOST: "127.0.0.1", PORT: String(port) },
     });
     let closed = false;
     const exited = new Promise<void>((resolve) => api.on("close", () => { closed = true; resolve(); }));
@@ -127,6 +116,8 @@ export function startOffice(port: number, apiUrl: string) {
 
 export function startDriver(port: number, outDir: string, apiUrl: string) {
   return onFreePort(port, async (port) => {
+    // Unlike the Office dev server there is nothing to close on a failure: preview() binds as its last step and, when
+    // the bind fails, throws without returning the server, which never listened.
     const server = await preview({
       root: driverRoot,
       logLevel: "warn",
