@@ -58,3 +58,25 @@ test('host variables follow names specified by the issue', () => {
   const used = [...env.matchAll(/^(\w+_HOST)=/gm)].map((match) => match[1]);
   assert.deepEqual(used.sort(), expected);
 });
+
+test('the API receives TRUSTED_PROXY_CIDRS and the gateway trusts the edge', () => {
+  const text = execFileSync('docker', ['compose', '--env-file', 'deploy/.env.example', '-f', 'deploy/compose.yaml', 'config', '--format', 'json'], {
+    encoding: 'utf8', env: { ...process.env, IMAGE_TAG: 'review', TRUSTED_PROXY_CIDRS: '172.16.0.0/12' },
+  });
+  assert.equal(JSON.parse(text).services.api.environment.TRUSTED_PROXY_CIDRS, '172.16.0.0/12', 'API container does not receive TRUSTED_PROXY_CIDRS');
+  assert.match(readFileSync('deploy/.env.example', 'utf8'), /^TRUSTED_PROXY_CIDRS=/m, '.env.example does not document TRUSTED_PROXY_CIDRS');
+  assert.match(readFileSync('deploy/Gateway.Caddyfile', 'utf8'), /\btrusted_proxies\b/, 'gateway does not configure trusted_proxies');
+});
+
+test('the example trusts only the gateway and edge networks of the project', () => {
+  const prod = config('production');
+  const edge = JSON.parse(execFileSync('docker', ['compose', '--project-name', 'traslado-edge', '--env-file', 'deploy/.env.example', '-f', 'deploy/edge.compose.yaml', 'config', '--format', 'json'], { encoding: 'utf8' }));
+  const subnet = (network) => network.ipam.config.map((entry) => entry.subnet);
+  const projectNetwork = subnet(prod.networks.default);
+  const ingressNetwork = subnet(edge.networks.production);
+  assert.notDeepEqual(ingressNetwork, subnet(edge.networks.staging));
+  assert.deepEqual(prod.services.api.environment.TRUSTED_PROXY_CIDRS.split(','), [...projectNetwork, ...ingressNetwork]);
+  assert.deepEqual(prod.services.gateway.environment.INGRESS_SUBNET.split(' '), ingressNetwork);
+  assert.match(readFileSync('deploy/Gateway.Caddyfile', 'utf8'), /^\s*trusted_proxies static \{\$INGRESS_SUBNET\}$/m);
+  assert.doesNotMatch(readFileSync('deploy/Caddyfile', 'utf8'), /trusted_proxies/, 'the edge faces clients and trusts no proxy');
+});
