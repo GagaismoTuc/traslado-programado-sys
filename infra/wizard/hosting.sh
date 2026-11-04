@@ -459,6 +459,50 @@ resolve_host_ip() {
   printf '%s' "$ip"
 }
 
+_get_hetzner_pages() {
+  local resource="$1" token="$2" page=1 response next pages=""
+  [[ "$resource" == "servers" || "$resource" == "firewalls" ]] || return 1
+  command -v curl >/dev/null 2>&1 || return 1
+  while (( page <= 10000 )); do
+    response=$(printf 'header = "Authorization: Bearer %s"\n' "$token" | curl -fs -K - \
+      --connect-timeout 5 --max-time 15 \
+      "https://api.hetzner.cloud/v1/${resource}?page=${page}&per_page=50") || return 1
+    if command -v node >/dev/null 2>&1; then
+      next=$(printf '%s' "$response" | RESOURCE="$resource" PAGE="$page" node -e '
+        try {
+          const data = JSON.parse(require("fs").readFileSync(0, "utf8"));
+          const p = data.meta?.pagination;
+          const current = Number(process.env.PAGE);
+          if (!Array.isArray(data[process.env.RESOURCE]) || !p || p.page !== current ||
+              !Object.prototype.hasOwnProperty.call(p, "next_page")) process.exit(1);
+          if (p.next_page === null) process.stdout.write("done");
+          else if (Number.isSafeInteger(p.next_page) && p.next_page === current + 1)
+            process.stdout.write(String(p.next_page));
+          else process.exit(1);
+        } catch (e) { process.exit(1); }
+      ' 2>/dev/null) || return 1
+    elif command -v jq >/dev/null 2>&1; then
+      next=$(printf '%s' "$response" | jq -er --arg resource "$resource" --argjson page "$page" '
+        if (.[$resource] | type != "array") or (.meta.pagination | type != "object") then error("invalid page")
+        elif (.meta.pagination | has("next_page") | not) or (.meta.pagination.page != $page) then error("invalid pagination")
+        elif .meta.pagination.next_page == null then "done"
+        elif ((.meta.pagination.next_page | type) == "number") and (.meta.pagination.next_page == ($page + 1)) then .meta.pagination.next_page
+        else error("invalid next page") end
+      ' 2>/dev/null) || return 1
+    else
+      return 1
+    fi
+    [[ -z "$pages" ]] || pages+=","
+    pages+="$response"
+    if [[ "$next" == "done" ]]; then
+      printf '{"pages":[%s]}' "$pages"
+      return 0
+    fi
+    page="$next"
+  done
+  return 1
+}
+
 _get_hetzner_server_id() {
   local json="$1"
   local target_ipv4="$2"
@@ -467,13 +511,13 @@ _get_hetzner_server_id() {
   if command -v node >/dev/null 2>&1; then
     local node_code=0
     local s_id=""
-    s_id=$(JSON_STR="$json" TARGET_IP="$target_ipv4" node -e '
+    s_id=$(printf '%s' "$json" | TARGET_IP="$target_ipv4" node -e '
       try {
-        const raw = process.env.JSON_STR || "";
-        const data = JSON.parse(raw);
-        if (!Array.isArray(data.servers)) process.exit(1);
+        const data = JSON.parse(require("fs").readFileSync(0, "utf8"));
+        const servers = Array.isArray(data.pages) ? data.pages.flatMap(p => p.servers) : data.servers;
+        if (!Array.isArray(servers)) process.exit(1);
         const target = process.env.TARGET_IP || "";
-        const found = data.servers.find(s => {
+        const found = servers.find(s => {
           if (!s) return false;
           const ip = s.public_net?.ipv4?.ip || s.ipv4 || s.ip || (typeof s.public_net?.ipv4 === "string" ? s.public_net.ipv4 : "");
           return ip === target;
@@ -498,10 +542,11 @@ _get_hetzner_server_id() {
     local jq_code=0
     local s_id=""
     s_id=$(printf '%s' "$json" | jq -r --arg ip "$target_ipv4" '
-      if (.servers | type != "array") then
+      (if (.pages | type == "array") then [.pages[].servers[]] else .servers end) |
+      if type != "array" then
         empty
       else
-        .servers[]? |
+        .[]? |
         select(
           ((.public_net?.ipv4?.ip == $ip) or (.ipv4 == $ip) or (.ip == $ip) or (.public_net?.ipv4 == $ip)) and
           (.id != null)
@@ -526,37 +571,37 @@ _verify_hetzner_firewall_response() {
 
   if command -v node >/dev/null 2>&1; then
     local node_code=0
-    JSON_STR="$json" SERVER_ID="$server_id" node -e '
+    printf '%s' "$json" | SERVER_ID="$server_id" node -e '
       try {
-        const raw = process.env.JSON_STR || "";
-        const data = JSON.parse(raw);
-        if (!Array.isArray(data.firewalls)) process.exit(1);
+        const data = JSON.parse(require("fs").readFileSync(0, "utf8"));
+        const firewalls = Array.isArray(data.pages) ? data.pages.flatMap(p => p.firewalls) : data.firewalls;
+        if (!Array.isArray(firewalls)) process.exit(1);
         const sId = String(process.env.SERVER_ID || "").trim();
         const allowedPorts = new Set(["22", "80", "443"]);
-        const found = data.firewalls.some(fw => {
-          if (!Array.isArray(fw.applied_to) || fw.applied_to.length === 0) return false;
-          if (sId) {
-            const attached = fw.applied_to.some(a => {
-              if (!a) return false;
-              if (a.type === "server" && a.server && String(a.server.id) === sId) return true;
-              if (a.type === "server" && String(a.server) === sId) return true;
-              if (String(a.server_id) === sId) return true;
-              return false;
-            });
-            if (!attached) return false;
-          }
-          if (!Array.isArray(fw.rules)) return false;
-          const inbound = fw.rules.filter(r => r.direction === "in");
-          if (inbound.length === 0) return false;
-          const ports = new Set();
-          for (const r of inbound) {
-            if (r.protocol !== "tcp") return false;
-            const p = String(r.port);
-            if (!allowedPorts.has(p)) return false;
-            ports.add(p);
-          }
-          return ports.size === 3;
-        });
+        if (!sId || firewalls.some(fw => !fw || !Array.isArray(fw.applied_to) ||
+            fw.applied_to.some(a => !a || !((a.type === "server" && a.server &&
+              (a.server.id != null || typeof a.server === "number" || typeof a.server === "string")) || a.server_id != null)))) process.exit(1);
+        const attached = firewalls.filter(fw => fw.applied_to.some(a => {
+          if (!a) return false;
+          if (a.type === "server" && a.server && String(a.server.id) === sId) return true;
+          if (a.type === "server" && String(a.server) === sId) return true;
+          return String(a.server_id) === sId;
+        }));
+        if (!attached.length || attached.some(fw => !Array.isArray(fw.rules) ||
+            fw.rules.some(r => !r || !["in", "out"].includes(r.direction)))) process.exit(1);
+        const inbound = attached.flatMap(fw => fw.rules.filter(r => r.direction === "in"));
+        const ports = new Set();
+        const sources = {"80": new Set(), "443": new Set()};
+        for (const r of inbound) {
+          const p = String(r.port);
+          if (r.protocol !== "tcp" || !allowedPorts.has(p) ||
+              !Array.isArray(r.source_ips) || !r.source_ips.length ||
+              r.source_ips.some(ip => typeof ip !== "string" || !ip)) process.exit(1);
+          ports.add(p);
+          if (sources[p]) r.source_ips.forEach(ip => sources[p].add(ip));
+        }
+        const found = ports.size === 3 && ["80", "443"].every(p =>
+          sources[p].has("0.0.0.0/0") && sources[p].has("::/0"));
         process.exit(found ? 0 : 1);
       } catch (e) {
         process.exit(2);
@@ -572,27 +617,30 @@ _verify_hetzner_firewall_response() {
   if command -v jq >/dev/null 2>&1; then
     local jq_code=0
     printf '%s' "$json" | jq -e --arg sid "$server_id" '
-      if (.firewalls | type != "array") then
+      (if (.pages | type == "array") then {firewalls: [.pages[].firewalls[]]} else . end) |
+      if ($sid == "") or (.firewalls | type != "array") or
+         (any(.firewalls[]; (type != "object") or (.applied_to | type != "array") or
+           any(.applied_to[]; (type != "object") or
+             (((.type == "server") and ((.server.id? != null) or ((.server | type) == "number") or ((.server | type) == "string"))) or (.server_id != null) | not)))) then
         false
       else
-        .firewalls | any(
-          ((.applied_to | type == "array") and ((.applied_to | length) > 0)) and
-          (
-            if ($sid == "") then
-              true
-            else
-              .applied_to | any(
-                ((.type == "server") and ((.server.id | tostring) == $sid or (.server | tostring) == $sid)) or
-                ((.server_id | tostring) == $sid)
-              )
-            end
-          ) and
-          ([.rules[]? | select(.direction == "in")] as $in |
-            ($in | length > 0) and
-            ($in | all(.protocol == "tcp" and (.port == "22" or .port == "80" or .port == "443" or .port == 22 or .port == 80 or .port == 443))) and
-            ([$in[].port | tostring] | unique | sort == ["22", "443", "80"])
-          )
-        )
+        [.firewalls[] | select(.applied_to | any(
+          ((.type == "server") and ((.server.id? | tostring) == $sid or (.server | tostring) == $sid)) or
+          ((.server_id | tostring) == $sid)
+        ))] as $attached |
+        if ($attached | length == 0) or (any($attached[]; (.rules | type != "array") or
+          any(.rules[]; (type != "object") or (.direction != "in" and .direction != "out")))) then
+          false
+        else
+          [$attached[].rules[] | select(.direction == "in")] as $in |
+          ($in | all(.protocol == "tcp" and ((.port | tostring) == "22" or (.port | tostring) == "80" or (.port | tostring) == "443") and
+            (.source_ips | type == "array") and (.source_ips | length > 0) and
+            (.source_ips | all(type == "string" and length > 0)))) and
+          ([$in[].port | tostring] | unique | sort == ["22", "443", "80"]) and
+          (all("80", "443"; . as $p |
+            [$in[] | select((.port | tostring) == $p) | .source_ips[]] as $sources |
+            ($sources | index("0.0.0.0/0") != null) and ($sources | index("::/0") != null)))
+        end
       end
     ' >/dev/null 2>&1 || jq_code=$?
     if [[ $jq_code -eq 0 ]]; then
@@ -628,7 +676,7 @@ _verify_uptimerobot_response() {
           const urlMatches = (u === target || u === target + "/");
           const intervalNum = Number(m.interval);
           const intervalMatches = (intervalNum === 300);
-          if (!urlMatches || !intervalMatches) return false;
+          if (!urlMatches || !intervalMatches || ![1, 2, 8, 9].includes(m.status)) return false;
 
           if (!Array.isArray(m.alert_contacts) || m.alert_contacts.length === 0) {
             return false;
@@ -664,6 +712,7 @@ _verify_uptimerobot_response() {
         .monitors | any(
           ((.url == $target) or (.url == ($target + "/"))) and
           ((.interval == 300) or (.interval == "300")) and
+          (.status == 1 or .status == 2 or .status == 8 or .status == 9) and
           (.alert_contacts | type == "array") and
           ((.alert_contacts | length) > 0) and
           (
@@ -868,28 +917,20 @@ run_wizard() {
       local servers_response=""
       local firewalls_response=""
 
-      if command -v curl >/dev/null 2>&1; then
-        servers_response=$(printf 'header = "Authorization: Bearer %s"\n' "$HETZNER_API_TOKEN" | curl -s -K - \
-          --connect-timeout 5 \
-          "https://api.hetzner.cloud/v1/servers" 2>&1 || true)
-      fi
+      servers_response=$(_get_hetzner_pages "servers" "$HETZNER_API_TOKEN" || true)
 
       local server_id=""
       server_id=$(_get_hetzner_server_id "$servers_response" "$HETZNER_IPV4" || true)
 
       if [[ -z "$server_id" ]]; then
-        fw_err="Server with IPv4 $HETZNER_IPV4 was not found in the Hetzner Cloud project."
+        fw_err="Server with IPv4 $HETZNER_IPV4 was not found, or the server list could not be verified."
       else
-        if command -v curl >/dev/null 2>&1; then
-          firewalls_response=$(printf 'header = "Authorization: Bearer %s"\n' "$HETZNER_API_TOKEN" | curl -s -K - \
-            --connect-timeout 5 \
-            "https://api.hetzner.cloud/v1/firewalls" 2>&1 || true)
-        fi
+        firewalls_response=$(_get_hetzner_pages "firewalls" "$HETZNER_API_TOKEN" || true)
 
         if [[ -n "$firewalls_response" ]] && _verify_hetzner_firewall_response "$firewalls_response" "$server_id"; then
           fw_check_ok=true
         else
-          fw_err="Firewall is not attached to server ID $server_id (IPv4: $HETZNER_IPV4), or inbound rules do not restrict exclusively to TCP 22, 80, 443."
+          fw_err="Firewall is not attached to server ID $server_id (IPv4: $HETZNER_IPV4), pages or attachments could not be verified, or inbound rules are invalid."
         fi
       fi
 
@@ -1307,7 +1348,7 @@ run_wizard() {
       if [[ -n "$response" ]] && _verify_uptimerobot_response "$response" "$PRODUCTION_HOST" "$ALERT_EMAIL"; then
         monitor_check_ok=true
       else
-        monitor_err="No monitor matching URL https://$PRODUCTION_HOST/health with 5-minute interval and alert contact $ALERT_EMAIL found in UptimeRobot response."
+        monitor_err="No active monitor matching URL https://$PRODUCTION_HOST/health with 5-minute interval and alert contact $ALERT_EMAIL found in UptimeRobot response."
       fi
 
       if [[ "$monitor_check_ok" == "true" ]]; then
