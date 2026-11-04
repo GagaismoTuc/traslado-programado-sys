@@ -19,8 +19,14 @@ services:
 networks:
   production:
     name: ${INGRESS_PREFIX:-traslado-ingress}-production
+    ipam:
+      config:
+        - subnet: 172.16.10.0/24
   staging:
     name: ${INGRESS_PREFIX:-traslado-ingress}-staging
+    ipam:
+      config:
+        - subnet: 172.16.20.0/24
 volumes:
   caddy_data:
   caddy_config:

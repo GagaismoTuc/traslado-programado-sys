@@ -1,5 +1,6 @@
 import { z } from "zod";
 import { parseSpeedFactors, type PlannerSettings } from "./planner.js";
+import { readTrustedProxyCidrs } from "./trusted-proxies.js";
 
 const configSchema = z.object({
   SERVER_EPOCH: z.string().trim().min(1, "SERVER_EPOCH is required"),
@@ -34,6 +35,7 @@ export type ServerConfig = {
   routeGapMinutes: number;
   planner: PlannerSettings;
   trustedOrigins: string[];
+  trustedProxyCidrs: string[];
   geocoder: "off" | "nominatim";
   nominatimUrl: string;
   nominatimUserAgent: string;
@@ -82,6 +84,7 @@ export function readConfig(environment: NodeJS.ProcessEnv = process.env): Server
     // The early tolerance mirrors the route validator's default (15, inferido); calibrated later with real plans.
     planner: { rideTimeBufferMinutes: result.data.RIDE_TIME_BUFFER_MINUTES, speedFactors, earlyToleranceMinutes: 15 },
     trustedOrigins: readTrustedOrigins(environment.AUTH_ALLOWED_ORIGINS),
+    trustedProxyCidrs: readTrustedProxyCidrs(environment.TRUSTED_PROXY_CIDRS),
     geocoder: result.data.GEOCODER,
     nominatimUrl: result.data.NOMINATIM_URL,
     nominatimUserAgent: result.data.NOMINATIM_USER_AGENT,

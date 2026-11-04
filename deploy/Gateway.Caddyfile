@@ -1,3 +1,9 @@
+{
+	servers {
+		trusted_proxies static {$INGRESS_SUBNET}
+	}
+}
+
 :80 {
 	@driver host driver.{$PRODUCTION_HOST} driver.{$STAGING_HOST}
 	handle_path /api/* {
