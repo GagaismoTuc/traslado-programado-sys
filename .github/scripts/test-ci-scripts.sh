@@ -636,12 +636,13 @@ check "$t" $ok
 
 t="hosting.sh stage 4 passes valid OSRM_IMAGE as one quoted remote argument"
 ok=0
-image='ghcr.io/gagaismotuc/traslado-osrm:tucuman-260101-osrm26.4.0-r1'
-printf 'STAGE_1_CONFIRMED=true\nHETZNER_IPV4=192.0.2.1\nSTAGE_2_CONFIRMED=true\nSTAGE_3_CONFIRMED=true\n' > "$image_dir/state"
-rm -f "$image_dir/calls"
-printf '\ny\ny\ny\n\n\n\n' | PATH="$image_dir/bin:$PATH" HOME="$image_dir/home" WIZARD_STATE_FILE="$image_dir/state" SSH_CALLS="$image_dir/calls" OSRM_IMAGE="$image" bash "$wizard" > "$image_dir/out" 2>&1 || true
-grep -q '^STAGE_4_CONFIRMED=true' "$image_dir/state" || ok=1
-grep -Fq "docker manifest inspect '$image' 2>&1 || docker pull '$image' 2>&1" "$image_dir/calls" || ok=1
+for image in 'ghcr.io/gagaismotuc/traslado-osrm:tucuman-260101-osrm26.4.0-r1' '[::1]:5000/osrm:latest' 'Registry.EXAMPLE.com/osrm:latest'; do
+  printf 'STAGE_1_CONFIRMED=true\nHETZNER_IPV4=192.0.2.1\nSTAGE_2_CONFIRMED=true\nSTAGE_3_CONFIRMED=true\n' > "$image_dir/state"
+  rm -f "$image_dir/calls"
+  printf '\ny\ny\ny\n\n\n\n' | PATH="$image_dir/bin:$PATH" HOME="$image_dir/home" WIZARD_STATE_FILE="$image_dir/state" SSH_CALLS="$image_dir/calls" OSRM_IMAGE="$image" bash "$wizard" > "$image_dir/out" 2>&1 || true
+  grep -q '^STAGE_4_CONFIRMED=true' "$image_dir/state" || ok=1
+  grep -Fq "docker manifest inspect '$image' 2>&1 || docker pull '$image' 2>&1" "$image_dir/calls" || ok=1
+done
 check "$t" $ok
 
 t="hosting.sh stage 2 instructs direct firewall attachment without label selectors"

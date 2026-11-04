@@ -1103,7 +1103,7 @@ run_wizard() {
         test_image="ghcr.io/gagaismotuc/traslado-osrm:tucuman-260101-osrm26.4.0-r1"
       fi
 
-      if [[ ! "$test_image" =~ ^([a-z0-9]+(([._]|__|-+)[a-z0-9]+)*(:[0-9]+)?/)*[a-z0-9]+(([._]|__|-+)[a-z0-9]+)*(:[A-Za-z0-9_][A-Za-z0-9_.-]{0,127})?(@sha256:[a-f0-9]{64})?$ ]]; then
+      if [[ ! "$test_image" =~ ^(([A-Za-z0-9]+([._-][A-Za-z0-9]+)*(:[0-9]+)?|\[[0-9a-fA-F:]+\](:[0-9]+)?)/)?([a-z0-9]+(([._]|__|-+)[a-z0-9]+)*/)*[a-z0-9]+(([._]|__|-+)[a-z0-9]+)*(:[A-Za-z0-9_][A-Za-z0-9_.-]{0,127})?(@sha256:[a-f0-9]{64})?$ ]]; then
         warn "Invalid OSRM_IMAGE: expected a container image reference."
         exit 1
       fi
