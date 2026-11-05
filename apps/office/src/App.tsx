@@ -26,12 +26,6 @@ function SignInPage() {
   const [error, setError] = useState("");
   const [loading, setLoading] = useState(false);
 
-  useEffect(() => {
-    void send("/auth/me", "GET").then((res) => {
-      if (res.ok) window.location.assign("/live");
-    }).catch(() => undefined);
-  }, []);
-
   async function submit(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
     setError("");
