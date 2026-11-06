@@ -11,7 +11,7 @@ const script = resolve('deploy/local-staging.sh');
 function withFakeStaging(check) {
   const root = mkdtempSync(join(tmpdir(), 'local-staging-'));
   mkdirSync(join(root, 'bin'));
-  writeFileSync(join(root, 'bin', 'docker'), '#!/bin/sh\necho "$*" >> "$LOG"\ncase "$*" in *"down --remove-orphans"*) [ "${FAIL_DOWN-}" != 1 ] || exit 1;; *"volume inspect"*|*"network inspect"*) exit 1;; *"run --rm --no-deps -e SYNTHETIC_PASSWORD"*) echo synthetic-hash;; *"exec -T db psql"*) cat > "$SQL";; *"exec -T db sh -c"*) cat > "$SEED_SQL";; esac\nexit 0\n', { mode: 0o755 });
+  writeFileSync(join(root, 'bin', 'docker'), '#!/bin/sh\necho "$*" >> "$LOG"\ncase "$*" in *"--profile tools pull"*) [ "${FAIL_PULL-}" != 1 ] || exit 1;; *"down --remove-orphans"*) [ "${FAIL_DOWN-}" != 1 ] || exit 1;; *"volume inspect"*|*"network inspect"*) exit 1;; *"run --rm --no-deps -e SYNTHETIC_PASSWORD"*) echo synthetic-hash;; *"exec -T db psql"*) cat > "$SQL";; *"exec -T db sh -c"*) cat > "$SEED_SQL";; esac\nexit 0\n', { mode: 0o755 });
   writeFileSync(join(root, 'bin', 'cloudflared'), '#!/bin/sh\necho tunnel >> "$TUNNELS"\nif [ -e "$COUNT" ]; then host=driver; else host=office; touch "$COUNT"; fi\necho "https://$host.trycloudflare.com" >&2\nwhile :; do sleep 1; done\n', { mode: 0o755 });
   const env = { ...process.env, DEPLOY_ROOT: root, IMAGE_TAG: 'test', COUNT: join(root, 'count'), LOG: join(root, 'docker-log'), SQL: join(root, 'sql'), SEED_SQL: join(root, 'seed-sql'), TUNNELS: join(root, 'tunnels'), PATH: `${join(root, 'bin')}${process.platform === 'win32' ? ';' : ':'}${process.env.PATH}` };
   const run = (action) => spawnSync(shell, [script, action], { encoding: 'utf8', timeout: 20000, env });
@@ -120,6 +120,29 @@ test('starts staging and prints two HTTPS tunnel URLs', () => {
     assert.match(calls, /exec -T db sh -c/);
     assert.match(readFileSync(join(root, 'seed-sql'), 'utf8'), /Synthetic Passenger 001/);
     assert.match(readFileSync(join(root, 'sql'), 'utf8'), /INSERT INTO drivers/);
+  });
+});
+
+test('up pulls all compose images including tools before starting services', () => {
+  withFakeStaging(({ root, run }) => {
+    const result = run('up');
+    assert.equal(result.status, 0, result.stderr);
+    const calls = readFileSync(join(root, 'docker-log'), 'utf8').split('\n');
+    const pull = calls.findIndex((call) => /compose .* --profile tools pull$/.test(call));
+    const start = calls.findIndex((call) => /compose .* up /.test(call));
+    assert.ok(pull >= 0, 'missing compose pull for all profiles');
+    assert.ok(pull < start, 'images must be pulled before starting services');
+  });
+});
+
+test('fails before starting services or tunnels when compose pull fails', () => {
+  withFakeStaging(({ root, env, run }) => {
+    env.FAIL_PULL = '1';
+    const result = run('up');
+    assert.notEqual(result.status, 0);
+    assert.match(result.stderr, /Compose image pull failed/);
+    assert.doesNotMatch(readFileSync(join(root, 'docker-log'), 'utf8'), /network create|compose .* up /);
+    assert.equal(existsSync(join(root, 'tunnels')), false);
   });
 });
 

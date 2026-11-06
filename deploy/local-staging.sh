@@ -127,6 +127,7 @@ for image in api office driver; do
   docker pull "ghcr.io/gagaismotuc/traslado-$image:$tag" >&2 || { echo 'Image pull failed; see GHCR login in deploy/README.md' >&2; exit 1; }
 done
 docker pull ghcr.io/gagaismotuc/traslado-osrm:tucuman-260101-osrm26.4.0-r1 >&2 || { echo 'Image pull failed; see GHCR login in deploy/README.md' >&2; exit 1; }
+compose --profile tools pull >&2 || { echo 'Compose image pull failed' >&2; exit 1; }
 if ! docker network inspect traslado-local-ingress-staging >/dev/null 2>&1; then
   docker network create --subnet 172.16.20.0/24 traslado-local-ingress-staging >&2
 fi
