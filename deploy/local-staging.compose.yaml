@@ -10,6 +10,7 @@ services:
   offline-prototype:
     image: ${API_IMAGE:-ghcr.io/gagaismotuc/traslado-api}:${IMAGE_TAG:?required}
     command: ["node", "/prototype/server.mjs"]
+    restart: unless-stopped
     volumes:
       - ../prototypes/offline-pwa:/prototype:ro
     networks:

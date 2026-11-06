@@ -2,6 +2,7 @@
 import assert from 'node:assert/strict';
 import { once } from 'node:events';
 import { createServer } from 'node:http';
+import { connect } from 'node:net';
 import { readFileSync, readdirSync, statSync } from 'node:fs';
 import { createPublicKey, verify } from 'node:crypto';
 import { dirname, join, relative, resolve } from 'node:path';
@@ -156,4 +157,56 @@ test('the protocol covers every required check on at least one Chofer\'s iPhone'
     assert.match(protocol, new RegExp(`^## \\d+\\. ${check}`, 'm'), `missing check: ${check}`);
   }
   assert.match(protocol, /^\| 1 \| iPhone de un Chofer \|/m, 'the first tested phone must be a Chofer\'s iPhone');
+});
+
+test('a request cut mid-body does not stop the server', async (t) => {
+  const server = createPrototypeServer({ root: here });
+  const url = await listen(server);
+  t.after(() => server.close());
+  const { port } = new URL(url);
+  const socket = connect(Number(port), '127.0.0.1');
+  await once(socket, 'connect');
+  socket.write('POST /marks HTTP/1.1\r\nHost: x\r\nContent-Type: application/json\r\nContent-Length: 100\r\n\r\n{"id":"cut');
+  await new Promise((done) => setTimeout(done, 50));
+  socket.destroy();
+  await new Promise((done) => setTimeout(done, 100));
+  assert.equal((await fetch(`${url}/marks?device=x`)).status, 200);
+});
+
+test('serves an installable shell that opens without signal', async (t) => {
+  const server = createPrototypeServer({ root: here });
+  const url = await listen(server);
+  t.after(() => server.close());
+  const types = {
+    '/': 'text/html; charset=utf-8', '/app.mjs': 'text/javascript; charset=utf-8', '/queue.mjs': 'text/javascript; charset=utf-8',
+    '/sw.js': 'text/javascript; charset=utf-8', '/manifest.webmanifest': 'application/manifest+json', '/icon-192.png': 'image/png', '/icon-512.png': 'image/png',
+  };
+  for (const [path, type] of Object.entries(types)) {
+    const response = await fetch(`${url}${path}`);
+    assert.equal(`${path} ${response.status} ${response.headers.get('content-type')}`, `${path} 200 ${type}`);
+  }
+  const manifest = await (await fetch(`${url}/manifest.webmanifest`)).json();
+  assert.deepEqual({ start: manifest.start_url, scope: manifest.scope, display: manifest.display, sizes: manifest.icons.map((icon) => icon.sizes) },
+    { start: './', scope: './', display: 'standalone', sizes: ['192x192', '512x512'] });
+  const html = await (await fetch(`${url}/`)).text();
+  assert.match(html, /<link rel="manifest" href="manifest.webmanifest" \/>/);
+  assert.match(html, /<link rel="apple-touch-icon" href="icon-192.png" \/>/);
+  assert.match(await (await fetch(`${url}/app.mjs`)).text(), /navigator\.serviceWorker\.register\('sw\.js'\)/);
+  const sw = await (await fetch(`${url}/sw.js`)).text();
+  assert.match(sw, /const SHELL = \['\.\/', 'index\.html', 'app\.mjs', 'queue\.mjs', 'manifest\.webmanifest', 'icon-192\.png', 'icon-512\.png'\];/);
+  assert.match(sw, /caches\.match\(event\.request\.mode === 'navigate' \? 'index\.html' : event\.request\)/);
+});
+
+test('a mark added while a flush runs is sent by that flush', async () => {
+  const store = memoryStore();
+  const sent = [];
+  let release;
+  const gate = new Promise((done) => { release = done; });
+  const queue = markQueue(store, async (mark) => { if (mark.id === 'mark-1') await gate; sent.push(mark.id); });
+  await queue.add(newMark('Phone E', new Date('2026-11-06T12:00:00.000Z'), 'mark-1'));
+  const running = queue.flush();
+  await queue.add(newMark('Phone E', new Date('2026-11-06T12:01:00.000Z'), 'mark-2'));
+  release();
+  assert.deepEqual(await running, { sent: 2, pending: 0, error: null });
+  assert.deepEqual(sent, ['mark-1', 'mark-2']);
 });

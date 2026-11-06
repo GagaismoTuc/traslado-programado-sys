@@ -39,13 +39,14 @@ export function indexedDbStore(factory = globalThis.indexedDB) {
 
 /**
  * Marks are saved first and sent oldest first. A mark leaves the queue only after the server acknowledged it, so a
- * lost answer re-sends it and the server keeps one copy. A flush already running is shared, never doubled.
+ * lost answer re-sends it and the server keeps one copy. A flush already running is shared, never doubled, and also
+ * sends the marks added while it runs.
  */
 export function markQueue(store, send) {
   let running = null;
   const drain = async () => {
     let sent = 0;
-    for (const mark of await store.all()) {
+    for (let mark = (await store.all())[0]; mark; mark = (await store.all())[0]) {
       try {
         await send(mark);
       } catch (error) {

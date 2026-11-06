@@ -51,15 +51,16 @@ function text(value, max) {
   return typeof value === 'string' && value.length > 0 && value.length <= max;
 }
 
+/** The JSON body, or undefined when it is too large, invalid or the phone cut the request (as when signal drops). */
 async function readJson(request) {
   let size = 0;
   const chunks = [];
-  for await (const chunk of request) {
-    size += chunk.length;
-    if (size > MAX_BODY) return undefined;
-    chunks.push(chunk);
-  }
   try {
+    for await (const chunk of request) {
+      size += chunk.length;
+      if (size > MAX_BODY) return undefined;
+      chunks.push(chunk);
+    }
     return JSON.parse(Buffer.concat(chunks).toString('utf8'));
   } catch {
     return undefined;
@@ -92,8 +93,9 @@ export function createPrototypeServer({
     }
   };
 
-  return createServer(async (request, response) => {
+  const handle = async (request, response) => {
     const reply = (status, body) => {
+      if (response.destroyed) return;
       response.writeHead(status, { 'Content-Type': 'application/json', 'Cache-Control': 'no-store', 'X-Content-Type-Options': 'nosniff' });
       response.end(JSON.stringify(body));
     };
@@ -145,7 +147,12 @@ export function createPrototypeServer({
       return reply(200, { subscribed: subscriptions.has(device), lastResult: pushResults.get(device) ?? null });
     }
     reply(404, { error: 'Not found' });
-  });
+  };
+  // Any failure answers 500 or drops the connection; it never stops the server.
+  return createServer((request, response) => handle(request, response).catch(() => {
+    if (response.headersSent) response.destroy();
+    else response.writeHead(500, { 'Content-Type': 'application/json' }).end(JSON.stringify({ error: 'Prototype server error' }));
+  }));
 }
 
 if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {
