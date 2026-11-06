@@ -365,7 +365,7 @@ get_state_var() {
 # Validation helpers under Ley 25.326 data transfer regulations.
 validate_vps_region() {
   local reg="$1" lower
-  lower=$(printf '%s' "$reg" | tr '[:upper:]' '[:lower:]')
+  lower=$(printf '%s' "$reg" | tr '[:upper:]' '[:lower:]' | sed -E 's/^[[:space:]]+//; s/[[:space:]]+$//')
   # The country must come first (e.g. 'Alemania', 'Germany - Frankfurt'), so text
   # that only mentions Germany, such as 'Not Germany', is refused.
   local germany_re='^(alemania|germany|deutschland)([[:space:],(-].*)?$'
@@ -395,7 +395,9 @@ validate_firewall_rules() {
     i=$((i + 1))
     if [[ "$tok" =~ ^[0-9]+(-[0-9]+)?$ ]]; then tok="tcp/$tok"; fi
     # A source column copied from hPanel ('Any', 0.0.0.0/0, ::/0) after a rule.
-    if [[ "$tok" == */* ]] && (( i < ${#toks[@]} )) && [[ "${toks[i]}" =~ ^(any|0\.0\.0\.0/0|::/0)$ ]]; then
+    # An 'Any' followed by a port is the protocol of the next rule, not a source.
+    if [[ "$tok" == */* ]] && (( i < ${#toks[@]} )) && [[ "${toks[i]}" =~ ^(any|0\.0\.0\.0/0|::/0)$ ]] \
+      && { (( i + 1 >= ${#toks[@]} )) || ! [[ "${toks[i+1]}" =~ ^([0-9]+(-[0-9]+)?|any)$ ]]; }; then
       i=$((i + 1))
     fi
     case "$tok" in

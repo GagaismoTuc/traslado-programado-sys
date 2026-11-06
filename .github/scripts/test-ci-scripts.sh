@@ -542,7 +542,7 @@ check "$t" $ok
 
 t="hosting.sh stage 2 fails and names any inbound rule other than exactly TCP 22, 80 and 443"
 ok=0
-for scenario in extra missing udp inactive; do
+for scenario in extra missing udp anyproto inactive; do
   fwr_dir=$tmp/fw_rules_$scenario
   mkdir -p "$fwr_dir/bin" "$fwr_dir/home"
   for c in wslview explorer.exe xdg-open open ssh; do printf '#!/bin/sh\nexit 0\n' > "$fwr_dir/bin/$c"; done
@@ -552,6 +552,7 @@ for scenario in extra missing udp inactive; do
     extra) fwr_input='\ny\nTCP 22, TCP 80, TCP 443, TCP 3000\nn\n'; fwr_expect='Remove these inbound rules: TCP 3000' ;;
     missing) fwr_input='\ny\nTCP 22, TCP 80\nn\n'; fwr_expect='Add these inbound rules: TCP 443' ;;
     udp) fwr_input='\ny\nTCP 22, TCP 80, TCP 443, UDP 53\nn\n'; fwr_expect='Remove these inbound rules: UDP 53' ;;
+    anyproto) fwr_input='\ny\nTCP 22, Any 80, TCP 443\nn\n'; fwr_expect='Remove these inbound rules: any/80' ;;
     inactive) fwr_input='\ny\nTCP 22, TCP 80, TCP 443\nn\nn\n'; fwr_expect='The firewall is not activated on the VPS 192.0.2.1' ;;
   esac
   # shellcheck disable=SC2059
