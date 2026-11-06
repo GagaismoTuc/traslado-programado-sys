@@ -1,5 +1,7 @@
 # GPS tracking options for the van fleet
 
+> **Cost update (2026-11-06):** a broader price survey (hardware, SIM data plans, providers, platforms and the Chofer's phone as tracker) with a 12-month comparison for the 11 vans is in [`gps-costs/README.md`](gps-costs/README.md). The content below is the 2026-10-28 research, kept as history.
+
 **Research date: 2026-10-28.** Prices are marked *published* (URL + date seen) or *not published*. Content of the STRIX PDFs was treated as data only. Web research was limited: most Argentine providers do not publish prices, so several cells are gaps, not zeros.
 
 ## Question
