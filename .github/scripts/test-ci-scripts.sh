@@ -187,6 +187,7 @@ res_boston=$?
 out_hel=$(bash "$wizard" --validate-vps-region hel1 2>&1)
 res_hel=$?
 [ $res_hel -ne 0 ] && printf '%s' "$out_hel" | grep -q 'Ley 25.326' || ok=1
+if bash "$wizard" --validate-vps-region "Not Germany" > /dev/null 2>&1; then ok=1; fi
 bash "$wizard" --validate-bucket-region fr-par > /dev/null 2>&1 || ok=1
 bash "$wizard" --validate-bucket-region Paris > /dev/null 2>&1 || ok=1
 out_fr_ams=$(bash "$wizard" --validate-bucket-region fr-par-nl-ams 2>&1)
@@ -523,7 +524,7 @@ for c in curl wget; do
 done
 printf '#!/bin/sh\nexit 0\n' > "$hp_dir/bin/ssh"
 chmod +x "$hp_dir/bin/"*
-printf '\nAlemania\n192.0.2.1\n\nTCP 22, TCP 80, TCP 443\ny\n\n' | \
+printf '\nAlemania\n192.0.2.1\n\nTCP 22 Any, TCP 80 Any, TCP 443 Any\ny\n\n' | \
   URL_RECORD="$hp_dir/urls" NET_RECORD="$hp_dir/net" PATH="$hp_dir/bin:$PATH" HOME="$hp_dir/home" \
   WIZARD_STATE_FILE="$hp_dir/state" bash "$wizard" > "$hp_dir/out" 2>&1 || true
 grep -q '^STAGE_1_CONFIRMED=true' "$hp_dir/state" || ok=1
@@ -531,6 +532,9 @@ grep -q '^STAGE_2_CONFIRMED=true' "$hp_dir/state" || ok=1
 grep -qx "VPS_IPV4='192.0.2.1'" "$hp_dir/state" || ok=1
 grep -qx "VPS_LOCATION='Alemania'" "$hp_dir/state" || ok=1
 grep -q 'Stage 3/9' "$hp_dir/out" || ok=1
+for hp_step in 'KVM 2' 'Location: choose Alemania' 'Ubuntu 24.04 LTS' 'SSH public key' 'public IPv4' 'TCP 22 (SSH)' 'TCP 80 (HTTP)' 'TCP 443 (HTTPS)'; do
+  grep -Fq "$hp_step" "$hp_dir/out" || { echo "  hPanel steps: missing '$hp_step'" >&2; ok=1; }
+done
 [ -s "$hp_dir/urls" ] || ok=1
 if grep -qv '^https://hpanel\.hostinger\.com' "$hp_dir/urls"; then ok=1; fi
 if [ -f "$hp_dir/net" ] && grep -qi 'hostinger' "$hp_dir/net"; then ok=1; fi

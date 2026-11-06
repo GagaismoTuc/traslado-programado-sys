@@ -366,16 +366,15 @@ get_state_var() {
 validate_vps_region() {
   local reg="$1" lower
   lower=$(printf '%s' "$reg" | tr '[:upper:]' '[:lower:]')
-  case "$lower" in
-    *alemania*|*germany*|*deutschland*|*frankfurt*)
-      return 0
-      ;;
-    *)
-      warn "Location '$reg' is refused under Ley 25.326 international data transfer regulations."
-      warn "The VPS must be in Germany (Ley 25.326): choose Alemania"
-      return 1
-      ;;
-  esac
+  # The country must come first (e.g. 'Alemania', 'Germany - Frankfurt'), so text
+  # that only mentions Germany, such as 'Not Germany', is refused.
+  local germany_re='^(alemania|germany|deutschland)([[:space:],(-].*)?$'
+  if [[ "$lower" =~ $germany_re ]]; then
+    return 0
+  fi
+  warn "Location '$reg' is refused under Ley 25.326 international data transfer regulations."
+  warn "The VPS must be in Germany (Ley 25.326): choose Alemania"
+  return 1
 }
 
 # validate_firewall_rules "TCP 22, TCP 80, TCP 443" passes only when the inbound
@@ -395,6 +394,10 @@ validate_firewall_rules() {
     fi
     i=$((i + 1))
     if [[ "$tok" =~ ^[0-9]+(-[0-9]+)?$ ]]; then tok="tcp/$tok"; fi
+    # A source column copied from hPanel ('Any', 0.0.0.0/0, ::/0) after a rule.
+    if [[ "$tok" == */* ]] && (( i < ${#toks[@]} )) && [[ "${toks[i]}" =~ ^(any|0\.0\.0\.0/0|::/0)$ ]]; then
+      i=$((i + 1))
+    fi
     case "$tok" in
       tcp/22) seen_22=true ;;
       tcp/80) seen_80=true ;;
