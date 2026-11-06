@@ -153,6 +153,9 @@ ok=0
 out=$(bash "$wizard" --check 2>&1) || ok=1
 stages_count=$(printf '%s\n' "$out" | grep -cE '^[0-9]+\. ')
 [ "$stages_count" -eq 9 ] || ok=1
+printf '%s\n' "$out" | grep -q '^1\. Hostinger ' || ok=1
+printf '%s\n' "$out" | grep -q '^2\. Hostinger ' || ok=1
+if printf '%s\n' "$out" | grep -qi 'hetzner'; then ok=1; fi
 expected_secrets="DEPLOY_HOST
 DEPLOY_USER
 DEPLOY_SSH_KEY
@@ -175,18 +178,16 @@ check "$t" $ok
 
 t="hosting.sh region validation permits Germany and Paris and rejects others citing Ley 25.326"
 ok=0
-bash "$wizard" --validate-vps-region nbg1 > /dev/null 2>&1 || ok=1
-bash "$wizard" --validate-vps-region fsn1 > /dev/null 2>&1 || ok=1
-bash "$wizard" --validate-vps-region Nuremberg > /dev/null 2>&1 || ok=1
-out_fsn_hel=$(bash "$wizard" --validate-vps-region fsn1-hel1 2>&1)
-res_fsn_hel=$?
-[ $res_fsn_hel -ne 0 ] && printf '%s' "$out_fsn_hel" | grep -q 'Ley 25.326' || ok=1
+bash "$wizard" --validate-vps-region Alemania > /dev/null 2>&1 || ok=1
+bash "$wizard" --validate-vps-region "Alemania - Frankfurt" > /dev/null 2>&1 || ok=1
+bash "$wizard" --validate-vps-region Germany > /dev/null 2>&1 || ok=1
+out_boston=$(bash "$wizard" --validate-vps-region "Estados Unidos - Boston 2" 2>&1)
+res_boston=$?
+[ $res_boston -ne 0 ] && printf '%s' "$out_boston" | grep -Fq 'The VPS must be in Germany (Ley 25.326): choose Alemania' || ok=1
 out_hel=$(bash "$wizard" --validate-vps-region hel1 2>&1)
 res_hel=$?
 [ $res_hel -ne 0 ] && printf '%s' "$out_hel" | grep -q 'Ley 25.326' || ok=1
-out_ash=$(bash "$wizard" --validate-vps-region ash 2>&1)
-res_ash=$?
-[ $res_ash -ne 0 ] && printf '%s' "$out_ash" | grep -q 'Ley 25.326' || ok=1
+if bash "$wizard" --validate-vps-region "Not Germany" > /dev/null 2>&1; then ok=1; fi
 bash "$wizard" --validate-bucket-region fr-par > /dev/null 2>&1 || ok=1
 bash "$wizard" --validate-bucket-region Paris > /dev/null 2>&1 || ok=1
 out_fr_ams=$(bash "$wizard" --validate-bucket-region fr-par-nl-ams 2>&1)
@@ -253,8 +254,6 @@ cat > "$test_bin/curl" <<'EOF'
 case "$*" in
   *s3.fr-par.scw.cloud*) printf 200;;
   *api.uptimerobot.com*) printf '{"stat":"ok","pagination":{"total":1},"monitors":[{"id":1,"friendly_name":"traslado-prod-health","url":"https://example.test/health","interval":300,"status":2,"alert_contacts":[{"value":"alerts@external.test"}]}]}';;
-  *api.hetzner.cloud/v1/servers*) printf '{"servers":[{"id":1,"name":"traslado-prod","public_net":{"ipv4":{"ip":"192.0.2.1"}}}],"meta":{"pagination":{"next_page":null,"page":1}}}';;
-  *api.hetzner.cloud/v1/firewalls*) printf '{"firewalls":[{"id":1,"name":"traslado-firewall","applied_to":[{"type":"server","server":{"id":1}}],"rules":[{"direction":"in","protocol":"tcp","port":"22","source_ips":["0.0.0.0/0","::/0"]},{"direction":"in","protocol":"tcp","port":"80","source_ips":["0.0.0.0/0","::/0"]},{"direction":"in","protocol":"tcp","port":"443","source_ips":["0.0.0.0/0","::/0"]}]}],"meta":{"pagination":{"next_page":null,"page":1}}}';;
   *) printf 200;;
 esac
 EOF
@@ -276,10 +275,11 @@ git_status_before=$(git -C "$repo_root" status --porcelain --ignored)
 
 full_run_input=$(printf '%s\n' \
   "" \
-  "fsn1" \
+  "Alemania" \
   "192.0.2.1" \
   "" \
-  "HETZNER_SYNTHETIC_API_TOKEN_SENTINEL" \
+  "TCP 22, TCP 80, TCP 443" \
+  "y" \
   "" \
   "" \
   "" \
@@ -301,7 +301,7 @@ full_run_input=$(printf '%s\n' \
   "" \
   "")
 
-full_out=$(printf '%s' "$full_run_input" | PATH="$test_bin:$PATH" HOME="$test_home" TMPDIR="$test_tmp" WIZARD_STATE_FILE="$test_state" RECORD_SECRETS="$test_secrets" bash "$wizard" 2>&1 || true)
+full_out=$(printf '%s' "$full_run_input" | HOSTINGER_API_TOKEN=HOSTINGER_SYNTHETIC_API_TOKEN_SENTINEL PATH="$test_bin:$PATH" HOME="$test_home" TMPDIR="$test_tmp" WIZARD_STATE_FILE="$test_state" RECORD_SECRETS="$test_secrets" bash "$wizard" 2>&1 || true)
 
 if ! grep -q '^STAGE_9_CONFIRMED=true' "$test_state"; then ok=1; fi
 if ! printf '%s' "$full_out" | grep -q 'Setup complete'; then ok=1; fi
@@ -309,7 +309,7 @@ if ! grep -q 'SCW_ACCESS_KEY=SCW_SYNTHETIC_ACCESS_KEY_SENTINEL' "$test_secrets";
 if ! grep -q 'SCW_SECRET_KEY=SCW_SYNTHETIC_SECRET_KEY_SENTINEL' "$test_secrets"; then ok=1; fi
 if ! grep -q 'DEPLOY_SSH_KEY=SYNTHETIC_PRIVATE_KEY_SENTINEL' "$test_secrets"; then ok=1; fi
 if grep -rq 'SENTINEL' "$test_state" "$test_home" "$test_tmp"; then ok=1; fi
-if printf '%s' "$full_out" | grep -E -q 'SYNTHETIC_PRIVATE_KEY_SENTINEL|SCW_SYNTHETIC_SECRET_KEY_SENTINEL|UR_SYNTHETIC_KEY_SENTINEL|SCW_SYNTHETIC_ACCESS_KEY_SENTINEL|HETZNER_SYNTHETIC_API_TOKEN_SENTINEL'; then ok=1; fi
+if printf '%s' "$full_out" | grep -E -q 'SYNTHETIC_PRIVATE_KEY_SENTINEL|SCW_SYNTHETIC_SECRET_KEY_SENTINEL|UR_SYNTHETIC_KEY_SENTINEL|SCW_SYNTHETIC_ACCESS_KEY_SENTINEL|HOSTINGER_SYNTHETIC_API_TOKEN_SENTINEL'; then ok=1; fi
 
 git_status_after=$(git -C "$repo_root" status --porcelain --ignored)
 [ "$git_status_before" = "$git_status_after" ] || ok=1
@@ -490,89 +490,89 @@ exit 255
 EOF
 chmod +x "$test_p22_dir/bin/"*
 test_p22_state=$test_p22_dir/state
-printf '\nfsn1\n192.0.2.1\nn\n' | \
+printf '\nAlemania\n192.0.2.1\nn\n' | \
   PATH="$test_p22_dir/bin:$PATH" HOME="$test_p22_dir/home" WIZARD_STATE_FILE="$test_p22_state" bash "$wizard" >/dev/null 2>&1 || true
 if [ -f "$test_p22_state" ] && grep -q '^STAGE_1_CONFIRMED=true' "$test_p22_state"; then
   ok=1
 fi
 check "$t" $ok
 
-t="hosting.sh stage 2 halts when firewall is not attached or inbound rules are invalid"
+t="hosting.sh stage 1 refuses a VPS outside Germany and does not mark the stage done"
 ok=0
-test_fw_dir=$tmp/fw_test
-mkdir -p "$test_fw_dir/bin" "$test_fw_dir/home"
-for c in wslview explorer.exe xdg-open open; do printf '#!/bin/sh\nexit 0\n' > "$test_fw_dir/bin/$c"; done
-cat > "$test_fw_dir/bin/ssh" <<'EOF'
-#!/bin/sh
-exit 0
-EOF
-cat > "$test_fw_dir/bin/curl" <<'EOF'
-#!/bin/sh
-case "$*" in
-  *v1/servers*) printf '%s' '{"servers":[{"id":1,"name":"traslado-prod","public_net":{"ipv4":{"ip":"192.0.2.1"}}}],"meta":{"pagination":{"next_page":null,"page":1}}}';;
-  *) printf '%s' '{"firewalls":[{"id":1,"name":"traslado-firewall","applied_to":[{"type":"server","server":{"id":1}}],"rules":[{"direction":"in","protocol":"tcp","port":"22"},{"direction":"in","protocol":"tcp","port":"8080"}]}],"meta":{"pagination":{"next_page":null,"page":1}}}';;
-esac
-EOF
-chmod +x "$test_fw_dir/bin/"*
-test_fw_state=$test_fw_dir/state
-printf "STAGE_1_CONFIRMED=true\nHETZNER_IPV4='192.0.2.1'\n" > "$test_fw_state"
-fw_out=$(printf '\ny\nsynthetic_token\nn\n' | \
-  PATH="$test_fw_dir/bin:$PATH" HOME="$test_fw_dir/home" WIZARD_STATE_FILE="$test_fw_state" bash "$wizard" 2>&1 || true)
-if grep -q '^STAGE_2_CONFIRMED=true' "$test_fw_state"; then
-  ok=1
-fi
-if ! printf '%s' "$fw_out" | grep -q 'Hetzner firewall verification failed'; then
-  ok=1
-fi
+loc_dir=$tmp/loc_test
+mkdir -p "$loc_dir/bin" "$loc_dir/home"
+for c in wslview explorer.exe xdg-open open ssh; do printf '#!/bin/sh\nexit 0\n' > "$loc_dir/bin/$c"; done
+chmod +x "$loc_dir/bin/"*
+loc_rc=0
+printf '\nEstados Unidos - Boston 2\nn\n' | \
+  PATH="$loc_dir/bin:$PATH" HOME="$loc_dir/home" WIZARD_STATE_FILE="$loc_dir/state" bash "$wizard" > "$loc_dir/out" 2>&1 || loc_rc=$?
+[ "$loc_rc" -ne 0 ] || ok=1
+grep -Fq 'The VPS must be in Germany (Ley 25.326): choose Alemania' "$loc_dir/out" || ok=1
+if [ -f "$loc_dir/state" ] && grep -q '^STAGE_1_CONFIRMED=' "$loc_dir/state"; then ok=1; fi
+if grep -q 'Stage 2/9' "$loc_dir/out"; then ok=1; fi
 check "$t" $ok
 
-t="hosting.sh stage 2 halts when firewall is applied to another server"
+t="hosting.sh stages 1 and 2 only open hPanel, never call a Hostinger API, and pass with exactly TCP 22, 80 and 443"
 ok=0
-test_fw_other_dir=$tmp/fw_other_test
-mkdir -p "$test_fw_other_dir/bin" "$test_fw_other_dir/home"
-for x in wslview explorer.exe xdg-open open; do printf '#!/bin/sh\nexit 0\n' > "$test_fw_other_dir/bin/$x"; done
-cat > "$test_fw_other_dir/bin/curl" <<'STUB'
-#!/bin/sh
-cat >/dev/null
-case "$*" in
-  *v1/servers*) printf '%s' '{"servers":[{"id":1,"public_net":{"ipv4":{"ip":"192.0.2.1"}}}],"meta":{"pagination":{"next_page":null,"page":1}}}' ;;
-  *v1/firewalls*) printf '%s' '{"firewalls":[{"name":"other","applied_to":[{"type":"server","server":{"id":999}}],"rules":[{"direction":"in","protocol":"tcp","port":"22"},{"direction":"in","protocol":"tcp","port":"80"},{"direction":"in","protocol":"tcp","port":"443"}]}],"meta":{"pagination":{"next_page":null,"page":1}}}' ;;
-esac
-STUB
-cat > "$test_fw_other_dir/bin/ssh" <<'STUB'
-#!/bin/sh
-echo 'Permission denied (publickey).' >&2
-exit 255
-STUB
-chmod +x "$test_fw_other_dir/bin/"*
-printf "STAGE_1_CONFIRMED=true\nHETZNER_IPV4='192.0.2.1'\n" > "$test_fw_other_dir/state"
-printf '\ny\nsynthetic-token\n\nn\n' | PATH="$test_fw_other_dir/bin:$PATH" HOME="$test_fw_other_dir/home" WIZARD_STATE_FILE="$test_fw_other_dir/state" bash "$wizard" > "$test_fw_other_dir/out" 2>&1 || true
-if grep -q '^STAGE_2_CONFIRMED=true' "$test_fw_other_dir/state"; then
-  ok=1
-fi
-grep -q 'Verifying firewall configuration via Hetzner Cloud API' "$test_fw_other_dir/out" || ok=1
-grep -q 'Hetzner firewall verification failed: Firewall is not attached' "$test_fw_other_dir/out" || ok=1
-if grep -q 'Stage 3/9' "$test_fw_other_dir/out"; then ok=1; fi
+hp_dir=$tmp/hpanel_test
+mkdir -p "$hp_dir/bin" "$hp_dir/home"
+for c in wslview explorer.exe xdg-open open; do
+  printf '#!/bin/sh\nprintf "%%s\n" "$1" >> "$URL_RECORD"\n' > "$hp_dir/bin/$c"
+done
+for c in curl wget; do
+  printf '#!/bin/sh\nprintf "%%s\n" "$*" >> "$NET_RECORD"\nexit 1\n' > "$hp_dir/bin/$c"
+done
+printf '#!/bin/sh\nexit 0\n' > "$hp_dir/bin/ssh"
+chmod +x "$hp_dir/bin/"*
+printf '\nAlemania\n192.0.2.1\n\nTCP 22 Any, TCP 80 Any, TCP 443 Any\ny\n\n' | \
+  URL_RECORD="$hp_dir/urls" NET_RECORD="$hp_dir/net" PATH="$hp_dir/bin:$PATH" HOME="$hp_dir/home" \
+  WIZARD_STATE_FILE="$hp_dir/state" bash "$wizard" > "$hp_dir/out" 2>&1 || true
+grep -q '^STAGE_1_CONFIRMED=true' "$hp_dir/state" || ok=1
+grep -q '^STAGE_2_CONFIRMED=true' "$hp_dir/state" || ok=1
+grep -qx "VPS_IPV4='192.0.2.1'" "$hp_dir/state" || ok=1
+grep -qx "VPS_LOCATION='Alemania'" "$hp_dir/state" || ok=1
+grep -q 'Stage 3/9' "$hp_dir/out" || ok=1
+for hp_step in 'KVM 2' 'Location: choose Alemania' 'Ubuntu 24.04 LTS' 'SSH public key' 'public IPv4' 'TCP 22 (SSH)' 'TCP 80 (HTTP)' 'TCP 443 (HTTPS)'; do
+  grep -Fq "$hp_step" "$hp_dir/out" || { echo "  hPanel steps: missing '$hp_step'" >&2; ok=1; }
+done
+[ -s "$hp_dir/urls" ] || ok=1
+if grep -qv '^https://hpanel\.hostinger\.com' "$hp_dir/urls"; then ok=1; fi
+if [ -f "$hp_dir/net" ] && grep -qi 'hostinger' "$hp_dir/net"; then ok=1; fi
 check "$t" $ok
 
-t="hosting.sh stage 2 halts without node or jq when firewall is invalid"
+t="hosting.sh stage 2 fails and names any inbound rule other than exactly TCP 22, 80 and 443"
 ok=0
-test_fw_noparser_dir=$tmp/fw_noparser_test
-mkdir -p "$test_fw_noparser_dir/bin" "$test_fw_noparser_dir/home"
-for x in wslview explorer.exe xdg-open open; do printf '#!/bin/sh\nexit 0\n' > "$test_fw_noparser_dir/bin/$x"; done
-cat > "$test_fw_noparser_dir/bin/curl" <<'STUB'
-#!/bin/sh
-cat >/dev/null
-printf '%s' '{"firewalls":[{"applied_to":[],"rules":[{"direction":"in","protocol":"udp","port":"22"},{"direction":"in","protocol":"tcp","port":"80"},{"direction":"in","protocol":"tcp","port":"443"},{"direction":"in","protocol":"tcp","port":"8080"}]}],"meta":{"pagination":{"next_page":null,"page":1}}}'
-STUB
-printf '#!/bin/sh\nexit 0\n' > "$test_fw_noparser_dir/bin/ssh"
-chmod +x "$test_fw_noparser_dir/bin/"*
-printf "STAGE_1_CONFIRMED=true\nHETZNER_IPV4='192.0.2.1'\n" > "$test_fw_noparser_dir/state"
-# Run in an environment whose /usr/bin and /bin do not contain node or jq.
-printf '\ny\ntoken\n\nn\n' | PATH="$test_fw_noparser_dir/bin:/usr/bin:/bin" HOME="$test_fw_noparser_dir/home" WIZARD_STATE_FILE="$test_fw_noparser_dir/state" bash "$wizard" > "$test_fw_noparser_dir/out" 2>&1 || true
-if grep -q '^STAGE_2_CONFIRMED=true' "$test_fw_noparser_dir/state"; then
-  ok=1
-fi
+for scenario in extra missing udp anyproto inactive; do
+  fwr_dir=$tmp/fw_rules_$scenario
+  mkdir -p "$fwr_dir/bin" "$fwr_dir/home"
+  for c in wslview explorer.exe xdg-open open ssh; do printf '#!/bin/sh\nexit 0\n' > "$fwr_dir/bin/$c"; done
+  chmod +x "$fwr_dir/bin/"*
+  printf "STAGE_1_CONFIRMED=true\nVPS_IPV4='192.0.2.1'\n" > "$fwr_dir/state"
+  case "$scenario" in
+    extra) fwr_input='\ny\nTCP 22, TCP 80, TCP 443, TCP 3000\nn\n'; fwr_expect='Remove these inbound rules: TCP 3000' ;;
+    missing) fwr_input='\ny\nTCP 22, TCP 80\nn\n'; fwr_expect='Add these inbound rules: TCP 443' ;;
+    udp) fwr_input='\ny\nTCP 22, TCP 80, TCP 443, UDP 53\nn\n'; fwr_expect='Remove these inbound rules: UDP 53' ;;
+    anyproto) fwr_input='\ny\nTCP 22, Any 80, TCP 443\nn\n'; fwr_expect='Remove these inbound rules: any/80' ;;
+    inactive) fwr_input='\ny\nTCP 22, TCP 80, TCP 443\nn\nn\n'; fwr_expect='The firewall is not activated on the VPS 192.0.2.1' ;;
+  esac
+  # shellcheck disable=SC2059
+  printf "$fwr_input" | PATH="$fwr_dir/bin:$PATH" HOME="$fwr_dir/home" WIZARD_STATE_FILE="$fwr_dir/state" bash "$wizard" > "$fwr_dir/out" 2>&1 || true
+  if grep -q '^STAGE_2_CONFIRMED=' "$fwr_dir/state" || grep -q 'Stage 3/9' "$fwr_dir/out"; then ok=1; fi
+  grep -Fq "$fwr_expect" "$fwr_dir/out" || { echo "  stage 2 $scenario: missing '$fwr_expect'" >&2; ok=1; }
+done
+check "$t" $ok
+
+t="hosting.sh reads a Hetzner-era state file and offers to skip stage 1 with the saved IPv4"
+ok=0
+legacy_dir=$tmp/legacy_state_test
+mkdir -p "$legacy_dir/bin" "$legacy_dir/home"
+for c in wslview explorer.exe xdg-open open ssh; do printf '#!/bin/sh\nexit 0\n' > "$legacy_dir/bin/$c"; done
+chmod +x "$legacy_dir/bin/"*
+printf 'STAGE_1_CONFIRMED=true\nHETZNER_IPV4=192.0.2.1\n' > "$legacy_dir/state"
+printf '\ny\n' | PATH="$legacy_dir/bin:$PATH" HOME="$legacy_dir/home" WIZARD_STATE_FILE="$legacy_dir/state" bash "$wizard" > "$legacy_dir/out" 2>&1 || true
+grep -Fq 'Stage 1 already completed (IPv4: 192.0.2.1). Skip to next stage?' "$legacy_dir/out" || ok=1
+grep -q 'Stage 2/9' "$legacy_dir/out" || ok=1
+grep -qx "VPS_IPV4='192.0.2.1'" "$legacy_dir/state" || ok=1
 check "$t" $ok
 
 t="hosting.sh stage 3 halts if root login with ssh key is accepted"
@@ -663,10 +663,6 @@ for image in 'xn--80ak6aa92e.com:443/osrm:latest' 'my--registry.example.com:5000
 done
 check "$t" $ok
 
-t="hosting.sh stage 2 instructs direct firewall attachment without label selectors"
-grep -Fq 'not via a label selector' "$wizard"
-check "$t" $?
-
 t="hosting.sh stage 4 halts when GHCR docker access check fails"
 ok=0
 test_ghcr_dir=$tmp/ghcr_test
@@ -720,124 +716,6 @@ fi
 grep -q 'Verifying Scaleway Object Storage bucket' "$test_s3_dir/out" || ok=1
 grep -q 'HTTP 403 Forbidden' "$test_s3_dir/out" || ok=1
 if grep -q 'Stage 6/9' "$test_s3_dir/out"; then ok=1; fi
-check "$t" $ok
-
-t="hosting.sh stage 2 verifies the union and public web sources"
-ok=0
-union_dir=$tmp/fw_union_test
-mkdir -p "$union_dir/bin" "$union_dir/home"
-for x in wslview explorer.exe xdg-open open; do printf '#!/bin/sh\nexit 0\n' > "$union_dir/bin/$x"; done
-cat > "$union_dir/bin/curl" <<'STUB'
-#!/bin/sh
-cat >/dev/null
-case "$*" in
-  *v1/servers*) echo '{"servers":[{"id":42,"public_net":{"ipv4":{"ip":"192.0.2.10"}}}],"meta":{"pagination":{"next_page":null,"page":1}}}' ;;
-  *v1/firewalls*) cat "$FW_RESPONSE" ;;
-esac
-STUB
-printf '#!/bin/sh\nexit 0\n' > "$union_dir/bin/ssh"
-chmod +x "$union_dir/bin/"*
-for scenario in extra restricted split unknown selector; do
-  case "$scenario" in
-    extra) rules='{"direction":"in","protocol":"tcp","port":"5432","source_ips":["0.0.0.0/0"]}' ;;
-    restricted) rules='{"direction":"in","protocol":"tcp","port":"80","source_ips":["192.0.2.0/24"]}' ;;
-    split) rules='{"direction":"in","protocol":"tcp","port":"443","source_ips":["0.0.0.0/0","::/0"]}' ;;
-    unknown) rules='{"protocol":"udp","port":"53"}' ;;
-    selector) rules='{"direction":"in","protocol":"tcp","port":"5432","source_ips":["0.0.0.0/0"]}' ;;
-  esac
-  if [ "$scenario" = restricted ]; then
-    first_rules='{"direction":"in","protocol":"tcp","port":"22","source_ips":["0.0.0.0/0"]},{"direction":"in","protocol":"tcp","port":"443","source_ips":["0.0.0.0/0","::/0"]}'
-  elif [ "$scenario" = split ]; then
-    first_rules='{"direction":"in","protocol":"tcp","port":"22","source_ips":["0.0.0.0/0"]},{"direction":"in","protocol":"tcp","port":"80","source_ips":["0.0.0.0/0","::/0"]}'
-  else
-    first_rules='{"direction":"in","protocol":"tcp","port":"22","source_ips":["0.0.0.0/0"]},{"direction":"in","protocol":"tcp","port":"80","source_ips":["0.0.0.0/0","::/0"]},{"direction":"in","protocol":"tcp","port":"443","source_ips":["0.0.0.0/0","::/0"]}'
-  fi
-  attachment='{"type":"server","server":{"id":42}}'
-  if [ "$scenario" = selector ]; then attachment='{"type":"label_selector","label_selector":{"selector":"env=prod"}}'; fi
-  printf '{"firewalls":[{"applied_to":[{"type":"server","server":{"id":42}}],"rules":[%s]},{"applied_to":[%s],"rules":[%s]}],"meta":{"pagination":{"page":1,"next_page":null}}}' "$first_rules" "$attachment" "$rules" > "$union_dir/response"
-  printf "STAGE_1_CONFIRMED=true\nHETZNER_IPV4='192.0.2.10'\n" > "$union_dir/state"
-  printf '\ny\ntoken\n\n\nn\n' | PATH="$union_dir/bin:$PATH" HOME="$union_dir/home" WIZARD_STATE_FILE="$union_dir/state" FW_RESPONSE="$union_dir/response" bash "$wizard" > "$union_dir/out" 2>&1 || true
-  grep -q 'Verifying firewall configuration via Hetzner Cloud API' "$union_dir/out" || ok=1
-  if [ "$scenario" = split ]; then
-    grep -q '^STAGE_2_CONFIRMED=true' "$union_dir/state" || ok=1
-    grep -q 'Stage 3/9' "$union_dir/out" || ok=1
-  else
-    if grep -q '^STAGE_2_CONFIRMED=true' "$union_dir/state" || grep -q 'Stage 3/9' "$union_dir/out"; then ok=1; fi
-    grep -q 'Hetzner firewall verification failed' "$union_dir/out" || ok=1
-  fi
-done
-check "$t" $ok
-
-t="hosting.sh stage 2 includes firewalls on later API pages"
-ok=0
-page_dir=$tmp/fw_pages_test
-mkdir -p "$page_dir/bin" "$page_dir/home"
-for x in wslview explorer.exe xdg-open open; do printf '#!/bin/sh\nexit 0\n' > "$page_dir/bin/$x"; done
-cat > "$page_dir/bin/curl" <<'STUB'
-#!/bin/sh
-cat >/dev/null
-case "$*" in
-  *v1/servers*) echo '{"servers":[{"id":42,"public_net":{"ipv4":{"ip":"192.0.2.10"}}}],"meta":{"pagination":{"next_page":null,"page":1}}}' ;;
-  *v1/firewalls*page=2*)
-    echo page2 > "$PAGE_REACHED"
-    echo '{"firewalls":[{"applied_to":[{"type":"server","server":{"id":42}}],"rules":[{"direction":"in","protocol":"tcp","port":"5432","source_ips":["0.0.0.0/0"]}]}],"meta":{"pagination":{"next_page":null,"page":2}}}' ;;
-  *v1/firewalls*) echo '{"firewalls":[{"applied_to":[{"type":"server","server":{"id":42}}],"rules":[{"direction":"in","protocol":"tcp","port":"22","source_ips":["0.0.0.0/0"]},{"direction":"in","protocol":"tcp","port":"80","source_ips":["0.0.0.0/0","::/0"]},{"direction":"in","protocol":"tcp","port":"443","source_ips":["0.0.0.0/0","::/0"]}]}],"meta":{"pagination":{"next_page":2,"page":1}}}' ;;
-esac
-STUB
-printf '#!/bin/sh\nexit 0\n' > "$page_dir/bin/ssh"
-chmod +x "$page_dir/bin/"*
-printf "STAGE_1_CONFIRMED=true\nHETZNER_IPV4='192.0.2.10'\n" > "$page_dir/state"
-printf '\ny\ntoken\n\n\nn\n' | PATH="$page_dir/bin:$PATH" HOME="$page_dir/home" WIZARD_STATE_FILE="$page_dir/state" PAGE_REACHED="$page_dir/reached" bash "$wizard" > "$page_dir/out" 2>&1 || true
-[ -f "$page_dir/reached" ] || ok=1
-if grep -q '^STAGE_2_CONFIRMED=true' "$page_dir/state" || grep -q 'Stage 3/9' "$page_dir/out"; then ok=1; fi
-grep -q 'Hetzner firewall verification failed' "$page_dir/out" || ok=1
-check "$t" $ok
-
-t="hosting.sh stage 2 accepts valid rules split across API pages"
-ok=0
-split_page_dir=$tmp/fw_split_pages_test
-mkdir -p "$split_page_dir/bin" "$split_page_dir/home"
-for x in wslview explorer.exe xdg-open open; do printf '#!/bin/sh\nexit 0\n' > "$split_page_dir/bin/$x"; done
-cat > "$split_page_dir/bin/curl" <<'STUB'
-#!/bin/sh
-cat >/dev/null
-case "$*" in
-  *v1/servers*page=2*) echo '{"servers":[{"id":42,"public_net":{"ipv4":{"ip":"192.0.2.10"}}}],"meta":{"pagination":{"page":2,"next_page":null}}}' ;;
-  *v1/servers*) echo '{"servers":[],"meta":{"pagination":{"page":1,"next_page":2}}}' ;;
-  *v1/firewalls*page=2*) echo '{"firewalls":[{"applied_to":[{"type":"server","server":{"id":42}}],"rules":[{"direction":"in","protocol":"tcp","port":"443","source_ips":["0.0.0.0/0","::/0"]}]},{"applied_to":[{"type":"server","server":{"id":7}}],"rules":[{"direction":"in","protocol":"udp","port":"53","source_ips":["0.0.0.0/0"]}]}],"meta":{"pagination":{"page":2,"next_page":null}}}' ;;
-  *v1/firewalls*) echo '{"firewalls":[{"applied_to":[{"type":"server","server":{"id":42}}],"rules":[{"direction":"in","protocol":"tcp","port":"22","source_ips":["192.0.2.0/24"]},{"direction":"in","protocol":"tcp","port":"80","source_ips":["0.0.0.0/0","::/0"]}]}],"meta":{"pagination":{"page":1,"next_page":2}}}' ;;
-esac
-STUB
-printf '#!/bin/sh\nexit 0\n' > "$split_page_dir/bin/ssh"
-chmod +x "$split_page_dir/bin/"*
-printf "STAGE_1_CONFIRMED=true\nHETZNER_IPV4='192.0.2.10'\n" > "$split_page_dir/state"
-printf '\ny\ntoken\n\n\nn\n' | PATH="$split_page_dir/bin:$PATH" HOME="$split_page_dir/home" WIZARD_STATE_FILE="$split_page_dir/state" bash "$wizard" > "$split_page_dir/out" 2>&1 || true
-grep -q '^STAGE_2_CONFIRMED=true' "$split_page_dir/state" || ok=1
-grep -q 'Stage 3/9' "$split_page_dir/out" || ok=1
-check "$t" $ok
-
-t="hosting.sh stage 2 fails closed on unusable pagination"
-ok=0
-bad_page_dir=$tmp/fw_bad_pages_test
-mkdir -p "$bad_page_dir/bin" "$bad_page_dir/home"
-for x in wslview explorer.exe xdg-open open; do printf '#!/bin/sh\nexit 0\n' > "$bad_page_dir/bin/$x"; done
-cat > "$bad_page_dir/bin/curl" <<'STUB'
-#!/bin/sh
-cat >/dev/null
-case "$*" in
-  *v1/servers*) echo '{"servers":[{"id":42,"public_net":{"ipv4":{"ip":"192.0.2.10"}}}],"meta":{"pagination":{"page":1,"next_page":null}}}' ;;
-  *v1/firewalls*) cat "$PAGE_RESPONSE" ;;
-esac
-STUB
-printf '#!/bin/sh\nexit 0\n' > "$bad_page_dir/bin/ssh"
-chmod +x "$bad_page_dir/bin/"*
-for pagination in '"ignored":true' '"meta":{"pagination":{"page":1}}' '"meta":{"pagination":{"page":1,"next_page":1}}' '"meta":{"pagination":{"page":1,"next_page":"2"}}' '"meta":{"pagination":{"page":2,"next_page":null}}'; do
-  printf '{"firewalls":[{"applied_to":[{"type":"server","server":{"id":42}}],"rules":[{"direction":"in","protocol":"tcp","port":"22","source_ips":["0.0.0.0/0"]},{"direction":"in","protocol":"tcp","port":"80","source_ips":["0.0.0.0/0","::/0"]},{"direction":"in","protocol":"tcp","port":"443","source_ips":["0.0.0.0/0","::/0"]}]}],%s}' "$pagination" > "$bad_page_dir/response"
-  printf "STAGE_1_CONFIRMED=true\nHETZNER_IPV4='192.0.2.10'\n" > "$bad_page_dir/state"
-  printf '\ny\ntoken\n\n\nn\n' | PATH="$bad_page_dir/bin:$PATH" HOME="$bad_page_dir/home" WIZARD_STATE_FILE="$bad_page_dir/state" PAGE_RESPONSE="$bad_page_dir/response" bash "$wizard" > "$bad_page_dir/out" 2>&1 || true
-  if grep -q '^STAGE_2_CONFIRMED=true' "$bad_page_dir/state" || grep -q 'Stage 3/9' "$bad_page_dir/out"; then ok=1; fi
-  grep -q 'Hetzner firewall verification failed' "$bad_page_dir/out" || ok=1
-done
 check "$t" $ok
 
 t="hosting.sh stage 7 rejects paused and unknown monitor statuses"
