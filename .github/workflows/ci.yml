@@ -53,6 +53,7 @@ jobs:
       - run: docker run --rm -v "$PWD:/work" -w /work docker:cli sh deploy/tests/test-deploy.sh
       - run: docker run --rm -v "$PWD:/work" -w /work docker:cli sh deploy/tests/test-seed.sh
       - run: node --test deploy/tests/compose.test.mjs
+      - run: node --test deploy/tests/local-staging.test.mjs
       - run: sh .github/scripts/test-deploy-images.sh
 
   commitlint:

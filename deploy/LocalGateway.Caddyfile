@@ -1,0 +1,18 @@
+{
+    servers {
+        trusted_proxies static {$INGRESS_SUBNET}
+    }
+}
+
+:80 {
+    @driver host {$LOCAL_DRIVER_HOST}
+    handle_path /api/* {
+        reverse_proxy api:3000
+    }
+    handle @driver {
+        reverse_proxy driver:80
+    }
+    handle {
+        reverse_proxy office:80
+    }
+}
