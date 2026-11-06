@@ -76,6 +76,11 @@ change after a restart. On iOS, reinstall the driver PWA from the new URL after
 each restart. To check on a phone, turn off Wi-Fi, open both printed URLs, and
 sign in to the driver app with the synthetic account above.
 
+The throwaway offline prototype of issue #40 is served at `<office URL>/offline-prototype/`.
+It queues fake marks in IndexedDB, keeps what it receives in memory until the
+container restarts, and never touches the real apps or the database. The phone
+test protocol is `prototypes/offline-pwa/PROTOCOL.md`.
+
 ## Local verification
 
 `node --test deploy/tests/compose.test.mjs` checks the rendered Compose isolation. `deploy/tests/edge-smoke.ps1` creates and removes three disposable projects and checks HTTPS and network isolation using `deploy/tests/mock-osrm.Dockerfile`, a test-only stub. Build the local app images and mock first; the stub is not a substitute for the real OSRM artifact or a representative resource measurement. The real image and full-stack memory measurement remain pending until the registry grants `read:packages`.

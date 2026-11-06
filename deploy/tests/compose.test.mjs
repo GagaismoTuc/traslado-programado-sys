@@ -2,6 +2,8 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { execFileSync } from 'node:child_process';
 import { readFileSync } from 'node:fs';
+import { request } from 'node:http';
+import { resolve } from 'node:path';
 
 function config(project) {
   const text = execFileSync('docker', ['compose', '--project-name', `traslado-${project}`, '--env-file', 'deploy/.env.example', '-f', 'deploy/compose.yaml', 'config', '--format', 'json'], {
@@ -79,4 +81,60 @@ test('the example trusts only the gateway and edge networks of the project', () 
   assert.deepEqual(prod.services.gateway.environment.INGRESS_SUBNET.split(' '), ingressNetwork);
   assert.match(readFileSync('deploy/Gateway.Caddyfile', 'utf8'), /^\s*trusted_proxies static \{\$INGRESS_SUBNET\}$/m);
   assert.doesNotMatch(readFileSync('deploy/Caddyfile', 'utf8'), /trusted_proxies/, 'the edge faces clients and trusts no proxy');
+});
+
+test('local staging runs the offline prototype from the already-pulled API image, read-only and unpublished', () => {
+  const text = execFileSync('docker', ['compose', '--project-name', 'traslado-staging', '--env-file', 'deploy/.env.example', '-f', 'deploy/compose.yaml', '-f', 'deploy/local-staging.compose.yaml', 'config', '--format', 'json'], {
+    encoding: 'utf8', env: { ...process.env, IMAGE_TAG: 'test', DEPLOY_PROJECT: 'staging' },
+  });
+  const { services } = JSON.parse(text);
+  const prototype = services['offline-prototype'];
+  assert.equal(prototype.image, services.api.image);
+  assert.deepEqual(prototype.command, ['node', '/prototype/server.mjs']);
+  assert.equal(prototype.ports, undefined);
+  assert.equal(prototype.environment, undefined, 'the prototype gets no database URL or secret');
+  assert.deepEqual(prototype.volumes.map((volume) => ({ target: volume.target, readOnly: volume.read_only, source: volume.source.replaceAll('\\', '/').endsWith('/prototypes/offline-pwa') })),
+    [{ target: '/prototype', readOnly: true, source: true }]);
+  assert.deepEqual(Object.keys(prototype.networks), ['default']);
+});
+
+test('the local gateway keeps the office, driver and API routes and serves the prototype only on the office host', async () => {
+  const name = `traslado-gateway-test-${process.pid}`;
+  const docker = (...args) => execFileSync('docker', args, { encoding: 'utf8' }).trim();
+  const containers = [];
+  const run = (alias, args) => { containers.push(`${name}-${alias}`); docker('run', '-d', '--name', `${name}-${alias}`, '--network', name, ...args); };
+  const stub = (alias, port) => run(alias, ['--network-alias', alias, 'caddy:2-alpine', 'sh', '-c',
+    `printf '%s\\n' ':${port} {' 'respond "${alias} {uri}"' '}' > /tmp/Caddyfile && exec caddy run --config /tmp/Caddyfile --adapter caddyfile`]);
+  const get = (port, host, path) => new Promise((resolve, reject) => {
+    request({ host: '127.0.0.1', port, path, headers: { Host: host } }, (response) => {
+      let body = '';
+      response.on('data', (chunk) => { body += chunk; });
+      response.on('end', () => resolve(`${response.statusCode} ${response.headers.location ?? body}`));
+    }).on('error', reject).end();
+  });
+  docker('network', 'create', name);
+  try {
+    stub('office', 80);
+    stub('driver', 80);
+    stub('api', 3000);
+    stub('offline-prototype', 8080);
+    run('gateway', ['-e', 'LOCAL_DRIVER_HOST=driver.test', '-e', 'INGRESS_SUBNET=172.16.20.0/24',
+      '-v', `${resolve('deploy/LocalGateway.Caddyfile')}:/etc/caddy/Caddyfile:ro`, '-p', '127.0.0.1::80', 'caddy:2-alpine']);
+    const port = Number(docker('port', `${name}-gateway`, '80').split('\n')[0].split(':').pop());
+    const ready = Date.now() + 15000;
+    while ((await get(port, 'office.test', '/').catch(() => '')) !== '200 office /') {
+      assert.ok(Date.now() < ready, 'gateway and stubs did not start');
+      await new Promise((done) => setTimeout(done, 250));
+    }
+    assert.equal(await get(port, 'office.test', '/passengers'), '200 office /passengers');
+    assert.equal(await get(port, 'office.test', '/api/health'), '200 api /health');
+    assert.equal(await get(port, 'driver.test', '/'), '200 driver /');
+    assert.equal(await get(port, 'driver.test', '/api/health'), '200 api /health');
+    assert.equal(await get(port, 'office.test', '/offline-prototype/sw.js'), '200 offline-prototype /sw.js');
+    assert.equal(await get(port, 'office.test', '/offline-prototype'), '308 /offline-prototype/');
+    assert.equal(await get(port, 'driver.test', '/offline-prototype/sw.js'), '200 driver /offline-prototype/sw.js');
+  } finally {
+    for (const container of containers) execFileSync('docker', ['rm', '-f', container], { stdio: 'ignore' });
+    execFileSync('docker', ['network', 'rm', name], { stdio: 'ignore' });
+  }
 });

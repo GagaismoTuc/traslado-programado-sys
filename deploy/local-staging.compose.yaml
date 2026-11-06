@@ -6,3 +6,11 @@ services:
       - ./LocalGateway.Caddyfile:/etc/caddy/Caddyfile:ro
     ports:
       - "127.0.0.1:18780:80"
+  # Throwaway offline prototype of issue #40, on the API image that `up` already pulled. Fake marks only, kept in memory.
+  offline-prototype:
+    image: ${API_IMAGE:-ghcr.io/gagaismotuc/traslado-api}:${IMAGE_TAG:?required}
+    command: ["node", "/prototype/server.mjs"]
+    volumes:
+      - ../prototypes/offline-pwa:/prototype:ro
+    networks:
+      - default

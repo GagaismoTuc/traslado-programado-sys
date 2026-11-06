@@ -1,0 +1,56 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <meta name="theme-color" content="#7a3b00" />
+    <link rel="manifest" href="manifest.webmanifest" />
+    <link rel="icon" href="icon-192.png" />
+    <link rel="apple-touch-icon" href="icon-192.png" />
+    <meta name="apple-mobile-web-app-capable" content="yes" />
+    <title>Offline prototype</title>
+    <style>
+      body { font-family: system-ui, sans-serif; margin: 1rem; max-width: 40rem; }
+      button { font-size: 1.1rem; padding: 0.6rem 1rem; margin: 0.25rem 0.25rem 0.25rem 0; }
+      section { border-top: 1px solid #ccc; padding-top: 0.5rem; margin-top: 1rem; }
+      .warning { background: #fff3cd; padding: 0.5rem; }
+      code { word-break: break-all; }
+    </style>
+  </head>
+  <body>
+    <p class="warning">Throwaway prototype for issue #40. Marks are fake and never reach the real system.</p>
+    <h1>Offline prototype</h1>
+    <label>Phone label <input id="device" autocomplete="off" placeholder="e.g. iPhone 1" /></label>
+    <button id="save-device">Save label</button>
+
+    <section>
+      <h2>Queue</h2>
+      <button id="add">Add fake mark</button>
+      <button id="flush">Send now</button>
+      <label><input type="checkbox" id="drop-ack" /> Drop the next acknowledgement</label>
+      <p>On this phone: <strong id="pending">?</strong> pending. Last flush: <span id="last-flush">never</span></p>
+      <ul id="queue"></ul>
+    </section>
+
+    <section>
+      <h2>Server</h2>
+      <button id="refresh">Refresh</button>
+      <p>Received: <strong id="received">?</strong> marks, <strong id="duplicates">?</strong> repeated sends stored once.</p>
+      <ul id="server"></ul>
+    </section>
+
+    <section>
+      <h2>Push</h2>
+      <button id="subscribe">Allow notifications and subscribe</button>
+      <button id="push-test">Send a push in 30 s</button>
+      <p id="push-status">Not checked yet.</p>
+    </section>
+
+    <section>
+      <h2>This phone</h2>
+      <ul id="environment"></ul>
+    </section>
+
+    <script type="module" src="app.mjs"></script>
+  </body>
+</html>
