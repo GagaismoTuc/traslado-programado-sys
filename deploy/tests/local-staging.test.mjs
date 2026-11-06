@@ -11,9 +11,9 @@ const script = resolve('deploy/local-staging.sh');
 function withFakeStaging(check) {
   const root = mkdtempSync(join(tmpdir(), 'local-staging-'));
   mkdirSync(join(root, 'bin'));
-  writeFileSync(join(root, 'bin', 'docker'), '#!/bin/sh\necho "$*" >> "$LOG"\ncase "$*" in *"down --remove-orphans"*) [ "${FAIL_DOWN-}" != 1 ] || exit 1;; *"volume inspect"*|*"network inspect"*) exit 1;; *"run --rm --no-deps -e SYNTHETIC_PASSWORD"*) echo synthetic-hash;; *"exec -T db psql"*) cat > "$SQL";; esac\nexit 0\n', { mode: 0o755 });
+  writeFileSync(join(root, 'bin', 'docker'), '#!/bin/sh\necho "$*" >> "$LOG"\ncase "$*" in *"down --remove-orphans"*) [ "${FAIL_DOWN-}" != 1 ] || exit 1;; *"volume inspect"*|*"network inspect"*) exit 1;; *"run --rm --no-deps -e SYNTHETIC_PASSWORD"*) echo synthetic-hash;; *"exec -T db psql"*) cat > "$SQL";; *"exec -T db sh -c"*) cat > "$SEED_SQL";; esac\nexit 0\n', { mode: 0o755 });
   writeFileSync(join(root, 'bin', 'cloudflared'), '#!/bin/sh\necho tunnel >> "$TUNNELS"\nif [ -e "$COUNT" ]; then host=driver; else host=office; touch "$COUNT"; fi\necho "https://$host.trycloudflare.com" >&2\nwhile :; do sleep 1; done\n', { mode: 0o755 });
-  const env = { ...process.env, DEPLOY_ROOT: root, IMAGE_TAG: 'test', COUNT: join(root, 'count'), LOG: join(root, 'docker-log'), SQL: join(root, 'sql'), TUNNELS: join(root, 'tunnels'), PATH: `${join(root, 'bin')}${process.platform === 'win32' ? ';' : ':'}${process.env.PATH}` };
+  const env = { ...process.env, DEPLOY_ROOT: root, IMAGE_TAG: 'test', COUNT: join(root, 'count'), LOG: join(root, 'docker-log'), SQL: join(root, 'sql'), SEED_SQL: join(root, 'seed-sql'), TUNNELS: join(root, 'tunnels'), PATH: `${join(root, 'bin')}${process.platform === 'win32' ? ';' : ':'}${process.env.PATH}` };
   const run = (action) => spawnSync(shell, [script, action], { encoding: 'utf8', timeout: 20000, env });
   try { check({ root, env, run }); } finally {
     run('down');
@@ -113,11 +113,29 @@ test('starts staging and prints two HTTPS tunnel URLs', () => {
     assert.equal(result.status, 0, result.stderr);
     assert.match(result.stdout, /^office: https:\/\/[a-z0-9-]+\.trycloudflare\.com\ndriver: https:\/\/[a-z0-9-]+\.trycloudflare\.com\n$/);
     const calls = readFileSync(join(root, 'docker-log'), 'utf8');
-    assert.match(calls, /pull ghcr\.io\/gagaismotuc\/traslado-api:test/);
+    for (const image of ['api:test', 'office:test', 'driver:test', 'osrm:tucuman-260101-osrm26.4.0-r1']) {
+      assert.ok(calls.includes(`pull ghcr.io/gagaismotuc/traslado-${image}`), image);
+    }
     assert.match(calls, /run --rm --no-deps migrate/);
     assert.match(calls, /exec -T db sh -c/);
+    assert.match(readFileSync(join(root, 'seed-sql'), 'utf8'), /Synthetic Passenger 001/);
     assert.match(readFileSync(join(root, 'sql'), 'utf8'), /INSERT INTO drivers/);
   });
+});
+
+test('rejects unsafe persisted network and proxy settings', () => {
+  for (const [key, unsafe] of [['DEPLOY_SUBNET', '0.0.0.0/0'], ['INGRESS_SUBNET', '0.0.0.0/0'], ['TRUSTED_PROXY_CIDRS', '0.0.0.0/0']]) {
+    withFakeStaging(({ root, run }) => {
+      assert.equal(run('up').status, 0);
+      assert.equal(run('down').status, 0);
+      const path = join(root, 'staging', '.env');
+      const text = readFileSync(path, 'utf8');
+      writeFileSync(path, text.replace(new RegExp(`^${key}=.*$`, 'm'), `${key}=${unsafe}`));
+      const result = run('up');
+      assert.notEqual(result.status, 0, key);
+      assert.match(result.stderr, /Invalid local staging env/);
+    });
+  }
 });
 
 test('keeps generated secrets and tunnel state outside the repository', () => {

@@ -117,7 +117,10 @@ case "$postgres$migration$app" in *[!0-9a-f]*|'') echo 'Invalid local staging en
   [ "$(value DATABASE_URL)" = "postgresql://traslado_app:$app@db:5432/traslado" ] &&
   [ "$(value MIGRATION_DATABASE_URL)" = "postgresql://traslado_migrator:$migration@db:5432/traslado" ] &&
   [ "$(value BOOTSTRAP_DATABASE_URL)" = "postgresql://postgres:$postgres@db:5432/traslado" ] &&
-  [ "$(value INGRESS_PREFIX)" = traslado-local-ingress ] || { echo 'Invalid local staging env' >&2; exit 1; }
+  [ "$(value INGRESS_PREFIX)" = traslado-local-ingress ] &&
+  [ "$(value DEPLOY_SUBNET)" = 172.16.21.0/24 ] &&
+  [ "$(value INGRESS_SUBNET)" = 172.16.20.0/24 ] &&
+  [ "$(value TRUSTED_PROXY_CIDRS)" = 172.16.21.0/24,172.16.20.0/24 ] || { echo 'Invalid local staging env' >&2; exit 1; }
 tag=$(sed -n 's/^IMAGE_TAG=//p' "$envfile")
 case "$tag" in ''|*[!a-zA-Z0-9_.-]*) echo 'Invalid image tag' >&2; exit 1;; esac
 for image in api office driver; do
