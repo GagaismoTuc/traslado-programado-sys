@@ -1,6 +1,6 @@
 import { renderToStaticMarkup } from "react-dom/server";
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { acknowledgeVersion, driverDays, RouteView, startRefetching, StopView, visibleDays, type DriverRoute, type DriverStop } from "./Days";
+import { acknowledgeVersion, driverDays, isIosDevice, isStandalonePwa, registerPushSubscription, RouteView, startRefetching, StopView, urlBase64ToUint8Array, visibleDays, type DriverRoute, type DriverStop } from "./Days";
 
 // Synthetic data only.
 const passenger = { name: "Pasajero Sintético", wheelchair: true, medicalAlert: "Alergia sintética a la penicilina" };
@@ -102,6 +102,72 @@ describe("Confirmación de versión in the driver app", () => {
     await acknowledgeVersion("https://api.example", 9, 1);
     expect(fetchMock).toHaveBeenCalledWith("https://api.example/driver/routes/9/acknowledgements", {
       method: "POST", credentials: "include", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ version: 1 }),
+    });
+  });
+
+  it("identifies iOS devices and standalone PWA mode", () => {
+    expect(isIosDevice({ userAgent: "Mozilla/5.0 (iPhone; CPU iPhone OS 17_0 like Mac OS X)" } as any)).toBe(true);
+    expect(isIosDevice({ userAgent: "Mozilla/5.0 (iPad; CPU OS 17_0 like Mac OS X)" } as any)).toBe(true);
+    expect(isIosDevice({ userAgent: "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7)", platform: "MacIntel", maxTouchPoints: 5 } as any)).toBe(true);
+    expect(isIosDevice({ userAgent: "Mozilla/5.0 (Linux; Android 14)", platform: "Linux armv8l", maxTouchPoints: 5 } as any)).toBe(false);
+    expect(isIosDevice({ userAgent: "Mozilla/5.0 (Windows NT 10.0; Win64; x64)" } as any)).toBe(false);
+
+    expect(isStandalonePwa({ matchMedia: (query: string) => ({ matches: query === "(display-mode: standalone)" }) } as any)).toBe(true);
+    expect(isStandalonePwa({ matchMedia: () => ({ matches: false }), navigator: { standalone: true } } as any)).toBe(true);
+    expect(isStandalonePwa({ matchMedia: () => ({ matches: false }), navigator: { standalone: false } } as any)).toBe(false);
+  });
+
+  it("assigns route anchor id to RouteView", () => {
+    const html = renderToStaticMarkup(<RouteView route={route(1, null)} sending={false} onAcknowledge={() => undefined} />);
+    expect(html).toContain('id="route-9"');
+    expect(html).toContain('data-testid="route-9"');
+  });
+
+  it("registers push subscription with public key and sends it to the server", async () => {
+    const calls: Array<{ url: string; init?: RequestInit }> = [];
+    const fetchMock = vi.fn(async (url: string, init?: RequestInit) => {
+      calls.push({ url, init });
+      if (url === "https://api.example/push/public-key") {
+        return new Response(JSON.stringify({ publicKey: "BP_test_public_key" }), { status: 200 });
+      }
+      if (url === "https://api.example/push/subscriptions") {
+        return new Response(null, { status: 204 });
+      }
+      return new Response(null, { status: 404 });
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    let subscribedKey: any = null;
+    const mockPushManager = {
+      getSubscription: async () => null,
+      subscribe: async (opts: any) => {
+        subscribedKey = opts.applicationServerKey;
+        return {
+          toJSON: () => ({
+            endpoint: "https://push.example.com/sub/1",
+            keys: { p256dh: "key-p256dh", auth: "key-auth" },
+          }),
+        };
+      },
+    };
+    const mockNavigator = {
+      serviceWorker: {
+        ready: Promise.resolve({ pushManager: mockPushManager }),
+      },
+    };
+    vi.stubGlobal("navigator", mockNavigator);
+    vi.stubGlobal("PushManager", class {});
+    vi.stubGlobal("Notification", { permission: "granted" });
+
+    const registered = await registerPushSubscription("https://api.example");
+    expect(registered).toBe(true);
+    expect(subscribedKey).toBeInstanceOf(Uint8Array);
+    expect(calls).toHaveLength(2);
+    expect(calls[0].url).toBe("https://api.example/push/public-key");
+    expect(calls[1].url).toBe("https://api.example/push/subscriptions");
+    expect(JSON.parse(calls[1].init?.body as string)).toEqual({
+      endpoint: "https://push.example.com/sub/1",
+      keys: { p256dh: "key-p256dh", auth: "key-auth" },
     });
   });
 });

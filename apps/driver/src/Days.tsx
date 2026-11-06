@@ -36,6 +36,81 @@ export type DriverRoute = {
   // From version 2 on: what changed since the version the Chofer acknowledged, or since the previous one.
   changes?: { sinceVersion: number; items: VersionChange[] };
 };
+export function isIosDevice(nav: Partial<Navigator> = typeof navigator !== "undefined" ? navigator : {}): boolean {
+  const ua = nav.userAgent || "";
+  const platform = (nav as any).platform || "";
+  const maxTouchPoints = (nav as any).maxTouchPoints || 0;
+  return /iPad|iPhone|iPod/.test(ua) || (platform === "MacIntel" && maxTouchPoints > 1);
+}
+
+export function isStandalonePwa(win: Partial<Window> = typeof window !== "undefined" ? window : {}): boolean {
+  if (win.matchMedia?.("(display-mode: standalone)").matches === true) return true;
+  if ((win.navigator as unknown as { standalone?: boolean })?.standalone === true) return true;
+  return false;
+}
+
+export function urlBase64ToUint8Array(base64String: string): Uint8Array {
+  const padding = "=".repeat((4 - (base64String.length % 4)) % 4);
+  const base64 = (base64String + padding).replace(/-/g, "+").replace(/_/g, "/");
+  const rawData = atob(base64);
+  const outputArray = new Uint8Array(rawData.length);
+  for (let i = 0; i < rawData.length; ++i) {
+    outputArray[i] = rawData.charCodeAt(i);
+  }
+  return outputArray;
+}
+
+export async function registerPushSubscription(apiUrl: string, nav: any = typeof navigator !== "undefined" ? navigator : {}): Promise<boolean> {
+  if (!nav || !("serviceWorker" in nav) || typeof PushManager === "undefined") {
+    return false;
+  }
+  try {
+    const keyRes = await fetch(`${apiUrl}/push/public-key`, { credentials: "include" });
+    if (!keyRes.ok) return false;
+    const { publicKey } = await keyRes.json() as { publicKey?: string | null };
+    if (!publicKey) return false;
+
+    if (typeof Notification !== "undefined") {
+      if (Notification.permission === "default" && typeof Notification.requestPermission === "function") {
+        const permission = await Notification.requestPermission();
+        if (permission !== "granted") return false;
+      } else if (Notification.permission !== "granted") {
+        return false;
+      }
+    }
+
+    const registration = await nav.serviceWorker.ready;
+    let subscription = await registration.pushManager.getSubscription();
+    if (!subscription) {
+      const convertedKey = urlBase64ToUint8Array(publicKey);
+      subscription = await registration.pushManager.subscribe({
+        userVisibleOnly: true,
+        applicationServerKey: convertedKey,
+      });
+    }
+
+    const subJson = subscription.toJSON ? subscription.toJSON() : subscription;
+    if (subJson.endpoint && subJson.keys?.p256dh && subJson.keys?.auth) {
+      const res = await fetch(`${apiUrl}/push/subscriptions`, {
+        method: "POST",
+        credentials: "include",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          endpoint: subJson.endpoint,
+          keys: {
+            p256dh: subJson.keys.p256dh,
+            auth: subJson.keys.auth,
+          },
+        }),
+      });
+      return res.ok;
+    }
+  } catch {
+    // Non-blocking
+  }
+  return false;
+}
+
 export type VersionChange =
   | { kind: "vehicle"; from: string; to: string }
   | { kind: "added" | "removed"; transferId: number; passengerName: string }
@@ -242,7 +317,7 @@ export function CloseRefusal({ transfers }: { transfers: OpenTransfer[] }) {
 export function RouteView({ route, sending, onAcknowledge, marking }: {
   route: DriverRoute; sending: boolean; onAcknowledge: Acknowledge; marking?: Marking;
 }) {
-  return <section>
+  return <section id={`route-${route.routeId}`} data-testid={`route-${route.routeId}`}>
     <h3>{`${route.startTime}-${route.endTime}, ${route.vehiclePlate}, version ${route.version}`}</h3>
     {route.acknowledgedVersion === route.version
       ? <p>{`You acknowledged version ${route.version}.`}</p>
@@ -393,9 +468,20 @@ export function DriverHome({ apiUrl, userId, onSignedOut }: { apiUrl: string; us
     }).catch(() => undefined);
     void refreshLocal();
     void requestPersistentStorage(navigator.storage);
-  }, [store, userId, refreshLocal]);
+    void registerPushSubscription(apiUrl);
+  }, [store, userId, refreshLocal, apiUrl]);
   useEffect(() => startRefetching(window, document, () => void load()), [load]);
   useEffect(() => startFlushing(window, document, () => void flush()), [flush]);
+  useEffect(() => {
+    if (typeof window === "undefined") return;
+    const params = new URLSearchParams(window.location.search);
+    const targetRouteId = params.get("routeId");
+    if (!targetRouteId) return;
+    const el = document.getElementById(`route-${targetRouteId}`);
+    if (el && typeof el.scrollIntoView === "function") {
+      el.scrollIntoView({ behavior: "smooth" });
+    }
+  }, [plan]);
 
   async function closeSession() {
     setSending(true);
@@ -533,7 +619,13 @@ export function DriverHome({ apiUrl, userId, onSignedOut }: { apiUrl: string; us
 
   const [today] = driverDays();
   const days = plan ? visibleDays(plan.days) : null;
+  const showIosInstructions = isIosDevice() && !isStandalonePwa();
   return <>
+    {showIosInstructions && (
+      <div data-testid="ios-install-instructions" role="region" aria-label="Instrucciones para iPhone">
+        <p>Para recibir notificaciones en iPhone, agregá esta app a la pantalla de inicio desde Compartir &gt; Agregar al inicio.</p>
+      </div>
+    )}
     <button type="button" disabled={sending} onClick={() => void closeSession()}>Cerrar sesión</button>
     {loadError && <p role="alert">{loadError}</p>}
     {message && <p role="status">{message}</p>}

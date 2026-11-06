@@ -9,6 +9,10 @@ type Handler = (event: Record<string, unknown>) => void;
 function runWorker(files: string[]) {
   const handlers: Record<string, Handler> = {};
   const stores = new Map<string, Map<string, string>>([["driver-app-old", new Map([["/index.html", "old"]])]]);
+  const notifications: Array<{ title: string; options: any }> = [];
+  const openWindowCalls: string[] = [];
+  let clientsList: any[] = [];
+
   const caches = {
     open: async (name: string) => {
       const store = stores.get(name) ?? new Map<string, string>();
@@ -25,7 +29,18 @@ function runWorker(files: string[]) {
     location: { origin: "https://chofer.example" },
     addEventListener: (type: string, handler: Handler) => { handlers[type] = handler; },
     skipWaiting: async () => undefined,
-    clients: { claim: async () => undefined },
+    registration: {
+      showNotification: async (title: string, options: any) => {
+        notifications.push({ title, options });
+      },
+    },
+    clients: {
+      claim: async () => undefined,
+      matchAll: async () => clientsList,
+      openWindow: async (url: string) => {
+        openWindowCalls.push(url);
+      },
+    },
   };
   new Function("self", "caches", "fetch", serviceWorkerSource(files, "v1"))(self, caches, async () => "network");
   async function lifecycle(type: "install" | "activate") {
@@ -38,7 +53,29 @@ function runWorker(files: string[]) {
     handlers.fetch({ request: { url, method, mode }, respondWith: (promise: Promise<unknown>) => { answer = promise; } });
     return answer === null ? "not handled" : await answer;
   }
-  return { stores, lifecycle, request };
+  async function push(data?: any) {
+    let pending: Promise<unknown> = Promise.resolve();
+    handlers.push({
+      data: data !== undefined ? { json: () => data } : undefined,
+      waitUntil: (promise: Promise<unknown>) => { pending = promise; },
+    });
+    await pending;
+  }
+  async function notificationClick(notificationData: any, options: { clients?: any[] } = {}) {
+    let pending: Promise<unknown> = Promise.resolve();
+    let closed = false;
+    clientsList = options.clients ?? [];
+    handlers.notificationclick({
+      notification: {
+        data: notificationData,
+        close: () => { closed = true; },
+      },
+      waitUntil: (promise: Promise<unknown>) => { pending = promise; },
+    });
+    await pending;
+    return { closed };
+  }
+  return { stores, lifecycle, request, push, notificationClick, notifications, openWindowCalls };
 }
 
 describe("driver app PWA shell", () => {
@@ -68,5 +105,53 @@ describe("driver app PWA shell", () => {
     expect(await worker.request("https://api.example/driver/days/2026-10-23")).toBe("not handled");
     expect(await worker.request("https://chofer.example/driver/days/2026-10-23")).toBe("not handled");
     expect(await worker.request("https://chofer.example/assets/index-abc.js", "POST")).toBe("not handled");
+  });
+
+  it("handles push event by displaying a notification with route url", async () => {
+    const worker = runWorker(precacheList([]));
+    await worker.push({
+      title: "Nueva versión del plan",
+      body: "Se publicó la versión 2 de tu recorrido",
+      routeId: 42,
+      version: 2,
+      url: "/?routeId=42",
+    });
+    expect(worker.notifications).toHaveLength(1);
+    expect(worker.notifications[0]).toEqual({
+      title: "Nueva versión del plan",
+      options: {
+        body: "Se publicó la versión 2 de tu recorrido",
+        icon: "/icon-192.png",
+        badge: "/icon-192.png",
+        data: {
+          url: "/?routeId=42",
+          routeId: 42,
+          version: 2,
+        },
+      },
+    });
+  });
+
+  it("handles notificationclick by focusing/navigating client or opening window", async () => {
+    const worker = runWorker(precacheList([]));
+    // Case 1: no existing client -> opens window
+    const clickResult1 = await worker.notificationClick({ url: "/?routeId=42", routeId: 42, version: 2 });
+    expect(clickResult1.closed).toBe(true);
+    expect(worker.openWindowCalls).toEqual(["/?routeId=42"]);
+
+    // Case 2: existing window client -> navigates and focuses
+    let focused = false;
+    let navigatedTo = "";
+    const mockClient = {
+      navigate: (url: string) => { navigatedTo = url; },
+      focus: async () => { focused = true; },
+    };
+    const clickResult2 = await worker.notificationClick(
+      { url: "/?routeId=99", routeId: 99, version: 3 },
+      { clients: [mockClient] },
+    );
+    expect(clickResult2.closed).toBe(true);
+    expect(navigatedTo).toBe("/?routeId=99");
+    expect(focused).toBe(true);
   });
 });

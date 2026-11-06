@@ -2,6 +2,7 @@ import { createHash, randomBytes, randomUUID } from "node:crypto";
 import { getCookie, deleteCookie, setCookie } from "hono/cookie";
 import { getConnInfo } from "@hono/node-server/conninfo";
 import { Hono, type Context } from "hono";
+import webpush from "web-push";
 import {
   TRASBORDO_WINDOW_MINUTES, validateRoute, type RouteViolation, type ServerEpoch, type Stop as ValidatorStop, type Transfer as ValidatorTransfer,
 } from "@traslado/shared";
@@ -51,7 +52,27 @@ export type AppConfig = {
   planner?: PlannerSettings;
   // Where company staff receive a Pasajero nobody else can receive (`inferido`); null when not configured.
   baseAddress?: string | null;
+  vapid?: {
+    publicKey: string;
+    privateKey: string;
+    subject: string;
+  } | null;
 };
+
+export type PushSubscriptionKeys = {
+  p256dh: string;
+  auth: string;
+};
+
+export type PushSubscriptionData = {
+  endpoint: string;
+  keys: PushSubscriptionKeys;
+};
+
+export type PushSender = (
+  subscription: PushSubscriptionData,
+  payload: string,
+) => Promise<{ statusCode?: number } | void>;
 
 type UserRow = {
   id: number;
@@ -2357,7 +2378,7 @@ function parseAuthorization(body: unknown): { legalGuardianId: number; call: "ou
   return { legalGuardianId, call: body.call, name, dni };
 }
 
-export function createApp({ db, routing, router, geocoder, solver, travelTime, config }: {
+export function createApp({ db, routing, router, geocoder, solver, travelTime, pushSender: customPushSender, config }: {
   db: HealthDatabase;
   routing: RoutingHealth;
   router?: Router;
@@ -2365,6 +2386,7 @@ export function createApp({ db, routing, router, geocoder, solver, travelTime, c
   // Solve VROOM problems and measure driving time for "Order"; without them ordering answers 503.
   solver?: VroomSolver;
   travelTime?: TravelTime;
+  pushSender?: PushSender;
   config: AppConfig;
 }) {
   if (!config.serverEpoch.trim()) throw new Error("SERVER_EPOCH is required");
@@ -2372,6 +2394,23 @@ export function createApp({ db, routing, router, geocoder, solver, travelTime, c
   const routeGapMinutes = config.routeGapMinutes ?? 60;
   const plannerSettings = config.planner ?? { rideTimeBufferMinutes: 5, speedFactors: [], earlyToleranceMinutes: 15 };
   const now = config.now ?? (() => new Date());
+  const pushSender: PushSender = customPushSender ?? (async (sub, payload) => {
+    if (!config.vapid) return;
+    await webpush.sendNotification(
+      {
+        endpoint: sub.endpoint,
+        keys: { p256dh: sub.keys.p256dh, auth: sub.keys.auth },
+      },
+      payload,
+      {
+        vapidDetails: {
+          subject: config.vapid.subject,
+          publicKey: config.vapid.publicKey,
+          privateKey: config.vapid.privateKey,
+        },
+      },
+    );
+  });
   // One geocoder request per second for the whole process; cached answers do not use the slot.
   const geocodeCache = new Map<string, GeocodeResult | null>();
   let nextGeocodeAt = 0;
@@ -2696,6 +2735,53 @@ export function createApp({ db, routing, router, geocoder, solver, travelTime, c
     const current = now();
     return (result.rows as SessionRow[]).filter((row) => sessionState(row, current).kind !== "ended");
   }
+
+  async function sendPushNudge(driverId: number, routeId: number, version: number) {
+    try {
+      const driverResult = await db.query("SELECT user_id FROM drivers WHERE id = $1", [driverId]) as QueryResult;
+      const userId = driverResult.rows[0]?.user_id;
+      if (!userId) return;
+
+      const subsResult = await db.query(
+        `SELECT ps.id, ps.endpoint, ps.p256dh, ps.auth
+           FROM push_subscriptions ps
+           JOIN sessions s ON s.id = ps.session_id
+          WHERE s.user_id = $1 AND s.revoked_at IS NULL`,
+        [userId],
+      ) as QueryResult;
+
+      const payload = JSON.stringify({
+        title: "Nueva versión del plan",
+        body: `Se publicó la versión ${version} de tu recorrido`,
+        routeId,
+        version,
+        url: `/?routeId=${routeId}`,
+      });
+
+      for (const row of subsResult.rows) {
+        try {
+          const res = await pushSender(
+            {
+              endpoint: String(row.endpoint),
+              keys: { p256dh: String(row.p256dh), auth: String(row.auth) },
+            },
+            payload,
+          );
+          if (res && (res.statusCode === 404 || res.statusCode === 410)) {
+            await db.query("DELETE FROM push_subscriptions WHERE id = $1", [row.id]).catch(() => undefined);
+          }
+        } catch (err: any) {
+          const statusCode = err?.statusCode ?? err?.status;
+          if (statusCode === 404 || statusCode === 410) {
+            await db.query("DELETE FROM push_subscriptions WHERE id = $1", [row.id]).catch(() => undefined);
+          }
+        }
+      }
+    } catch {
+      // Failure to deliver never blocks the publication
+    }
+  }
+
   /**
    * Publishes the Recorrido as its next Versión del plan. It reads the Recorrido and asks OSRM outside the transaction,
    * then publishes only if nothing it read changed meanwhile. With `onlyIfChanged` (the whole Plan diario), a Recorrido
@@ -2807,9 +2893,12 @@ export function createApp({ db, routing, router, geocoder, solver, travelTime, c
       await appendChange(client, actorId, "route", String(routeId), "published", { version: current?.version ?? null, status }, {
         version, status: nextStatus, vehicleId, overrideReason, violations,
       });
-      return { created: true, version };
+      return { created: true, version, driverId };
     });
     const [version] = await loadPlanVersions(db, "pv.route_id = $1 AND pv.version = $2", [routeId, published.version]);
+    if (published.created && published.driverId) {
+      await sendPushNudge(Number(published.driverId), routeId, published.version).catch(() => undefined);
+    }
     return { created: published.created, version };
   }
 
@@ -3221,7 +3310,10 @@ export function createApp({ db, routing, router, geocoder, solver, travelTime, c
             [hashSessionToken(token), now()],
           ) as QueryResult;
           const session = ended.rows[0];
-          if (session) await appendChange(client, Number(session.user_id), "session", String(session.id), "revoked", { active: true }, { active: false });
+          if (session) {
+            await client.query("DELETE FROM push_subscriptions WHERE session_id = $1", [session.id]);
+            await appendChange(client, Number(session.user_id), "session", String(session.id), "revoked", { active: true }, { active: false });
+          }
         });
       }
       deleteCookie(context, SESSION_COOKIE, { path: "/", secure: true, httpOnly: true, sameSite: "Lax" });
@@ -3286,6 +3378,7 @@ export function createApp({ db, routing, router, geocoder, solver, travelTime, c
           [id, now()],
         );
         await client.query("DELETE FROM remembered_devices WHERE user_id = $1", [id]);
+        await client.query("DELETE FROM push_subscriptions WHERE session_id IN (SELECT id FROM sessions WHERE user_id = $1)", [id]);
         await appendChange(client, actor.id, "user", String(id), "password_reset", null, { username: before.username, totpReset: before.role === "office" });
         return true;
       });
@@ -3312,6 +3405,7 @@ export function createApp({ db, routing, router, geocoder, solver, travelTime, c
           "UPDATE sessions SET revoked_at = $2, ended_reason = 'account_disabled' WHERE user_id = $1 AND revoked_at IS NULL",
           [id, current],
         );
+        await client.query("DELETE FROM push_subscriptions WHERE session_id IN (SELECT id FROM sessions WHERE user_id = $1)", [id]);
         await appendChange(client, actor.id, "user", String(id), "disabled", { disabled: false }, { disabled: true, username: previous.username, role: previous.role });
         return "disabled";
       });
@@ -3372,6 +3466,7 @@ export function createApp({ db, routing, router, geocoder, solver, travelTime, c
         const session = result.rows[0];
         if (!session) return false;
         await client.query("DELETE FROM remembered_devices WHERE session_id = $1", [sessionId]);
+        await client.query("DELETE FROM push_subscriptions WHERE session_id = $1", [sessionId]);
         if (session.revoked_at) return true;
         await client.query("UPDATE sessions SET revoked_at = $2, ended_reason = 'device_revoked' WHERE id = $1", [sessionId, now()]);
         await appendChange(client, actor.id, "session", String(sessionId), "device_revoked", { active: true }, {
@@ -4878,6 +4973,54 @@ export function createApp({ db, routing, router, geocoder, solver, travelTime, c
           .map((row) => ({ id: Number(row.id), name: String(row.name), dni: String(row.dni) })),
         base: config.baseAddress ? { address: config.baseAddress } : null,
       });
+    })
+    .get("/push/public-key", async (context) => {
+      const user = await authenticate(context);
+      if (user instanceof Response) return user;
+      return context.json({ publicKey: config.vapid?.publicKey ?? null });
+    })
+    .post("/push/subscriptions", async (context) => {
+      const chofer = await requireDriver(context);
+      if (chofer instanceof Response) return chofer;
+      const body = await context.req.json().catch(() => null);
+      if (!isObject(body) || typeof body.endpoint !== "string") {
+        return context.json({ error: "Invalid request" }, 400);
+      }
+      try {
+        const url = new URL(body.endpoint);
+        if (url.protocol !== "http:" && url.protocol !== "https:") {
+          return context.json({ error: "Invalid request" }, 400);
+        }
+      } catch {
+        return context.json({ error: "Invalid request" }, 400);
+      }
+      const keys = isObject(body.keys) ? body.keys : null;
+      if (!keys || typeof keys.p256dh !== "string" || !keys.p256dh || typeof keys.auth !== "string" || !keys.auth) {
+        return context.json({ error: "Invalid request" }, 400);
+      }
+      await db.query(
+        `INSERT INTO push_subscriptions (session_id, endpoint, p256dh, auth)
+         VALUES ($1, $2, $3, $4)
+         ON CONFLICT (endpoint) DO UPDATE
+         SET session_id = EXCLUDED.session_id,
+             p256dh = EXCLUDED.p256dh,
+             auth = EXCLUDED.auth,
+             created_at = now()`,
+        [chofer.user.session_id, body.endpoint, keys.p256dh, keys.auth],
+      );
+      return context.body(null, 204);
+    })
+    .delete("/push/subscriptions", async (context) => {
+      const user = await authenticate(context);
+      if (user instanceof Response) return user;
+      const body = await context.req.json().catch(() => null);
+      const endpoint = isObject(body) && typeof body.endpoint === "string" ? body.endpoint : null;
+      if (endpoint) {
+        await db.query("DELETE FROM push_subscriptions WHERE session_id = $1 AND endpoint = $2", [user.session_id, endpoint]);
+      } else {
+        await db.query("DELETE FROM push_subscriptions WHERE session_id = $1", [user.session_id]);
+      }
+      return context.body(null, 204);
     })
     .get("/transfers/:id/authorizations", async (context) => {
       const actor = await requireOffice(context);
