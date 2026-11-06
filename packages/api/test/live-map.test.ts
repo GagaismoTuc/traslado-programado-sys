@@ -1,4 +1,5 @@
 import { describe, expect, it } from "vitest";
+import { createApp } from "../src/app.js";
 import { createExecutionHarness, HOME, NOW, TODAY } from "./helpers/execution.js";
 
 const { appPool, clock, request, answer, rows, setup, markBody, mark } = createExecutionHarness("live-map-test", {
@@ -155,5 +156,82 @@ describe("GET /daily-plans/:date/live", () => {
       // Current arrival must be at least previous arrival + 5 minutes service duration
       expect(currMinutes).toBeGreaterThanOrEqual(prevMinutes + 5);
     }
+  });
+});
+
+const mockNow = new Date("2026-10-23T11:30:00Z");
+function setupMockReview(status: string, hasMark: boolean) {
+  const calls: { lat: number; lng: number }[][] = [];
+  const rows = [
+    { id: 1, transferId: 1, kind: "pickup", position: 1, passengerId: 1, passengerName: "A", placeName: "A", lat: -26.1, lng: -65.1, plannedTime: "08:00", serviceMinutes: 7, transferStatus: status },
+    { id: 2, transferId: 2, kind: "pickup", position: 2, passengerId: 2, passengerName: "B", placeName: "B", lat: -26.2, lng: -65.2, plannedTime: "08:10", serviceMinutes: 7, transferStatus: "planificado" },
+    { id: 3, transferId: 1, kind: "dropoff", position: 3, passengerId: 1, passengerName: "A", placeName: "C", lat: -26.3, lng: -65.3, plannedTime: "08:20", serviceMinutes: 9, transferStatus: status },
+    { id: 4, transferId: 2, kind: "dropoff", position: 4, passengerId: 2, passengerName: "B", placeName: "D", lat: -26.4, lng: -65.4, plannedTime: "08:30", serviceMinutes: 9, transferStatus: "planificado" },
+  ];
+  const db = {
+    async query(sql: string) {
+      let result: unknown[];
+      if (sql.includes("FROM sessions s JOIN users")) {
+        result = [{ session_id: 1, user_id: 1, username: "office", role: "office", created_at: mockNow, last_used_at: mockNow, second_factor_at: mockNow, revoked_at: null, disabled_at: null, persistent_session: false }];
+      } else if (sql.startsWith("UPDATE sessions")) {
+        result = [];
+      } else if (sql.includes("FROM daily_plans WHERE")) {
+        result = [{ id: 1, date: "2026-10-23", timeZone: "America/Argentina/Tucuman" }];
+      } else if (sql.includes("FROM routes r") && sql.includes("daily_plan_id")) {
+        result = [{ id: 1, status: "en_curso", driverId: 1, driverName: "Driver", vehicleId: 1, vehiclePlate: "TEST", startLat: null, startLng: null }];
+      } else if (sql.includes("FROM stops s")) {
+        result = rows;
+      } else if (sql.includes("FROM marks e")) {
+        result = hasMark ? [{ id: 1, kind: status, latitude: -26.1, longitude: -65.1, phone_time_hhmi: "08:30", phone_minutes: 510, phone_time: mockNow }] : [];
+      } else {
+        throw new Error(`Unexpected SQL: ${sql}`);
+      }
+      return { rows: result, rowCount: result.length };
+    },
+  };
+  const router = async (points: { lat: number; lng: number }[]) => {
+    calls.push(points);
+    return points.slice(1).map(() => ({ distanceMeters: 100, durationSeconds: 60 }));
+  };
+  const app = createApp({
+    db: db as any,
+    router,
+    routing: { osrm: async () => {}, vroom: async () => {} },
+    config: { serverEpoch: "review", now: () => mockNow } as any,
+  });
+  const get = async () => {
+    const res = await app.request("/daily-plans/2026-10-23/live", { headers: { cookie: "session=synthetic" } });
+    expect(res.status).toBe(200);
+    return (await res.json() as any).routes[0];
+  };
+  return { get, calls };
+}
+
+describe("Rule 1, Rule 2 and absent dropoff live map verification", () => {
+  it("Rule 1: routes remaining stops strictly in published order and includes actual service durations", async () => {
+    const { get, calls } = setupMockReview("subio", true);
+    const route = await get();
+    expect(calls[0]).toEqual([
+      { lat: -26.1, lng: -65.1 },
+      { lat: -26.2, lng: -65.2 },
+      { lat: -26.3, lng: -65.3 },
+      { lat: -26.4, lng: -65.4 },
+    ]);
+    expect(route.stops.slice(1).map((s: any) => s.eta)).toEqual(["08:31", "08:39", "08:49"]);
+  });
+
+  it("Rule 2: displays planned times without calling the router when no mark exists", async () => {
+    const { get, calls } = setupMockReview("planificado", false);
+    const route = await get();
+    expect(calls).toEqual([]);
+    expect(route.nextStop.plannedTime).toBe("08:00");
+    expect(route.stops.map((s: any) => s.eta)).toEqual([null, null, null, null]);
+  });
+
+  it("does not route or report as next an absent passenger's cancelled dropoff", async () => {
+    const { get, calls } = setupMockReview("ausente", true);
+    const route = await get();
+    expect(route.stops.find((s: any) => s.id === 3).eta).toBeNull();
+    expect(calls[0]).not.toContainEqual({ lat: -26.3, lng: -65.3 });
   });
 });

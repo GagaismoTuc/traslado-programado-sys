@@ -1,9 +1,73 @@
 import { useEffect, useRef, useState } from "react";
 import type { Map as MapLibreMap, Marker } from "maplibre-gl";
-import type { LiveRoute } from "@traslado/api";
+import type { LiveRoute, LiveStop } from "@traslado/api";
 import { MAP_STYLE_URL } from "./PinPicker";
 
 type MapLibre = typeof import("maplibre-gl");
+
+export function createStopPopupContent(stop: LiveStop): HTMLElement {
+  const container = document.createElement("div");
+  container.className = "live-map-popup";
+
+  const title = document.createElement("div");
+  const strong = document.createElement("strong");
+  strong.textContent = stop.passengerName;
+  title.appendChild(strong);
+  title.appendChild(document.createTextNode(` (${stop.kind === "pickup" ? "Subida" : "Bajada"})`));
+  container.appendChild(title);
+
+  const place = document.createElement("div");
+  place.textContent = stop.placeName;
+  container.appendChild(place);
+
+  const planned = document.createElement("div");
+  planned.textContent = `Hora planificada: ${stop.plannedTime}`;
+  container.appendChild(planned);
+
+  if (stop.eta) {
+    const etaRow = document.createElement("div");
+    etaRow.appendChild(document.createTextNode("ETA: "));
+    const etaStrong = document.createElement("strong");
+    etaStrong.textContent = stop.eta;
+    etaRow.appendChild(etaStrong);
+    container.appendChild(etaRow);
+  }
+
+  const status = document.createElement("div");
+  status.textContent = `Estado: ${stop.completed ? stop.status : "Pendiente"}`;
+  container.appendChild(status);
+
+  return container;
+}
+
+export function createMarcaPopupContent(
+  vehiclePlate: string,
+  driverName: string,
+  lastMarcaKind: string,
+  phoneTimeHhmi: string,
+): HTMLElement {
+  const container = document.createElement("div");
+  container.className = "live-marca-popup";
+
+  const title = document.createElement("div");
+  const strong = document.createElement("strong");
+  strong.textContent = `${vehiclePlate} (${driverName})`;
+  title.appendChild(strong);
+  container.appendChild(title);
+
+  const marcaRow = document.createElement("div");
+  marcaRow.appendChild(document.createTextNode("Última marca: "));
+  const marcaStrong = document.createElement("strong");
+  marcaStrong.textContent = lastMarcaKind;
+  marcaRow.appendChild(marcaStrong);
+  container.appendChild(marcaRow);
+
+  const timeRow = document.createElement("div");
+  timeRow.textContent = `Hora: ${phoneTimeHhmi}`;
+  container.appendChild(timeRow);
+
+  return container;
+}
 
 // San Miguel de Tucumán default center
 const DEFAULT_CENTER: [number, number] = [-65.2036, -26.8241];
@@ -112,15 +176,7 @@ export function LiveMap({ routes, selectedRouteId, onSelectRoute }: LiveMapProps
 
       // 2. Stop markers
       for (const stop of route.stops) {
-        const popupContent = document.createElement("div");
-        popupContent.className = "live-map-popup";
-        popupContent.innerHTML = `
-          <strong>${stop.passengerName}</strong> (${stop.kind === "pickup" ? "Subida" : "Bajada"})<br/>
-          <span>${stop.placeName}</span><br/>
-          <span>Hora planificada: ${stop.plannedTime}</span>
-          ${stop.eta ? `<br/><span>ETA: <strong>${stop.eta}</strong></span>` : ""}
-          <br/><span>Estado: ${stop.completed ? stop.status : "Pendiente"}</span>
-        `;
+        const popupContent = createStopPopupContent(stop);
 
         const markerEl = document.createElement("div");
         markerEl.className = "live-stop-marker";
@@ -142,13 +198,12 @@ export function LiveMap({ routes, selectedRouteId, onSelectRoute }: LiveMapProps
 
       // 3. Last-Marca marker (if any)
       if (route.lastMarca) {
-        const marcaPopup = document.createElement("div");
-        marcaPopup.className = "live-marca-popup";
-        marcaPopup.innerHTML = `
-          <strong>${route.vehicle.plate} (${route.driver.name})</strong><br/>
-          <span>Última marca: <strong>${route.lastMarca.kind}</strong></span><br/>
-          <span>Hora: ${route.lastMarca.phoneTimeHhmi}</span>
-        `;
+        const marcaPopup = createMarcaPopupContent(
+          route.vehicle.plate,
+          route.driver.name,
+          route.lastMarca.kind,
+          route.lastMarca.phoneTimeHhmi,
+        );
 
         const vehicleEl = document.createElement("div");
         vehicleEl.className = "live-vehicle-marker";
@@ -163,7 +218,7 @@ export function LiveMap({ routes, selectedRouteId, onSelectRoute }: LiveMapProps
         vehicleEl.style.justifyContent = "center";
         vehicleEl.style.fontSize = "14px";
         vehicleEl.style.boxShadow = "0 2px 5px rgba(0,0,0,0.4)";
-        vehicleEl.innerHTML = "🚐";
+        vehicleEl.textContent = "🚐";
         vehicleEl.title = `Vehículo ${route.vehicle.plate} - ${route.lastMarca.kind} a las ${route.lastMarca.phoneTimeHhmi}`;
 
         const marker = new library.Marker({ element: vehicleEl })

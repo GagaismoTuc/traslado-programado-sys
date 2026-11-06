@@ -2,7 +2,9 @@ import { renderToStaticMarkup } from "react-dom/server";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { App } from "./App";
 import { LiveMapPage } from "./LiveMapPage";
+import { createMarcaPopupContent, createStopPopupContent } from "./LiveMap";
 import liveMapSource from "./LiveMap.tsx?raw";
+import secondFactorSource from "./SecondFactor.tsx?raw";
 
 afterEach(() => {
   vi.unstubAllGlobals();
@@ -42,6 +44,94 @@ describe("Office live map and ETAs", () => {
     expect(liveMapSource).toContain('import("maplibre-gl")');
   });
 
+  it("prevents stored XSS in map popups by using textContent and safe DOM nodes", () => {
+    class MockElement {
+      tagName: string;
+      className = "";
+      style: Record<string, string> = {};
+      _text = "";
+      children: (MockElement | MockTextNode)[] = [];
+
+      constructor(tag: string) {
+        this.tagName = tag.toUpperCase();
+      }
+
+      set textContent(val: string) {
+        this._text = val;
+        this.children = [];
+      }
+
+      get textContent(): string {
+        return this._text + this.children.map((c) => c.textContent).join("");
+      }
+
+      appendChild(child: MockElement | MockTextNode) {
+        this.children.push(child);
+        return child;
+      }
+
+      querySelector(selector: string): MockElement | null {
+        const target = selector.toUpperCase();
+        for (const child of this.children) {
+          if ("tagName" in child) {
+            if (child.tagName === target) return child;
+            const found = child.querySelector(selector);
+            if (found) return found;
+          }
+        }
+        return null;
+      }
+    }
+
+    class MockTextNode {
+      nodeType = 3;
+      textContent: string;
+      constructor(text: string) {
+        this.textContent = text;
+      }
+    }
+
+    const mockDocument = {
+      createElement: (tag: string) => new MockElement(tag),
+      createTextNode: (text: string) => new MockTextNode(text),
+    };
+    vi.stubGlobal("document", mockDocument);
+
+    const maliciousStop = {
+      id: 1,
+      position: 1,
+      kind: "pickup" as const,
+      passengerId: 10,
+      passengerName: '<svg onload="window.xss=1"></svg>',
+      placeName: '"><script>alert(1)</script>',
+      latitude: -26.83,
+      longitude: -65.21,
+      plannedTime: "08:20",
+      eta: null,
+      status: "pending",
+      completed: false,
+    };
+    const popup = createStopPopupContent(maliciousStop as any) as any;
+    expect(popup.querySelector("svg")).toBeNull();
+    expect(popup.querySelector("script")).toBeNull();
+    expect(popup.textContent).toContain('<svg onload="window.xss=1"></svg>');
+    expect(popup.textContent).toContain('"><script>alert(1)</script>');
+
+    const marcaPopup = createMarcaPopupContent(
+      "<img src=x onerror=alert(1)>",
+      "<svg/onload=alert(2)>",
+      "subio",
+      "08:30",
+    ) as any;
+    expect(marcaPopup.querySelector("img")).toBeNull();
+    expect(marcaPopup.querySelector("svg")).toBeNull();
+    expect(marcaPopup.textContent).toContain("<img src=x onerror=alert(1)>");
+
+    // Ensure no raw innerHTML interpolation remains in LiveMap.tsx
+    expect(liveMapSource).not.toMatch(/popupContent\.innerHTML\s*=/);
+    expect(liveMapSource).not.toMatch(/marcaPopup\.innerHTML\s*=/);
+  });
+
   it("displays per-Recorrido: Vehículo, Chofer, children on board, next stop and ETA in the panel", async () => {
     const mockLivePlan = {
       date: "2026-10-23",
@@ -66,7 +156,7 @@ describe("Office live map and ETAs", () => {
             {
               id: 1,
               position: 1,
-              kind: "pickup",
+              kind: "pickup" as const,
               passengerId: 10,
               passengerName: "Ana Gómez",
               placeName: "Calle Inventada 123",
@@ -80,7 +170,7 @@ describe("Office live map and ETAs", () => {
             {
               id: 2,
               position: 2,
-              kind: "dropoff",
+              kind: "dropoff" as const,
               passengerId: 10,
               passengerName: "Ana Gómez",
               placeName: "Escuela Normal",
@@ -95,7 +185,7 @@ describe("Office live map and ETAs", () => {
           nextStop: {
             id: 2,
             position: 2,
-            kind: "dropoff",
+            kind: "dropoff" as const,
             passengerName: "Ana Gómez",
             placeName: "Escuela Normal",
             plannedTime: "08:45",
@@ -104,27 +194,24 @@ describe("Office live map and ETAs", () => {
           geometry: [
             [-65.21, -26.83],
             [-65.2, -26.82],
-          ],
+          ] as [number, number][],
         },
       ],
     };
 
-    const fetchMock = vi.fn().mockImplementation((url: string) => {
-      if (url.includes("/daily-plans/") && url.includes("/live")) {
-        return Promise.resolve(new Response(JSON.stringify(mockLivePlan), { status: 200 }));
-      }
-      return Promise.resolve(new Response(null, { status: 404 }));
-    });
-    vi.stubGlobal("fetch", fetchMock);
-    vi.stubGlobal("window", { location: { pathname: "/live", assign: vi.fn() } });
-
-    // Render component
-    const markup = renderToStaticMarkup(<LiveMapPage />);
+    // Render component with data
+    const markup = renderToStaticMarkup(<LiveMapPage initialData={mockLivePlan} />);
     expect(markup).toContain("Mapa en vivo");
+    expect(markup).toContain("AF123CD");
+    expect(markup).toContain("Chofer Carlos");
+    expect(markup).toContain('data-testid="route-boarded-42">2</span>');
+    expect(markup).toContain("Ana Gómez (Bajada) - Escuela Normal");
+    expect(markup).toContain('data-testid="route-eta-42"');
+    expect(markup).toContain("08:38");
+    expect(markup).toContain("Última marca: subio a las 08:30");
   });
 
-  it("Rule 2: Recorrido without Marcas displays planned times, not ETAs", () => {
-    // If a route has no marcas, nextStop displays its planned time and eta is plannedTime
+  it("Rule 2: Recorrido without Marcas displays planned times, not ETAs on the screen", () => {
     const routeWithoutMarcas = {
       id: 10,
       status: "publicado",
@@ -158,12 +245,37 @@ describe("Office live map and ETAs", () => {
         plannedTime: "07:30",
         eta: "07:30",
       },
-      geometry: [[-65.22, -26.84]],
+      geometry: [[-65.22, -26.84]] as [number, number][],
     };
 
-    expect(routeWithoutMarcas.lastMarca).toBeNull();
-    expect(routeWithoutMarcas.nextStop.eta).toBe(routeWithoutMarcas.nextStop.plannedTime);
-    expect(routeWithoutMarcas.stops[0].eta).toBeNull();
+    const planWithoutMarcas = {
+      date: "2026-10-23",
+      timeZone: "America/Argentina/Tucuman",
+      routes: [routeWithoutMarcas],
+    };
+
+    const markup = renderToStaticMarkup(<LiveMapPage initialData={planWithoutMarcas} />);
+
+    // Screen displays route header, vehicle and driver
+    expect(markup).toContain("Recorrido #10");
+    expect(markup).toContain("AA000BB");
+    expect(markup).toContain("Chofer Beto");
+    expect(markup).toContain('data-testid="route-boarded-10">0</span>');
+
+    // Rule 2 assertion: next stop shows planned time marked as planificada and not a live ETA
+    expect(markup).toContain('data-testid="route-eta-10"');
+    expect(markup).toContain("07:30 (planificada)");
+
+    // Route has no marcas, so no "Última marca" label is shown
+    expect(markup).not.toContain("Última marca:");
+
+    // Stop item shows planned time without ETA
+    expect(markup).toContain("Planificada: 07:30");
+    expect(markup).not.toMatch(/Planificada:\s*07:30\s*\|\s*ETA:/);
+  });
+
+  it("SecondFactor redirects office users to /live upon success and does not direct to /users", () => {
+    expect(secondFactorSource).not.toContain('window.location.assign("/users")');
+    expect(secondFactorSource).toContain('window.location.assign("/live")');
   });
 });
-

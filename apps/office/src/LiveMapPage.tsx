@@ -10,14 +10,15 @@ export function todayInPlanZone(now = new Date()) {
   return new Intl.DateTimeFormat("en-CA", { timeZone: PLAN_TIME_ZONE }).format(now);
 }
 
-export function LiveMapPage() {
+export function LiveMapPage({ initialData }: { initialData?: LiveDailyPlan } = {}) {
   const [date, setDate] = useState(todayInPlanZone);
-  const [data, setData] = useState<LiveDailyPlan | null>(null);
-  const [loading, setLoading] = useState(true);
+  const [data, setData] = useState<LiveDailyPlan | null>(initialData ?? null);
+  const [loading, setLoading] = useState(initialData ? false : true);
   const [error, setError] = useState("");
   const [selectedRouteId, setSelectedRouteId] = useState<number | null>(null);
 
   useEffect(() => {
+    if (initialData) return;
     let cancelled = false;
 
     async function load() {

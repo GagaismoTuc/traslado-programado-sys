@@ -1059,9 +1059,10 @@ async function loadLiveDailyPlan(client: Queryable, router: Router | undefined, 
 
     const rawStops = stopsResult.rows.map((row) => {
       const isDone = isDoneStop(String(row.kind), String(row.transferStatus));
+      const isVoided = String(row.kind) === "dropoff" && String(row.transferStatus) === "ausente";
       const statusStr = isDone
         ? (row.kind === "pickup" ? (row.transferStatus === "ausente" ? "ausente" : "subio") : String(row.transferStatus))
-        : "pending";
+        : (isVoided ? "ausente" : "pending");
       return {
         id: Number(row.id),
         position: Number(row.position),
@@ -1075,7 +1076,7 @@ async function loadLiveDailyPlan(client: Queryable, router: Router | undefined, 
         plannedTime: (row.plannedTime as string | null) ?? "",
         serviceMinutes: Number(row.serviceMinutes ?? 5),
         transferStatus: String(row.transferStatus),
-        completed: isDone,
+        completed: isDone || isVoided,
         status: statusStr,
         eta: null as string | null,
       };
