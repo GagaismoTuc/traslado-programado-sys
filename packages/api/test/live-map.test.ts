@@ -160,7 +160,14 @@ describe("GET /daily-plans/:date/live", () => {
 });
 
 const mockNow = new Date("2026-10-23T11:30:00Z");
-function setupMockReview(status: string, hasMark: boolean) {
+function setupMockReview(
+  status: string,
+  hasMark: boolean,
+  options?: {
+    markCoordinates?: { lat: number | null; lng: number | null };
+    routerFails?: boolean;
+  },
+) {
   const calls: { lat: number; lng: number }[][] = [];
   const rows = [
     { id: 1, transferId: 1, kind: "pickup", position: 1, passengerId: 1, passengerName: "A", placeName: "A", lat: -26.1, lng: -65.1, plannedTime: "08:00", serviceMinutes: 7, transferStatus: status },
@@ -168,6 +175,8 @@ function setupMockReview(status: string, hasMark: boolean) {
     { id: 3, transferId: 1, kind: "dropoff", position: 3, passengerId: 1, passengerName: "A", placeName: "C", lat: -26.3, lng: -65.3, plannedTime: "08:20", serviceMinutes: 9, transferStatus: status },
     { id: 4, transferId: 2, kind: "dropoff", position: 4, passengerId: 2, passengerName: "B", placeName: "D", lat: -26.4, lng: -65.4, plannedTime: "08:30", serviceMinutes: 9, transferStatus: "planificado" },
   ];
+  const markLat = options?.markCoordinates !== undefined ? options.markCoordinates.lat : -26.1;
+  const markLng = options?.markCoordinates !== undefined ? options.markCoordinates.lng : -65.1;
   const db = {
     async query(sql: string) {
       let result: unknown[];
@@ -182,17 +191,21 @@ function setupMockReview(status: string, hasMark: boolean) {
       } else if (sql.includes("FROM stops s")) {
         result = rows;
       } else if (sql.includes("FROM marks e")) {
-        result = hasMark ? [{ id: 1, kind: status, latitude: -26.1, longitude: -65.1, phone_time_hhmi: "08:30", phone_minutes: 510, phone_time: mockNow }] : [];
+        result = hasMark ? [{ id: 1, kind: status, latitude: markLat, longitude: markLng, phone_time_hhmi: "08:30", phone_minutes: 510, phone_time: mockNow }] : [];
       } else {
         throw new Error(`Unexpected SQL: ${sql}`);
       }
       return { rows: result, rowCount: result.length };
     },
   };
-  const router = async (points: { lat: number; lng: number }[]) => {
-    calls.push(points);
-    return points.slice(1).map(() => ({ distanceMeters: 100, durationSeconds: 60 }));
-  };
+  const router = options?.routerFails
+    ? async () => {
+        throw new Error("OSRM offline");
+      }
+    : async (points: { lat: number; lng: number }[]) => {
+        calls.push(points);
+        return points.slice(1).map(() => ({ distanceMeters: 100, durationSeconds: 60 }));
+      };
   const app = createApp({
     db: db as any,
     router,
@@ -233,5 +246,30 @@ describe("Rule 1, Rule 2 and absent dropoff live map verification", () => {
     const route = await get();
     expect(route.stops.find((s: any) => s.id === 3).eta).toBeNull();
     expect(calls[0]).not.toContainEqual({ lat: -26.3, lng: -65.3 });
+  });
+
+  it("uses OSRM router for the ETA", async () => {
+    const { get } = setupMockReview("subio", true);
+    const route = await get();
+    expect(route.stops[1].eta).not.toBe("08:10");
+    expect(route.stops[1].eta).toBe("08:31");
+    expect(route.nextStop.eta).toBe("08:31");
+  });
+
+  it("does not fabricate a GPS position when a mark has none", async () => {
+    const { get, calls } = setupMockReview("subio", true, { markCoordinates: { lat: null, lng: null } });
+    const route = await get();
+    expect(route.lastMarca.latitude).toBeNull();
+    expect(route.lastMarca.longitude).toBeNull();
+    expect(calls).toEqual([]);
+    expect(route.nextStop.eta).toBeNull();
+    expect(route.stops.slice(1).map((s: any) => s.eta)).toEqual([null, null, null]);
+  });
+
+  it("does not present planned time as ETA when OSRM is offline", async () => {
+    const { get } = setupMockReview("subio", true, { routerFails: true });
+    const route = await get();
+    expect(route.nextStop.eta).toBeNull();
+    expect(route.stops.slice(1).map((s: any) => s.eta)).toEqual([null, null, null]);
   });
 });

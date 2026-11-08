@@ -278,4 +278,66 @@ describe("Office live map and ETAs", () => {
     expect(secondFactorSource).not.toContain('window.location.assign("/users")');
     expect(secondFactorSource).toContain('window.location.assign("/live")');
   });
+
+  it("Regla 1 & 2: displays 'No disponible' for ETA when mark has no GPS or router fails", () => {
+    const routeWithFailedEta = {
+      id: 20,
+      status: "en_curso",
+      driver: { id: 3, name: "Chofer Sin GPS" },
+      vehicle: { id: 3, plate: "CC111DD" },
+      color: "#198754",
+      childrenOnBoard: 1,
+      lastMarca: {
+        id: 5,
+        kind: "subio",
+        latitude: null,
+        longitude: null,
+        phoneTime: "2026-10-23T11:30:00.000Z",
+        phoneTimeHhmi: "08:30",
+      },
+      stops: [
+        {
+          id: 1,
+          position: 1,
+          kind: "pickup" as const,
+          passengerId: 5,
+          passengerName: "Lucas Pérez",
+          placeName: "Domicilio 456",
+          latitude: -26.84,
+          longitude: -65.22,
+          plannedTime: "07:30",
+          eta: null,
+          status: "pending",
+          completed: false,
+        },
+      ],
+      nextStop: {
+        id: 1,
+        position: 1,
+        kind: "pickup" as const,
+        passengerName: "Lucas Pérez",
+        placeName: "Domicilio 456",
+        plannedTime: "07:30",
+        eta: null,
+      },
+      geometry: [[-65.22, -26.84]] as [number, number][],
+    };
+
+    const markup = renderToStaticMarkup(
+      <LiveMapPage initialData={{ date: "2026-10-23", timeZone: "America/Argentina/Tucuman", routes: [routeWithFailedEta] }} />,
+    );
+
+    expect(markup).toContain("Recorrido #20");
+    expect(markup).toContain('data-testid="route-eta-20"');
+    expect(markup).toContain("No disponible");
+    expect(markup).toContain("Planificada: 07:30");
+    expect(markup).toContain("no disponible");
+  });
+
+  it("Regla 3: cleans up stale layers and sources when routes change or clear", () => {
+    expect(liveMapSource).toContain("for (const oldId of renderedRouteIdsRef.current)");
+    expect(liveMapSource).toContain("map.removeLayer(layerId)");
+    expect(liveMapSource).toContain("map.removeSource(sourceId)");
+    expect(liveMapSource).toContain("const { library, map } = mapRef.current;");
+  });
 });

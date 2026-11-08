@@ -82,6 +82,7 @@ export function LiveMap({ routes, selectedRouteId, onSelectRoute }: LiveMapProps
   const container = useRef<HTMLDivElement>(null);
   const mapRef = useRef<{ library: MapLibre; map: MapLibreMap } | null>(null);
   const markersRef = useRef<Marker[]>([]);
+  const renderedRouteIdsRef = useRef<Set<number>>(new Set());
   const [ready, setReady] = useState(false);
   const [failed, setFailed] = useState(false);
 
@@ -120,6 +121,7 @@ export function LiveMap({ routes, selectedRouteId, onSelectRoute }: LiveMapProps
       cancelled = true;
       markersRef.current.forEach((m) => m.remove());
       markersRef.current = [];
+      renderedRouteIdsRef.current.clear();
       instance?.remove();
       mapRef.current = null;
     };
@@ -129,6 +131,22 @@ export function LiveMap({ routes, selectedRouteId, onSelectRoute }: LiveMapProps
   useEffect(() => {
     if (!ready || !mapRef.current) return;
     const { library, map } = mapRef.current;
+
+    // Remove layers and sources for routes no longer present (Regla 3)
+    const currentRouteIds = new Set(routes.map((r) => r.id));
+    for (const oldId of renderedRouteIdsRef.current) {
+      if (!currentRouteIds.has(oldId)) {
+        const layerId = `route-layer-${oldId}`;
+        const sourceId = `route-line-${oldId}`;
+        if (map.getLayer(layerId)) {
+          map.removeLayer(layerId);
+        }
+        if (map.getSource(sourceId)) {
+          map.removeSource(sourceId);
+        }
+      }
+    }
+    renderedRouteIdsRef.current = currentRouteIds;
 
     // Clear old markers
     markersRef.current.forEach((m) => m.remove());
@@ -152,6 +170,11 @@ export function LiveMap({ routes, selectedRouteId, onSelectRoute }: LiveMapProps
         const existingSource = map.getSource(sourceId) as any;
         if (existingSource && typeof existingSource.setData === "function") {
           existingSource.setData(geojson);
+          if (map.getLayer(layerId)) {
+            map.setPaintProperty(layerId, "line-width", selectedRouteId === route.id ? 6 : 4);
+            map.setPaintProperty(layerId, "line-opacity", selectedRouteId !== null && selectedRouteId !== route.id ? 0.4 : 0.85);
+            map.setPaintProperty(layerId, "line-color", route.color);
+          }
         } else if (!map.getSource(sourceId)) {
           map.addSource(sourceId, {
             type: "geojson",
@@ -171,6 +194,13 @@ export function LiveMap({ routes, selectedRouteId, onSelectRoute }: LiveMapProps
               "line-opacity": selectedRouteId !== null && selectedRouteId !== route.id ? 0.4 : 0.85,
             },
           });
+        }
+      } else {
+        if (map.getLayer(layerId)) {
+          map.removeLayer(layerId);
+        }
+        if (map.getSource(sourceId)) {
+          map.removeSource(sourceId);
         }
       }
 
@@ -196,8 +226,12 @@ export function LiveMap({ routes, selectedRouteId, onSelectRoute }: LiveMapProps
         markersRef.current.push(marker);
       }
 
-      // 3. Last-Marca marker (if any)
-      if (route.lastMarca) {
+      // 3. Last-Marca marker (if any and has valid location - Regla 1)
+      if (
+        route.lastMarca &&
+        route.lastMarca.latitude !== null &&
+        route.lastMarca.longitude !== null
+      ) {
         const marcaPopup = createMarcaPopupContent(
           route.vehicle.plate,
           route.driver.name,
