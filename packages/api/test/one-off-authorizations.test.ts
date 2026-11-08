@@ -11,6 +11,12 @@ async function alerts() {
   }));
 }
 
+/** The state of each Autorización puntual of a Traslado, as the Oficina lists them. */
+async function statuses(office: string, transferId: number) {
+  return (await answer(request(`/transfers/${transferId}/authorizations`, "GET", undefined, office), 200))
+    .authorizations.map((item: { status: string }) => item.status);
+}
+
 async function stored() {
   return await rows("SELECT * FROM one_off_authorizations ORDER BY id");
 }
@@ -210,6 +216,89 @@ describe("Autorización puntual", () => {
       .toEqual({ error: "Traslado not found in this Recorrido" });
   });
 
+  it("Rule 1 (#96): an Entregado undone or replaced by a Corrección frees its Autorización puntual, unless its Traslado closed", async () => {
+    const { record, office, transferId, driver, routeId, handover, served, passengerId } = await salida("freed");
+    const { authorization } = await answer(record({}), 201);
+    await answer(mark(driver.cookie, routeId, markBody(transferId, "subio")), 201);
+    const handed = markBody(transferId, "entregado", { receiver: { kind: "other_adult", ...AUNT, authorizationId: authorization.id } });
+    await answer(mark(driver.cookie, routeId, handed), 201);
+    expect(await statuses(office, transferId)).toEqual(["used"]);
+    expect((await handover()).authorizations).toEqual([]);
+
+    // The Chofer undoes it: the Traslado is open again, so the authorization is valid and downloaded again.
+    await answer(mark(driver.cookie, routeId, markBody(transferId, "undo", { corrects: handed.id })), 201);
+    expect(await statuses(office, transferId)).toEqual(["valid"]);
+    expect((await handover()).authorizations).toEqual([{ id: authorization.id, ...AUNT }]);
+
+    // The Oficina replaces another Entregado with a Subió: valid; then with an Ausente, which closes the Traslado: expired.
+    const other = await served(passengerId, "salida", "15:00");
+    const second = (await answer(record({}, other.transferId), 201)).authorization;
+    const otherHanded = markBody(other.transferId, "entregado", { receiver: { kind: "other_adult", ...AUNT, authorizationId: second.id } });
+    await answer(mark(other.driver.cookie, other.routeId, otherHanded), 201);
+    expect(await statuses(office, other.transferId)).toEqual(["used"]);
+    const toSubio = (await answer(request(`/marks/${otherHanded.id}/corrections`, "POST", { kind: "subio", reason: "La tía no estaba" }, office), 201)).mark;
+    expect(await statuses(office, other.transferId)).toEqual(["valid"]);
+    await answer(request(`/marks/${toSubio.id}/corrections`, "POST", { kind: "ausente", reason: "No viajó" }, office), 201);
+    expect((await rows("SELECT status FROM transfers WHERE id = $1", [other.transferId]))[0].status).toBe("ausente");
+    expect(await statuses(office, other.transferId)).toEqual(["expired"]);
+  });
+
+  it("Rule 2 (#96): another Entregado in force uses a freed Autorización puntual again, and a revocation's conflict names that Entregado", async () => {
+    const { record, office, transferId, driver, routeId } = await salida("reused");
+    const { authorization } = await answer(record({}), 201);
+    const receiver = { kind: "other_adult", ...AUNT, authorizationId: authorization.id };
+    const idOf = async (clientId: string) => (await rows("SELECT id FROM marks WHERE client_id = $1", [clientId]))[0].id;
+    const revoke = async () => expect(await answer(request(`/authorizations/${authorization.id}/revocation`, "POST", {}, office), 409))
+      .toEqual({ error: "The Autorización puntual was already used: the Entregado stands and the conflict is in the alert inbox" });
+    const undone = markBody(transferId, "entregado", { receiver });
+    await answer(mark(driver.cookie, routeId, undone), 201);
+    await revoke();
+    await answer(mark(driver.cookie, routeId, markBody(transferId, "undo", { corrects: undone.id })), 201);
+
+    const again = markBody(transferId, "entregado", { receiver });
+    expect((await answer(mark(driver.cookie, routeId, again), 201)).mark.flags).toEqual([]);
+    expect(await statuses(office, transferId)).toEqual(["used"]);
+    await revoke();
+    await revoke();
+    const conflict = { authorizationId: authorization.id, name: AUNT.name };
+    expect((await alerts()).filter((alert) => alert.kind !== "mark_flagged")).toEqual([
+      { kind: "other_adult_handover", transferId, markId: await idOf(undone.id), details: { authorized: true, ...AUNT } },
+      { kind: "authorization_conflict", transferId, markId: await idOf(undone.id), details: conflict },
+      { kind: "other_adult_handover", transferId, markId: await idOf(again.id), details: { authorized: true, ...AUNT } },
+      { kind: "authorization_conflict", transferId, markId: await idOf(again.id), details: conflict },
+    ]);
+    expect(await rows("SELECT * FROM one_off_authorization_revocations")).toEqual([]);
+  });
+
+  it("Rule 3 (#96): undoing the Corrección that replaced the Entregado makes its Autorización puntual used again", async () => {
+    const { record, office, transferId, driver, routeId, handover } = await salida("restored");
+    const { authorization } = await answer(record({}), 201);
+    const handed = markBody(transferId, "entregado", { receiver: { kind: "other_adult", ...AUNT, authorizationId: authorization.id } });
+    await answer(mark(driver.cookie, routeId, handed), 201);
+    const toSubio = markBody(transferId, "subio", { corrects: handed.id });
+    await answer(mark(driver.cookie, routeId, toSubio), 201);
+    expect(await statuses(office, transferId)).toEqual(["valid"]);
+
+    await answer(mark(driver.cookie, routeId, markBody(transferId, "undo", { corrects: toSubio.id })), 201);
+    expect((await rows("SELECT status FROM transfers WHERE id = $1", [transferId]))[0].status).toBe("entregado");
+    expect(await statuses(office, transferId)).toEqual(["used"]);
+    expect((await handover()).authorizations).toEqual([]);
+  });
+
+  it("Rule 6 (#96): a revoked Autorización puntual stays revoked when the Entregado that used it is undone", async () => {
+    const { record, office, transferId, driver, routeId, handover } = await salida("revoked-undo");
+    const { authorization } = await answer(record({}), 201);
+    await answer(request(`/authorizations/${authorization.id}/revocation`, "POST", {}, office), 201);
+    // The phone used it before it heard of the revocation.
+    const handed = markBody(transferId, "entregado", { receiver: { kind: "other_adult", ...AUNT, authorizationId: authorization.id } });
+    expect((await answer(mark(driver.cookie, routeId, handed), 201)).mark.flags).toEqual(["authorization_revoked"]);
+    expect(await statuses(office, transferId)).toEqual(["used"]);
+
+    await answer(mark(driver.cookie, routeId, markBody(transferId, "undo", { corrects: handed.id })), 201);
+    expect(await statuses(office, transferId)).toEqual(["revoked"]);
+    expect((await handover()).authorizations).toEqual([]);
+  });
+
   it("lets only the Oficina record, list and revoke Autorizaciones puntuales and read the alert inbox", async () => {
     const { record, transferId, driver } = await salida("roles");
     const { authorization } = await answer(record({}), 201);
@@ -225,5 +314,43 @@ describe("Autorización puntual", () => {
     }
     expect((await stored()).map((row) => row.id)).toEqual([authorization.id]);
     expect(await rows("SELECT * FROM one_off_authorization_revocations")).toEqual([]);
+  });
+});
+
+describe("The Receptor's DNI in the history (#95)", () => {
+  /** Records an Entregado to another adult with each DNI, in order, and returns the DNIs the history gives for them. */
+  async function historyDnis(name: string, dnis: string[]) {
+    const { office, transferId, driver, routeId } = await salida(name);
+    for (const dni of dnis) {
+      await answer(mark(driver.cookie, routeId, markBody(transferId, "entregado", { receiver: { kind: "other_adult", name: AUNT.name, dni } })), 201);
+    }
+    const history = await answer(request(`/transfers/${transferId}/history`, "GET", undefined, office), 200);
+    return history.marks.map((item: { receiver: { dni?: string } }) => item.receiver.dni);
+  }
+
+  it("Rule 1: the history gives only the last 3 digits of the DNI, without its dots and spaces", async () => {
+    expect(await historyDnis("mask", ["40.123.456", "40 123 457", "1234"])).toEqual(["***456", "***457", "***234"]);
+  });
+
+  it("Rule 2: the history gives *** for a DNI with fewer than 4 digits", async () => {
+    expect(await historyDnis("short", ["123", "1.2 3"])).toEqual(["***", "***"]);
+  });
+
+  it("Rule 4: the Marca, the alerts and the Autorizaciones puntuales still give the whole DNI", async () => {
+    const { record, office, transferId, driver, routeId } = await salida("whole");
+    const { authorization } = await answer(record({ dni: "40.123.456" }), 201);
+    const receiver = { kind: "other_adult", name: AUNT.name, dni: "40.123.456", authorizationId: authorization.id };
+    const sent = await answer(mark(driver.cookie, routeId, markBody(transferId, "entregado", { receiver })), 201);
+    expect(sent.mark.receiver).toEqual(receiver);
+    const inbox = await answer(request("/alerts", "GET", undefined, office), 200);
+    expect(inbox.alerts.filter((alert: { kind: string }) => alert.kind === "other_adult_handover").map((alert: { details: unknown }) => alert.details))
+      .toEqual([{ authorized: true, name: AUNT.name, dni: "40.123.456" }]);
+    const listed = await answer(request(`/transfers/${transferId}/authorizations`, "GET", undefined, office), 200);
+    expect(listed.authorizations.map((item: { dni: string }) => item.dni)).toEqual(["40.123.456"]);
+  });
+
+  it("Rule 5: the Marca keeps the whole DNI stored while the history masks it", async () => {
+    expect(await historyDnis("stored", ["40.123.456"])).toEqual(["***456"]);
+    expect((await rows("SELECT receiver_dni FROM marks")).map((row) => row.receiver_dni)).toEqual(["40.123.456"]);
   });
 });

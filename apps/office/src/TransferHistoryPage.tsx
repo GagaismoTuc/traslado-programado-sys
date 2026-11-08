@@ -13,8 +13,10 @@ export type HistoryMark = {
   receiver:
     | { kind: "authorized_adult"; adultId: number; name: string; relation: string }
     | { kind: "destination"; destinationId: number; name: string }
-    | { kind: "other_adult"; name: string; dni: string; authorizationId: number | null }
+    // The API masks the DNI to its last 3 digits: "***456", or "***" when it is too short.
+    | { kind: "other_adult"; name: string; dni: string | null; authorizationId: number | null }
     | { kind: "base_staff" }
+    | { kind: "driver"; driverId: number }
     | null;
   flags: string[];
   corrects?: string;
@@ -26,6 +28,8 @@ export type TransferHistory = {
   status: string;
   versions: { routeId: number; version: number; publishedAt: string; publishedBy: string; driverName: string; pickupTime: string | null; dropoffTime: string | null }[];
   marks: HistoryMark[];
+  // A leg of a Trasbordo: every leg of the chain, first to last, with its Marcas.
+  chain?: { transferId: number; marks: HistoryMark[] }[];
   changes: { action: string; before: unknown; after: unknown; occurredAt: string; actor: { userId: number | null; name: string | null } }[];
 };
 
@@ -45,13 +49,22 @@ export function markInForce(marks: HistoryMark[]) {
     .sort(markOrder(({ mark }) => mark.phoneTime, (a, b) => a.stored - b.stored)).at(-1)?.mark ?? null;
 }
 
-/** Who received the Pasajero, by name; never their DNI. */
+/** The masked DNI the API gives ("***456"), as the digits it ends in; "***" when it was too short to mask. */
+function maskedDniLine(dni: string | null) {
+  if (!dni) return "";
+  const last = dni.replace(/^\*+/, "");
+  return last ? `, DNI terminado en ${last}` : ", DNI registrado";
+}
+
+/** Who received the Pasajero, by name; another adult also by the last digits of their DNI, never the whole DNI. */
 function receiverLabel(receiver: NonNullable<HistoryMark["receiver"]>) {
   switch (receiver.kind) {
     case "authorized_adult": return `${receiver.name} (${receiver.relation})`;
-    case "other_adult": return `${receiver.name} (another adult)`;
+    case "other_adult": return `${receiver.name} (another adult)${maskedDniLine(receiver.dni)}`;
     case "destination": return `${receiver.name} (Destino)`;
     case "base_staff": return "company staff at the base";
+    // A Trasbordo: the API names the receiving Chofer by id only.
+    case "driver": return `driver ${receiver.driverId} (Chofer receptor)`;
   }
 }
 
@@ -92,6 +105,13 @@ export function TransferHistoryView({ history, onCorrect }: {
         {mark.flags.length > 0 && <div>{`Flagged: ${mark.flags.join(", ")}`}</div>}
       </li>)}</ul>
       : <p>No Marcas.</p>}
+    {history.chain && <>
+      <h2>Trasbordo chain</h2>
+      <ol>{history.chain.map((leg, index) => <li key={leg.transferId}>
+        {`Leg ${index + 1}: Traslado ${leg.transferId}${leg.transferId === history.transferId ? " (this one)" : ""}`}
+        <ul>{leg.marks.map((mark) => <li key={mark.id}>{markLine(mark)}</li>)}</ul>
+      </li>)}</ol>
+    </>}
     {current && <form onSubmit={submit}>
       <h3>{`Correct the Marca in force (${KINDS[current.kind]})`}</h3>
       <label>

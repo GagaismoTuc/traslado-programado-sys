@@ -29,6 +29,8 @@ export default async function setup(project: TestProject) {
       .withDatabase(templateDatabase)
       .withUsername("postgres")
       .withPassword(randomBytes(24).toString("hex"))
+      // A throwaway database: without fsync, TRUNCATE no longer stalls for seconds while the routing tests build images.
+      .withCommand(["postgres", "-c", "fsync=off", "-c", "synchronous_commit=off", "-c", "full_page_writes=off"])
       .start();
   } catch (error) {
     const detail = error instanceof Error ? error.message : String(error);

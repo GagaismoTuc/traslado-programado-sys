@@ -19,7 +19,8 @@ export type Alert = {
   passengerName: string | null;
   driverName: string | null;
   details: Record<string, unknown>;
-  // The Corrección that resolved the alert, while it replaces the Marca the alert is about; only an Ausente on an entrada.
+  // The Corrección that resolved the alert, while it replaces the Marca the alert is about; only an Ausente on an entrada,
+  // a flagged Marca or a handover to another adult.
   resolution: {
     markId: string;
     kind: string;
@@ -46,6 +47,7 @@ const REASONS: Record<string, string> = {
   consent_mismatch: "the Receptor does not match the Consentimiento",
   authorization_revoked: "the Autorización puntual had been revoked",
   route_closed: "the Recorrido was already closed",
+  trasbordo_unlinked: "the Chofer marked it at a Trasbordo point: correct it and record the Trasbordo",
 };
 
 type OpenTransfer = { transferId: number; passengerName: string; status: "planificado" | "subio" };

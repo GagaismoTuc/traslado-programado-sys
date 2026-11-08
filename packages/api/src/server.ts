@@ -26,7 +26,7 @@ const app = createApp({
   errorReporter: errorTracker.captureRequestError,
   config,
 });
-const server = serve({ fetch: app.fetch, port: config.port, hostname: "0.0.0.0" });
+const server = serve({ fetch: app.fetch, port: config.port, hostname: config.host });
 
 async function shutdown() {
   server.close();

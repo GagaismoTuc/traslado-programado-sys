@@ -114,6 +114,14 @@ describe("API test seam", () => {
     expect(() => readConfig({ ...environment, BASE_ADDRESS: "x".repeat(501) } as NodeJS.ProcessEnv)).toThrow("BASE_ADDRESS must be at most 500 characters");
   });
 
+  it("binds every interface unless HOST names one", () => {
+    const environment = {
+      SERVER_EPOCH: "epoch", DATABASE_URL: "postgres://app:secret@localhost:5432/app", OSRM_URL: "http://127.0.0.1:5000", VROOM_URL: "http://127.0.0.1:3001",
+    };
+    expect(readConfig(environment as NodeJS.ProcessEnv).host).toBe("0.0.0.0");
+    expect(readConfig({ ...environment, HOST: "127.0.0.1" } as NodeJS.ProcessEnv).host).toBe("127.0.0.1");
+  });
+
   it("requires OSRM_URL and VROOM_URL before the server can start", () => {
     const environment = { SERVER_EPOCH: "routing", DATABASE_URL: "postgres://app:secret@localhost:5432/app" };
     expect(() => readConfig({ ...environment, VROOM_URL: "http://127.0.0.1:3001" } as NodeJS.ProcessEnv)).toThrow("OSRM_URL must be a valid URL");

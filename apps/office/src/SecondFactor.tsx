@@ -47,7 +47,7 @@ export function SecondFactorPage({ initialStep = "loading" }: { initialStep?: St
     void send("/auth/me", "GET").then(async (response) => {
       const result = response.ok ? await response.json() as { secondFactor?: Step } : null;
       if (!result) window.location.assign("/");
-      else if (!result.secondFactor) window.location.assign("/users");
+      else if (!result.secondFactor) window.location.assign("/live");
       else setStep(result.secondFactor);
     }).catch(() => setError("Unable to reach the server"));
   }, []);
@@ -66,7 +66,7 @@ export function SecondFactorPage({ initialStep = "loading" }: { initialStep?: St
     const values = new FormData(event.currentTarget);
     try {
       const response = await send("/auth/totp/verify", "POST", { code: values.get("code"), rememberDevice: values.get("rememberDevice") === "on" });
-      if (response.ok) window.location.assign("/users");
+      if (response.ok) window.location.assign("/live");
       else if (response.status === 401) window.location.assign("/");
       else setError(await readError(response, "Unable to verify the code"));
     } catch {

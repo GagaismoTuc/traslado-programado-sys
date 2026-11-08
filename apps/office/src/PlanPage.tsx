@@ -2,6 +2,7 @@ import { useEffect, useRef, useState, type FormEvent } from "react";
 import { readError, redirectUnauthorized, send } from "./api";
 import { OfficeNav } from "./OfficeNav";
 import { OneOffAuthorizationPanel } from "./OneOffAuthorizationPanel";
+import { TrasbordoPanel, type TrasbordoEnd } from "./TrasbordoPanel";
 
 type Transfer = {
   id: number;
@@ -15,6 +16,9 @@ type Transfer = {
   companions: number;
   status: string;
   routeId: number | null;
+  // A Trasbordo leg's end at the point and the legs it chains to; absent or null without a Trasbordo.
+  trasbordo?: TrasbordoEnd | null;
+  chainedToTransferId?: number | null;
 };
 type Stop = { id: number; kind: "pickup" | "dropoff"; passengerName: string; placeName: string | null; plannedTime: string | null };
 type Route = {
@@ -98,9 +102,12 @@ function kmLabel(km: number | null) {
   return km === null ? "km not computed yet" : `${km.toFixed(1)} km`;
 }
 
+// A Trasbordo leg ends (leg A) or starts (leg B) at the Trasbordo point instead.
 function transferLabel(transfer: Transfer) {
-  const from = transfer.direction === "entrada" ? transfer.originDestinationName ?? "home" : transfer.destinationName;
-  const to = transfer.direction === "entrada" ? transfer.destinationName : "home";
+  const point = transfer.trasbordo ? `Trasbordo ${transfer.trasbordo.time}` : null;
+  const from = transfer.trasbordo?.stop === "pickup" ? point
+    : transfer.direction === "entrada" ? transfer.originDestinationName ?? "home" : transfer.destinationName;
+  const to = transfer.trasbordo?.stop === "dropoff" ? point : transfer.direction === "entrada" ? transfer.destinationName : "home";
   const leaves = transfer.exitTime ? ` (leaves at ${transfer.exitTime})` : "";
   return `${transfer.targetTime} ${transfer.passengerName}: ${transfer.direction}, ${from}${leaves} → ${to}`;
 }
@@ -447,6 +454,14 @@ export function PlanPage() {
   });
   const forceRoute = (routeId: number) => submit((values) => publishRoute(routeId, String(values.get("overrideReason") ?? "")));
 
+  // A refused publication of the receiving Recorrido shows under it, as when publishing it by hand.
+  async function trasbordoDone(done: string, refused?: Refusal) {
+    setMessage(done);
+    setRefusal(refused ?? null);
+    setCascade([]);
+    await load(selectedDate.current);
+  }
+
   function chooseDriver(value: string) {
     const usual = drivers.find((item) => String(item.id) === value)?.usualVehicleId;
     setRouteVehicle(usual ? String(usual) : "");
@@ -481,8 +496,9 @@ export function PlanPage() {
         <strong>{transferLabel(transfer)}</strong>
         <div>Companions: {transfer.companions}{transfer.status === "cancelado_ausencia" ? " - Cancelled: absence" : ""}</div>
         <a href={`/transfers/${transfer.id}/history`}>History</a>
+        <TrasbordoPanel transfer={transfer} routes={routes.map((route) => ({ id: route.id, label: routeLabel(route) }))} onDone={trasbordoDone} />
         {transfer.status === "planificado" && <>
-          <label>
+          {!transfer.trasbordo && <label>
             Recorrido
             <select
               value={transfer.routeId ?? ""}
@@ -493,7 +509,7 @@ export function PlanPage() {
               <option value="">Unassigned</option>
               {routes.map((route) => <option key={route.id} value={route.id}>{routeLabel(route)}</option>)}
             </select>
-          </label>
+          </label>}
           {transfer.originDestinationName && <form key={transfer.exitTime ?? ""} onSubmit={submit((values) => write(`/transfers/${transfer.id}`, "PATCH", {
             exitTime: values.get("exitTime"),
           }, "Exit time saved"))}>

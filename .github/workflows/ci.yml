@@ -5,6 +5,9 @@ on:
   push:
     branches: [main]
 
+permissions:
+  contents: read
+
 jobs:
   verify:
     runs-on: ubuntu-latest
@@ -40,6 +43,19 @@ jobs:
           path: apps/office/test-results
           retention-days: 7
 
+  deploy-tests:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version-file: .nvmrc
+      - run: docker run --rm -v "$PWD:/work" -w /work docker:cli sh deploy/tests/test-deploy.sh
+      - run: docker run --rm -v "$PWD:/work" -w /work docker:cli sh deploy/tests/test-seed.sh
+      - run: node --test deploy/tests/compose.test.mjs
+      - run: node --test deploy/tests/local-staging.test.mjs
+      - run: sh .github/scripts/test-deploy-images.sh
+
   commitlint:
     runs-on: ubuntu-latest
     steps:
@@ -66,7 +82,7 @@ jobs:
 
   ci-ok:
     if: always()
-    needs: [verify, e2e, commitlint, gitleaks]
+    needs: [verify, e2e, deploy-tests, commitlint, gitleaks]
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -76,3 +92,77 @@ jobs:
           sh .github/scripts/ci-ok.sh $RESULTS
         env:
           RESULTS: ${{ join(needs.*.result, ' ') }}
+
+  image:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    services:
+      registry:
+        image: registry:2
+        ports:
+          - 5000:5000
+    outputs:
+      api: ${{ steps.build.outputs.api }}
+      office: ${{ steps.build.outputs.office }}
+      driver: ${{ steps.build.outputs.driver }}
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build images and record their registry digests
+        id: build
+        env:
+          SHA: ${{ github.sha }}
+        run: |
+          set -euo pipefail
+          mkdir images
+          for target in api office driver; do
+            image="ghcr.io/gagaismotuc/traslado-$target:$SHA"
+            local_image="localhost:5000/traslado-$target:$SHA"
+            docker build --platform linux/amd64 --provenance=false --target "$target" --tag "$image" .
+            docker tag "$image" "$local_image"
+            docker push "$local_image" | tee "images/$target.push.log"
+            digest=$(sed -n 's/.*digest: \(sha256:[0-9a-f]*\) size:.*/\1/p' "images/$target.push.log")
+            [[ "$digest" =~ ^sha256:[0-9a-f]{64}$ ]]
+            echo "$target=$digest" >> "$GITHUB_OUTPUT"
+            docker save --output "images/$target.tar" "$image"
+          done
+      - uses: actions/upload-artifact@v4
+        with:
+          name: built-images
+          path: images/*.tar
+          if-no-files-found: error
+          compression-level: 0
+          retention-days: 1
+
+  publish:
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    needs: [image, ci-ok]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+    services:
+      registry:
+        image: registry:2
+        ports:
+          - 5000:5000
+    strategy:
+      matrix:
+        target: [api, office, driver]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          name: built-images
+          path: images
+      - name: Verify and publish image
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          IMAGE: ghcr.io/gagaismotuc/traslado-${{ matrix.target }}:${{ github.sha }}
+          LOCAL_IMAGE: localhost:5000/traslado-${{ matrix.target }}:${{ github.sha }}
+          DIGESTS: ${{ toJSON(needs.image.outputs) }}
+          TARGET: ${{ matrix.target }}
+        run: |
+          set -eu
+          digest=$(printf '%s' "$DIGESTS" | jq -er --arg target "$TARGET" '.[$target]')
+          sh .github/scripts/publish-image.sh "$IMAGE" "images/$TARGET.tar" "$digest" "$LOCAL_IMAGE"

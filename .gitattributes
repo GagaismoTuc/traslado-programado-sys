@@ -1,4 +1,5 @@
 .githooks/* text eol=lf
 infra/** text eol=lf
+deploy/** text eol=lf
 .github/scripts/* text eol=lf
 .github/workflows/* text eol=lf

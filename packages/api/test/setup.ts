@@ -1,5 +1,15 @@
-import { afterAll, beforeEach, inject } from "vitest";
+import { afterAll, beforeEach, inject, vi } from "vitest";
 import { Pool } from "pg";
+
+// Rule 2 of #101: src/auth.ts still asks for Argon2id at m=64 MiB, t=3 (production cost, see password-hash.test.ts); only
+// the test environment derives at the minimum cost. At full cost the hashes were 69% of the API suite's time on CI.
+vi.mock("node:crypto", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("node:crypto")>();
+  type Argon2 = typeof actual.argon2;
+  const argon2 = (algorithm: Parameters<Argon2>[0], parameters: Parameters<Argon2>[1], callback: Parameters<Argon2>[2]) =>
+    actual.argon2(algorithm, { ...parameters, memory: 8 * parameters.parallelism, passes: 1 }, callback);
+  return { ...actual, argon2: vi.fn(argon2) };
+});
 
 const workerId = process.env.VITEST_POOL_ID ?? "1";
 if (!/^\d+$/.test(workerId)) throw new Error(`Invalid Vitest worker id: ${workerId}`);
