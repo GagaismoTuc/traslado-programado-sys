@@ -476,11 +476,82 @@ describe("Plan diario by hand", () => {
     expect((await request(`/daily-plans/${DAY}/routes`, "POST", { driverId, startTime: "10:00", endTime: "09:00" }, office)).status).toBe(400);
   });
 
+  it("copies Traslados, Recorridos (as Borrador), assignments and stop order from the last same weekday, skipping deactivated Pasajeros and reporting them", async () => {
+    const { office, destinationId, driverId, vehicleId } = await setup("copy");
+    // Source: 2026-11-02 (Monday)
+    // Destination: 2026-11-09 (next Monday)
+    const active1 = await passenger(office, { name: "Pasajero Activo 1" });
+    const active2 = await passenger(office, { name: "Pasajero Activo 2" });
+    const deactivated = await passenger(office, { name: "Pasajero Inactivo" });
+
+    // Route on 2026-11-02
+    const sourceRoute = await route(office, { driverId, vehicleId, startTime: "07:00", endTime: "09:00" }, "2026-11-02");
+
+    // Transfers on 2026-11-02
+    const t1 = await transfer(office, { passengerId: active1, direction: "entrada", destinationId, targetTime: "08:00" }, "2026-11-02");
+    const t2 = await transfer(office, { passengerId: active2, direction: "entrada", destinationId, targetTime: "08:15" }, "2026-11-02");
+    const tDeact = await transfer(office, { passengerId: deactivated, direction: "entrada", destinationId, targetTime: "08:30" }, "2026-11-02");
+    const tAbsent = await transfer(office, { passengerId: active1, direction: "salida", destinationId, targetTime: "12:00" }, "2026-11-02");
+
+    // Assign t1, t2, tDeact to sourceRoute
+    await created(request(`/transfers/${t1.id}`, "PATCH", { routeId: sourceRoute.id }, office), 200);
+    await created(request(`/transfers/${t2.id}`, "PATCH", { routeId: sourceRoute.id }, office), 200);
+    await created(request(`/transfers/${tDeact.id}`, "PATCH", { routeId: sourceRoute.id }, office), 200);
+
+    // Register absence on tAbsent
+    await created(request(`/transfers/${tAbsent.id}/absence`, "POST", {}, office), 201);
+
+    // Deactivate passenger after their transfer was already created in the source plan
+    expect((await request(`/passengers/${deactivated}/deactivate`, "PATCH", {}, office)).status).toBe(204);
+
+    // Copy to 2026-11-09
+    const copyRes = await created(request("/daily-plans/2026-11-09/copy-last-weekday", "POST", undefined, office), 201);
+    expect(copyRes.copiedFromDate).toBe("2026-11-02");
+    expect(copyRes.skippedPassengers).toEqual([{ id: deactivated, name: "Pasajero Inactivo" }]);
+
+    const targetDay = await day(office, "2026-11-09");
+    // Regla 2: Copied Recorridos are always Borrador
+    expect(targetDay.routes).toHaveLength(1);
+    expect(targetDay.routes[0]).toMatchObject({
+      startTime: "07:00",
+      endTime: "09:00",
+      status: "borrador",
+      driverId,
+      vehicleId,
+    });
+
+    // Active transfers and absent transfer copied as planificado; deactivated passenger skipped
+    expect(targetDay.transfers).toHaveLength(3);
+    const activeTransfers = targetDay.transfers.filter((t: { passengerId: number }) => t.passengerId === active1 || t.passengerId === active2);
+    expect(activeTransfers).toHaveLength(3);
+    expect(targetDay.transfers.every((t: { status: string }) => t.status === "planificado")).toBe(true);
+
+    // Stops for active transfers are copied in order
+    const copiedRoute = targetDay.routes[0];
+    expect(copiedRoute.stops).toHaveLength(4); // 2 pickups and 2 dropoffs for active1 and active2
+    expect(copiedRoute.stops.map((s: { position: number }) => s.position)).toEqual([1, 2, 3, 4]);
+
+    // Regla 1: Copying into a day that already has Traslados is refused
+    const conflictRes = await request("/daily-plans/2026-11-09/copy-last-weekday", "POST", undefined, office);
+    expect(conflictRes.status).toBe(409);
+    expect((await conflictRes.json()).error).toBe("Copying into a day that already has Traslados is refused");
+
+    // Fallback: 2 weeks back when 1 week back has no plan
+    // Target 2026-11-23 (no plan on 2026-11-16, plan on 2026-11-09)
+    const fallbackRes = await created(request("/daily-plans/2026-11-23/copy-last-weekday", "POST", undefined, office), 201);
+    expect(fallbackRes.copiedFromDate).toBe("2026-11-09");
+
+    // 404 when no plan found in the last 4 weeks (e.g. on a Sunday 2026-11-15)
+    const notFoundRes = await request("/daily-plans/2026-11-15/copy-last-weekday", "POST", undefined, office);
+    expect(notFoundRes.status).toBe(404);
+  });
+
   it("lets only the Oficina read and write the Plan diario", async () => {
     const chofer = await signIn("chofer-plan", "driver");
     for (const [method, path, body] of [
       ["POST", "/daily-plans", { date: DAY }],
       ["GET", `/daily-plans/${DAY}`, undefined],
+      ["POST", `/daily-plans/${DAY}/copy-last-weekday`, undefined],
       ["POST", `/daily-plans/${DAY}/transfers`, { passengerId: 1, direction: "entrada", destinationId: 1, targetTime: "08:00" }],
       ["PATCH", "/transfers/1", { companions: 1 }],
       ["POST", "/transfers/1/absence", {}],
