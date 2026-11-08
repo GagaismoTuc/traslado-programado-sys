@@ -1,0 +1,14 @@
+[Unit]
+Description=Check VPS disk usage and send PII-free alert on threshold breach
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+EnvironmentFile=/etc/traslado/monitoring.env
+ExecStart=/bin/sh /opt/traslado/infra/monitoring/check-disk.sh
+DynamicUser=yes
+NoNewPrivileges=yes
+PrivateTmp=yes
+ProtectSystem=strict
+

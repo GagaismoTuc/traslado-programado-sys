@@ -4,6 +4,7 @@ import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { createApp, type AppType, type RoutingHealth } from "../src/app.js";
 import { readConfig } from "../src/config.js";
 import { createPool } from "../src/db.js";
+import { createApiErrorTracker } from "../src/error-tracking.js";
 import { createSyntheticRecord, SYNTHETIC_DNI_RANGE, TUCUMAN_BOUNDS } from "./factories/synthetic.js";
 
 const appPool = createPool(process.env.TEST_DATABASE_URL!);
@@ -149,5 +150,79 @@ describe("API test seam", () => {
     const response = await app.request("/error");
     expect(response.status).toBe(500);
     expect(response.headers.get("X-Server-Epoch")).toBe("server-error");
+  });
+
+  it("reads optional GLITCHTIP_DSN and reports scrubbed unhandled API errors without leaking Pasajero data", async () => {
+    const baseEnv = {
+      SERVER_EPOCH: "epoch",
+      DATABASE_URL: "postgres://app:secret@localhost:5432/app",
+      OSRM_URL: "http://127.0.0.1:5000",
+      VROOM_URL: "http://127.0.0.1:3001",
+    };
+    expect(readConfig(baseEnv as NodeJS.ProcessEnv).glitchtipDsn).toBeNull();
+    expect(readConfig({ ...baseEnv, GLITCHTIP_DSN: " " } as NodeJS.ProcessEnv).glitchtipDsn).toBeNull();
+    const dsn = `http://${"c".repeat(32)}@127.0.0.1:8080/_glitchtip/1`;
+    expect(readConfig({ ...baseEnv, GLITCHTIP_DSN: dsn } as NodeJS.ProcessEnv).glitchtipDsn).toBe(dsn);
+    expect(() => readConfig({ ...baseEnv, GLITCHTIP_DSN: "not-a-url" } as NodeJS.ProcessEnv)).toThrow("GLITCHTIP_DSN must be a valid URL");
+
+    const envelopes: string[] = [];
+    const errorTracker = createApiErrorTracker({
+      dsn,
+      serverEpoch: "api-scrub",
+      sendEnvelope: async (payload) => {
+        envelopes.push(payload);
+        return { statusCode: 200 };
+      },
+    });
+
+    const passengerBody = {
+      name: "Pasajero Sintético API",
+      dni: "42.345.678",
+      homeAddress: "Calle Inventada 101",
+      homeLat: -26.8302,
+      homeLng: -65.2101,
+      medicalAlert: "Alerta sintética: alergia alimentaria",
+    };
+
+    const app = createApp({
+      routing: routingUp,
+      db: appPool,
+      errorReporter: errorTracker.captureRequestError,
+      config: { serverEpoch: "api-scrub" },
+    });
+    app.post("/boom", async (context) => {
+      const payload = await context.req.json();
+      throw new Error(`Unhandled failure saving ${JSON.stringify(payload)} near -26.8302, -65.2101`);
+    });
+
+    const response = await app.request("http://localhost/boom?name=Pasajero+Sint%C3%A9tico+API&dni=42345678", {
+      method: "POST",
+      headers: {
+        Origin: "http://localhost",
+        "Content-Type": "application/json",
+        Cookie: "session=synthetic-api-session",
+        Authorization: "Bearer synthetic-api-bearer",
+      },
+      body: JSON.stringify(passengerBody),
+    });
+
+    expect(response.status).toBe(500);
+    expect(response.headers.get("X-Server-Epoch")).toBe("api-scrub");
+    expect(await response.text()).toBe("");
+
+    await errorTracker.flush();
+    expect(envelopes).toHaveLength(1);
+    const envelopeText = envelopes[0]!;
+    expect(envelopeText).toContain("Unhandled failure saving");
+    expect(envelopeText).toContain('"app":"api"');
+    expect(envelopeText).not.toContain("Pasajero Sintético API");
+    expect(envelopeText).not.toContain("42.345.678");
+    expect(envelopeText).not.toContain("42345678");
+    expect(envelopeText).not.toContain("Calle Inventada 101");
+    expect(envelopeText).not.toContain("alergia alimentaria");
+    expect(envelopeText).not.toContain("-26.8302");
+    expect(envelopeText).not.toContain("-65.2101");
+    expect(envelopeText).not.toContain("synthetic-api-session");
+    expect(envelopeText).not.toContain("synthetic-api-bearer");
   });
 });
