@@ -1,10 +1,12 @@
 import { execFile } from "node:child_process";
 import { randomBytes } from "node:crypto";
+import { createServer as createHttpServer } from "node:http";
 import { createServer } from "node:net";
 import { join, resolve } from "node:path";
 import { promisify } from "node:util";
 import { describe, expect, it } from "vitest";
 import { createApp, type HealthDatabase, type RoutingHealth } from "../src/app.js";
+import { createPool } from "../src/db.js";
 import { createApiErrorTracker } from "../src/error-tracking.js";
 
 const run = promisify(execFile);
@@ -298,5 +300,42 @@ describe("error tracking and container log rotation", () => {
 
     expect(bodies).toHaveLength(1);
     expect(bodies[0]).not.toMatch(/-65,-26|-66,-27/);
+  });
+
+  it("does not transmit a passenger name in a real PostgreSQL error", async () => {
+    if (!process.env.TEST_DATABASE_URL) return;
+    const envelopes: string[] = [];
+    const receiver = createHttpServer((req, res) => {
+      let body = "";
+      req.on("data", (chunk) => (body += chunk));
+      req.on("end", () => {
+        envelopes.push(body);
+        res.end("{}");
+      });
+    });
+    await new Promise<void>((resolve) => receiver.listen(0, "127.0.0.1", resolve));
+    const pool = createPool(process.env.TEST_DATABASE_URL);
+    const port = (receiver.address() as { port: number }).port;
+    const tracker = createApiErrorTracker({ dsn: `http://${"a".repeat(32)}@127.0.0.1:${port}/1` });
+    try {
+      const app = createApp({
+        db: pool,
+        routing: { osrm: async () => {}, vroom: async () => {} },
+        errorReporter: tracker.captureRequestError,
+        config: { serverEpoch: "synthetic" },
+      });
+      app.get("/failure", async () => {
+        await pool.query("select $1::integer", ["Synthetic Passenger"]);
+        return new Response();
+      });
+      expect((await app.request("http://localhost/failure")).status).toBe(500);
+      expect(await tracker.flush()).toBe(true);
+      expect(envelopes).toHaveLength(1);
+      expect(envelopes[0]).not.toContain("Synthetic Passenger");
+    } finally {
+      await tracker.close();
+      await pool.end();
+      await new Promise<void>((resolve) => receiver.close(() => resolve()));
+    }
   });
 });
