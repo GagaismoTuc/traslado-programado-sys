@@ -504,6 +504,89 @@ describe("Publication and Versiones del plan", () => {
     expect((await day()).unpublishedTransferIds).toEqual([late, inDraft, unassigned]);
   });
 
+  it("prints or exports the Plan diario with the latest published versions and refuses while any Traslado lacks a published Recorrido", async () => {
+    const { vehicle, driver, passenger, route, transfer, publish, office } = await setup("print");
+    const vehicleId = await vehicle();
+    const driverId = await driver(vehicleId);
+    const publishedRoute = await route(driverId, "07:00", "09:00");
+    const draftRoute = await route(driverId, "10:00", "12:00");
+    const passengerId = await passenger({
+      name: "Pasajero Con Alerta",
+      wheelchair: true,
+      companions: 1,
+      medicalAlert: "Alerta sintética",
+      accessNotes: "Timbre blanco",
+    });
+    const served = await transfer(passengerId, "08:00", publishedRoute);
+    const inDraft = await transfer(passengerId, "11:00", draftRoute);
+    const absent = await transfer(passengerId, "14:00", null);
+    await ok(request(`/transfers/${absent}/absence`, "POST", {}, office));
+
+    // Refused while inDraft and served lack a published Recorrido, naming them; absent is excluded
+    const refused1 = await request(`/daily-plans/${DAY}/print`, "GET", undefined, office);
+    expect(refused1.status).toBe(409);
+    const body1 = await refused1.json() as { error: string; unpublishedTransfers: { id: number }[] };
+    expect(body1.error).toBe("The Plan diario cannot be printed: some Traslados have no published Recorrido");
+    expect(body1.unpublishedTransfers.map((t) => t.id)).toEqual([served, inDraft]);
+
+    // Publish publishedRoute; inDraft remains unpublished
+    await ok(publish(publishedRoute));
+    const refused2 = await request(`/daily-plans/${DAY}/print`, "GET", undefined, office);
+    expect(refused2.status).toBe(409);
+    const body2 = await refused2.json() as { unpublishedTransfers: { id: number }[] };
+    expect(body2.unpublishedTransfers.map((t) => t.id)).toEqual([inDraft]);
+
+    // Publish draftRoute as well: now all active transfers are published
+    await ok(publish(draftRoute));
+    const allowed = await request(`/daily-plans/${DAY}/print`, "GET", undefined, office);
+    expect(allowed.status).toBe(200);
+    const result = await allowed.json() as {
+      plan: { date: string; timeZone: string };
+      routes: {
+        routeId: number;
+        version: number;
+        publishedAt: string;
+        driver: { name: string };
+        vehicle: { plate: string };
+        stops: {
+          position: number;
+          kind: string;
+          plannedTime: string;
+          passengerName: string;
+          companions: number;
+          wheelchair: boolean;
+          medicalAlert: string | null;
+          accessNotes: string | null;
+          destinationName: string;
+        }[];
+      }[];
+    };
+
+    expect(result.plan).toEqual({ date: DAY, timeZone: "America/Argentina/Tucuman" });
+    expect(result.routes).toHaveLength(2);
+
+    // Regla 1: Only published versions are printed, never Borrador
+    // Regla 2: The print shows the version number and publication time
+    const r1 = result.routes[0];
+    expect(r1.routeId).toBe(publishedRoute);
+    expect(r1.version).toBe(1);
+    expect(typeof r1.publishedAt).toBe("string");
+    expect(r1.driver.name).toContain("chofer-print");
+    expect(r1.vehicle.plate).toBeDefined();
+    expect(r1.stops).toHaveLength(2); // pickup + dropoff
+
+    const pickup = r1.stops[0];
+    expect(pickup.position).toBe(1);
+    expect(pickup.kind).toBe("pickup");
+    expect(pickup.plannedTime).toBeDefined();
+    expect(pickup.passengerName).toBe("Pasajero Con Alerta");
+    expect(pickup.companions).toBe(1);
+    expect(pickup.wheelchair).toBe(true);
+    expect(pickup.medicalAlert).toBe("Alerta sintética");
+    expect(pickup.accessNotes).toContain("Timbre blanco");
+    expect(pickup.destinationName).toContain("Escuela print");
+  });
+
   it("lets only the Oficina publish and read Versiones del plan", async () => {
     await seedUser("chofer-publica", "driver");
     const chofer = getSessionCookie(await request("/auth/login", "POST", {
@@ -513,6 +596,7 @@ describe("Publication and Versiones del plan", () => {
       ["POST", "/routes/1/publish"],
       ["GET", "/routes/1/versions"],
       ["POST", `/daily-plans/${DAY}/publish`],
+      ["GET", `/daily-plans/${DAY}/print`],
     ] as const) {
       const body = method === "POST" ? {} : undefined;
       expect((await request(path, method, body)).status, `${method} ${path} without session`).toBe(401);

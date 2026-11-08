@@ -11,6 +11,7 @@ import { LiveMapPage } from "./LiveMapPage";
 import { OfficeNav } from "./OfficeNav";
 import { PassengersPage } from "./PassengersPage";
 import { PlanPage } from "./PlanPage";
+import { PrintPlanPage } from "./PrintPlanPage";
 import { SecondFactorPage } from "./SecondFactor";
 import { DeviceSessions, PersistentSessionToggle } from "./UserAccess";
 import { VehicleDetailPage } from "./VehicleDetailPage";
@@ -155,6 +156,7 @@ export function App() {
   if (path === "/expiries") return <ExpiriesPage />;
   if (path === "/drivers") return <DriversPage />;
   if (path === "/passengers") return <PassengersPage />;
+  if (path === "/plan/print") return <PrintPlanPage />;
   if (path === "/plan") return <PlanPage />;
   if (path === "/alerts") return <AlertsPage />;
   const transferId = /^\/transfers\/(\d+)\/history$/.exec(path)?.[1];
