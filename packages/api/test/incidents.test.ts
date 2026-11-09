@@ -193,8 +193,8 @@ describe("Incidente reporting", () => {
   });
 
   it("rejects duplicate client UUID submitted by a different driver without leaking data", async () => {
-    const route1 = await startedRouteWithTransfers("uuid-conflict-1", 1);
-    const route2 = await startedRouteWithTransfers("uuid-conflict-2", 1);
+    const route1 = await startedRouteWithTransfers("uuid-driver-1", 1);
+    const route2 = await startedRouteWithTransfers("other-driver-2", 1);
     const incidentId = "00000000-0000-4000-8000-000000000088";
 
     // Driver 1 records an incident
