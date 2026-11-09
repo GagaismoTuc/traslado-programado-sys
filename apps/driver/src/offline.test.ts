@@ -581,4 +581,72 @@ describe("Server epoch and the end-of-day wipe", () => {
     expect(finalSignOut).toEqual({ result: "signed_out" });
     expect(logout).toHaveBeenCalled();
   });
+
+  describe("independent incident queue checks", () => {
+    function makeStore() {
+      const records = new Map<string, QueuedItem>();
+      const store: LocalStore = {
+        marks: async () => Array.from(records.values()),
+        putMark: async (item) => { records.set(item.id, item); },
+        deleteMark: async (id) => { records.delete(id); },
+        plan: async () => null,
+        putPlan: async () => {},
+        epoch: async () => null,
+        putEpoch: async () => {},
+        wipeEnded: async () => {},
+        clear: async () => { records.clear(); },
+      };
+      return { records, store };
+    }
+    const sampleMark = { id: "mark-a", transferId: 7, kind: "subio", phoneTime: "2026-11-02T10:00:00Z", location: null, version: 1 } as Mark;
+    const sampleIncident = { id: "incident-a", kind: "accident", note: "Synthetic incident", phoneTime: "2026-11-02T10:01:00Z", location: null } as Incident;
+    const accepted = (field: string, id: string) => new Response(JSON.stringify({ [field]: { id } }), { status: 201 });
+
+    it("syncs a boarded mark before the later incident", async () => {
+      const { store } = makeStore();
+      const sent: string[] = [];
+      const queue = markQueue(
+        store,
+        async (_, m) => { sent.push(m.id); return accepted("mark", m.id); },
+        undefined,
+        async (_, i) => { sent.push(i.id); return accepted("incident", i.id); },
+      );
+      await queue.addIncident(42, sampleIncident);
+      await queue.add(42, sampleMark);
+      expect((await queue.flush()).confirmed).toBe(2);
+      expect(sent).toEqual([sampleMark.id, sampleIncident.id]);
+      expect(latestMarks(await store.marks())[7].mark.kind).toBe("subio");
+    });
+
+    it("keeps an offline incident and does not wipe pending data", async () => {
+      const { store } = makeStore();
+      const queue = markQueue(
+        store,
+        async () => { throw Error("offline"); },
+        undefined,
+        async () => { throw Error("offline"); },
+      );
+      await queue.addIncident(42, sampleIncident);
+      expect((await queue.flush()).result).toBe("offline");
+      const items = await store.marks();
+      expect(items[0].state).toBe("pending");
+      expect(endedData(items, null, "2026-11-03")).toBeNull();
+    });
+
+    it("does not acknowledge a later incident while an earlier boarded mark failed", async () => {
+      const { store, records } = makeStore();
+      let incidentSends = 0;
+      const queue = markQueue(
+        store,
+        async () => new Response(JSON.stringify({ error: "temporary" }), { status: 500 }),
+        undefined,
+        async (_, i) => { incidentSends++; return accepted("incident", i.id); },
+      );
+      await queue.add(42, sampleMark);
+      await queue.addIncident(42, sampleIncident);
+      await queue.flush();
+      expect(incidentSends).toBe(0);
+      expect(records.get(sampleIncident.id)?.state).toBe("pending");
+    });
+  });
 });

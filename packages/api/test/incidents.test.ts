@@ -191,4 +191,39 @@ describe("Incidente reporting", () => {
     const wrongDriver = await request(`/driver/routes/${routeId}/incidents`, "POST", validPayload, otherDriver.cookie);
     expect(wrongDriver.status).toBe(403);
   });
+
+  it("rejects duplicate client UUID submitted by a different driver without leaking data", async () => {
+    const { driver, routeId, chofer, route, post } = await startedRouteWithTransfers("uuid-conflict", 1);
+    const incidentId = "00000000-0000-4000-8000-000000000088";
+
+    // Driver 1 records an incident
+    const postIncident1 = await request(`/driver/routes/${routeId}/incidents`, "POST", {
+      id: incidentId,
+      kind: "delay",
+      note: "Demora chofer 1",
+      phoneTime: NOW,
+      location: null,
+    }, driver.cookie);
+    expect(postIncident1.status).toBe(201);
+
+    // Driver 2 starts their own route
+    const driver2 = await chofer();
+    const route2Id = await route(driver2.driverId);
+    await post(`/routes/${route2Id}/publish`, { overrideReason: "Orden sintético chofer 2" });
+    await answer(request(`/driver/routes/${route2Id}/start`, "POST", {}, driver2.cookie), 200);
+
+    // Driver 2 attempts to send an incident with the same UUID
+    const postIncident2 = await request(`/driver/routes/${route2Id}/incidents`, "POST", {
+      id: incidentId,
+      kind: "vehicle_fault",
+      note: "Pinchadura chofer 2",
+      phoneTime: NOW,
+      location: null,
+    }, driver2.cookie);
+
+    expect(postIncident2.status).toBe(403);
+    const body2 = await postIncident2.json();
+    expect(body2.error).toBe("This Incidente belongs to another Chofer");
+    expect(body2.incident).toBeUndefined();
+  });
 });

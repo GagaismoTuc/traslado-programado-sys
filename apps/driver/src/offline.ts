@@ -219,6 +219,12 @@ async function flushOnce(store: LocalStore, send: Send, check?: SessionCheck, se
   let confirmed = 0;
   for (const pendingItem of pending) {
     if ("mark" in pendingItem && pendingItem.mark.corrects && unconfirmed.has(pendingItem.mark.corrects)) continue;
+    if ("incident" in pendingItem) {
+      const hasEarlierUnconfirmedMark = items.some(
+        (i) => "mark" in i && i.routeId === pendingItem.routeId && unconfirmed.has(i.id) && queueOrder(i, pendingItem) < 0,
+      );
+      if (hasEarlierUnconfirmedMark) continue;
+    }
     const item = { ...pendingItem, sent: true };
     if (pendingItem.sent !== true) await store.putMark(item);
     let response: Response;

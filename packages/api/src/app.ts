@@ -2717,6 +2717,9 @@ export function createApp({ db, routing, router, geocoder, solver, travelTime, c
     ) as QueryResult;
     if (!inserted.rows[0]) {
       const stored = (await client.query("SELECT * FROM incidents WHERE client_id = $1", [fields.id]) as QueryResult).rows[0];
+      if (stored && Number(stored.driver_id) !== chofer.driverId) {
+        throw new PlanningError(403, "This Incidente belongs to another Chofer");
+      }
       return { status: 200 as const, incident: formatIncident(stored!) };
     }
     const incidentRow = inserted.rows[0];

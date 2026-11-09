@@ -274,7 +274,8 @@ export function IncidentForm({
         <option value="other">Other</option>
       </select>
       <label htmlFor={`incident-note-${route.routeId}`}>Note:</label>
-      <textarea id={`incident-note-${route.routeId}`} name="note" required />
+      <textarea id={`incident-note-${route.routeId}`} name="note" maxLength={2000} required />
+      <small>No incluyas diagnósticos ni datos sensibles de salud.</small>
       <button type="submit" disabled={sending}>Submit incident</button>
     </form>
   </details>;
@@ -325,7 +326,7 @@ export function DayView({ title, day, sending, onAcknowledge, marking }: {
 /** Why "Cerrar sesión" left the session open. */
 export function signOutRefusal(outcome: SignOutOutcome) {
   if (outcome.result !== "refused") return "Unable to reach the server: the session is still open";
-  const marks = outcome.pending === 1 ? "1 Marca is" : `${outcome.pending} Marcas are`;
+  const marks = outcome.pending === 1 ? "1 Marca or Incidente is" : `${outcome.pending} Marcas or Incidentes are`;
   return outcome.offline
     ? `No signal: ${marks} saved only on this phone. Cerrar sesión once the server confirms them.`
     : `${marks} not confirmed by the server yet. Cerrar sesión once the server confirms them.`;
