@@ -193,8 +193,7 @@ describe("Incidente reporting", () => {
   });
 
   it("rejects duplicate client UUID submitted by a different driver without leaking data", async () => {
-    const route1 = await startedRouteWithTransfers("uuid-driver-1", 1);
-    const route2 = await startedRouteWithTransfers("other-driver-2", 1);
+    const route1 = await startedRouteWithTransfers("uuid-conflict", 1);
     const incidentId = "00000000-0000-4000-8000-000000000088";
 
     // Driver 1 records an incident
@@ -207,14 +206,19 @@ describe("Incidente reporting", () => {
     });
     expect(postIncident1.status).toBe(201);
 
+    // Driver 2 in the same harness gets their own served route and starts it
+    const { passengerId } = await route1.passenger();
+    const route2 = await route1.served(passengerId, "salida");
+    await answer(request(`/driver/routes/${route2.routeId}/start`, "POST", {}, route2.driver.cookie), 200);
+
     // Driver 2 attempts to send an incident with the same UUID on their own route
-    const postIncident2 = await route2.postIncident({
+    const postIncident2 = await request(`/driver/routes/${route2.routeId}/incidents`, "POST", {
       id: incidentId,
       kind: "vehicle_fault",
       note: "Pinchadura chofer 2",
       phoneTime: NOW,
       location: null,
-    });
+    }, route2.driver.cookie);
 
     expect(postIncident2.status).toBe(403);
     const body2 = await postIncident2.json();
