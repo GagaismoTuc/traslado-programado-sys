@@ -1,8 +1,8 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { newMark, undoMark, type Mark } from "./Marks";
+import { newIncident, newMark, undoMark, type Incident, type Mark } from "./Marks";
 import {
   CONFLICT_NOTE, endedData, latestMarks, markQueue, refusedMarks, requestPersistentStorage, savedPlanFor, signOut, startFlushing, wipeIfRevoked,
-  type CachedPlan, type LocalStore, type QueuedMark,
+  type CachedPlan, type LocalStore, type QueuedItem, type QueuedMark,
 } from "./offline";
 
 // The Marcas below are made on 2026-10-23; the phone's clock stays on that day unless a test moves it.
@@ -16,7 +16,7 @@ afterEach(() => {
 
 /** The store contract in memory; the IndexedDB one is exercised by the C3 test in apps/office/e2e/driver-offline.e2e.ts. */
 function memoryStore() {
-  const marks = new Map<string, QueuedMark>();
+  const marks = new Map<string, QueuedItem>();
   let plan: CachedPlan | null = null;
   let epoch: string | null = null;
   const store: LocalStore = {
@@ -529,5 +529,124 @@ describe("Server epoch and the end-of-day wipe", () => {
     expect([...marks.values()].map((item) => item.state)).toEqual(["confirmed", "confirmed"]);
     expect(await reopened.flush()).toEqual({ result: "done", confirmed: 0 });
     expect(sent).toHaveLength(4);
+  });
+  it("queues an Incidente through the same queue as Marcas in chronological order, works offline, and keeps sign-out safe", async () => {
+    const { store, marks } = memoryStore();
+    const sent: string[] = [];
+    let online = false;
+    const sendMark = vi.fn(async (_routeId: number, body: Mark) => {
+      if (!online) throw new TypeError("Failed to fetch");
+      sent.push(body.id);
+      return stored(body);
+    });
+    const sendInc = vi.fn(async (_routeId: number, inc: Incident) => {
+      if (!online) throw new TypeError("Failed to fetch");
+      sent.push(inc.id);
+      return json({ incident: { id: inc.id, routeId: 9 } }, 201);
+    });
+    const queue = markQueue(store, sendMark, undefined, sendInc);
+
+    // Chofer marks Subió at 12:01, then reports an Incidente at 12:02
+    const subio = mark(1);
+    const incident = newIncident(
+      { kind: "delay", note: "Corte de calle", location: null },
+      new Date("2026-10-23T12:02:00.000Z"),
+      "00000000-0000-4000-8000-000000000099",
+    );
+
+    await queue.add(9, subio);
+    await queue.addIncident(9, incident);
+
+    // Without signal: both remain pending in the queue
+    expect(await queue.flush()).toEqual({ result: "offline", confirmed: 0 });
+    expect(marks.get(subio.id)?.state).toBe("pending");
+    expect(marks.get(incident.id)?.state).toBe("pending");
+
+    // Cerrar sesión refuses while items are unconfirmed
+    const session = async () => json({ user: { id: 1 } }, 200);
+    const logout = vi.fn(async () => json({}, 200));
+    const signOutResult = await signOut(store, queue, { session, logout });
+    expect(signOutResult).toEqual({ result: "refused", pending: 2, offline: true });
+    expect(logout).not.toHaveBeenCalled();
+
+    // Signal returns: queue flushes in chronological phoneTime order (Subió first, then Incidente)
+    online = true;
+    expect(await queue.flush()).toEqual({ result: "done", confirmed: 2 });
+    expect(sent).toEqual([subio.id, incident.id]);
+    expect(marks.get(subio.id)?.state).toBe("confirmed");
+    expect(marks.get(incident.id)?.state).toBe("confirmed");
+
+    // Once confirmed, Cerrar sesión succeeds
+    const finalSignOut = await signOut(store, queue, { session, logout });
+    expect(finalSignOut).toEqual({ result: "signed_out" });
+    expect(logout).toHaveBeenCalled();
+  });
+
+  describe("independent incident queue checks", () => {
+    function makeStore() {
+      const records = new Map<string, QueuedItem>();
+      const store: LocalStore = {
+        marks: async () => Array.from(records.values()),
+        putMark: async (item) => { records.set(item.id, item); },
+        deleteMark: async (id) => { records.delete(id); },
+        plan: async () => null,
+        putPlan: async () => {},
+        epoch: async () => null,
+        putEpoch: async () => {},
+        wipeEnded: async () => {},
+        clear: async () => { records.clear(); },
+      };
+      return { records, store };
+    }
+    const sampleMark = { id: "mark-a", transferId: 7, kind: "subio", phoneTime: "2026-11-02T10:00:00Z", location: null, version: 1 } as Mark;
+    const sampleIncident = { id: "incident-a", kind: "accident", note: "Synthetic incident", phoneTime: "2026-11-02T10:01:00Z", location: null } as Incident;
+    const accepted = (field: string, id: string) => new Response(JSON.stringify({ [field]: { id } }), { status: 201 });
+
+    it("syncs a boarded mark before the later incident", async () => {
+      const { store } = makeStore();
+      const sent: string[] = [];
+      const queue = markQueue(
+        store,
+        async (_, m) => { sent.push(m.id); return accepted("mark", m.id); },
+        undefined,
+        async (_, i) => { sent.push(i.id); return accepted("incident", i.id); },
+      );
+      await queue.addIncident(42, sampleIncident);
+      await queue.add(42, sampleMark);
+      expect((await queue.flush()).confirmed).toBe(2);
+      expect(sent).toEqual([sampleMark.id, sampleIncident.id]);
+      expect(latestMarks(await store.marks())[7].mark.kind).toBe("subio");
+    });
+
+    it("keeps an offline incident and does not wipe pending data", async () => {
+      const { store } = makeStore();
+      const queue = markQueue(
+        store,
+        async () => { throw Error("offline"); },
+        undefined,
+        async () => { throw Error("offline"); },
+      );
+      await queue.addIncident(42, sampleIncident);
+      expect((await queue.flush()).result).toBe("offline");
+      const items = await store.marks();
+      expect(items[0].state).toBe("pending");
+      expect(endedData(items, null, "2026-11-03")).toBeNull();
+    });
+
+    it("does not acknowledge a later incident while an earlier boarded mark failed", async () => {
+      const { store, records } = makeStore();
+      let incidentSends = 0;
+      const queue = markQueue(
+        store,
+        async () => new Response(JSON.stringify({ error: "temporary" }), { status: 500 }),
+        undefined,
+        async (_, i) => { incidentSends++; return accepted("incident", i.id); },
+      );
+      await queue.add(42, sampleMark);
+      await queue.addIncident(42, sampleIncident);
+      await queue.flush();
+      expect(incidentSends).toBe(0);
+      expect(records.get(sampleIncident.id)?.state).toBe("pending");
+    });
   });
 });

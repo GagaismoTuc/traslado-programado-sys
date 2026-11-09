@@ -87,6 +87,23 @@ export function AlertText({ alert }: { alert: Alert }) {
           {`${transfer.passengerName}: ${transfer.status === "subio" ? "on board without Entregado" : "not marked"}`}
         </li>)}</ul></>;
     }
+    case "incident": {
+      const onBoard = (details.onBoard as { transferId: number; passengerName: string }[] | undefined) ?? [];
+      const incidentKindLabels: Record<string, string> = {
+        delay: "delay",
+        vehicle_fault: "vehicle fault",
+        accident: "accident",
+        health_crisis: "health crisis",
+        other: "other",
+      };
+      const kindLabel = incidentKindLabels[String(details.kind)] ?? String(details.kind);
+      return <>
+        {`${alert.driverName ?? "A Chofer"} reported an Incidente (${kindLabel}) on Recorrido ${String(alert.routeId)}: ${String(details.note)}. `}
+        {onBoard.length
+          ? <>Children on board:<ul>{onBoard.map((child) => <li key={child.transferId}>{child.passengerName}</li>)}</ul></>
+          : "No children on board."}
+      </>;
+    }
     default:
       return <>{alert.kind}</>;
   }
