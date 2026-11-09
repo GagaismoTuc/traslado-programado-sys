@@ -326,7 +326,7 @@ export function DayView({ title, day, sending, onAcknowledge, marking }: {
 /** Why "Cerrar sesión" left the session open. */
 export function signOutRefusal(outcome: SignOutOutcome) {
   if (outcome.result !== "refused") return "Unable to reach the server: the session is still open";
-  const marks = outcome.pending === 1 ? "1 Marca or Incidente is" : `${outcome.pending} Marcas or Incidentes are`;
+  const marks = outcome.pending === 1 ? "1 Marca is" : `${outcome.pending} Marcas are`;
   return outcome.offline
     ? `No signal: ${marks} saved only on this phone. Cerrar sesión once the server confirms them.`
     : `${marks} not confirmed by the server yet. Cerrar sesión once the server confirms them.`;
