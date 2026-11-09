@@ -1,0 +1,77 @@
+services:
+  gateway:
+    image: caddy:2-alpine
+    environment:
+      PRODUCTION_HOST: ${PRODUCTION_HOST:?required}
+      STAGING_HOST: ${STAGING_HOST:?required}
+      INGRESS_SUBNET: ${INGRESS_SUBNET:?required}
+    volumes:
+      - ./Gateway.Caddyfile:/etc/caddy/Caddyfile:ro
+    networks:
+      default: {}
+      ingress:
+        aliases:
+          - gateway-${DEPLOY_PROJECT:?required}
+  db:
+    image: postgres:16.15-alpine
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:?required}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?required}
+      POSTGRES_DB: ${POSTGRES_DB:?required}
+    volumes:
+      - database:/var/lib/postgresql/data
+    healthcheck:
+      test: [CMD-SHELL, 'pg_isready -U "$$POSTGRES_USER" -d "$$POSTGRES_DB"']
+      interval: 5s
+      retries: 20
+  api:
+    image: ${API_IMAGE:-ghcr.io/gagaismotuc/traslado-api}:${IMAGE_TAG:?required}
+    environment:
+      DATABASE_URL: ${DATABASE_URL:?required}
+      SERVER_EPOCH: ${SERVER_EPOCH:?required}
+      AUTH_ALLOWED_ORIGINS: ${AUTH_ALLOWED_ORIGINS:?required}
+      TRUSTED_PROXY_CIDRS: ${TRUSTED_PROXY_CIDRS:?required}
+      OSRM_URL: http://osrm:5000
+      VROOM_URL: http://vroom:3000
+    depends_on:
+      db:
+        condition: service_healthy
+  migrate:
+    image: ${API_IMAGE:-ghcr.io/gagaismotuc/traslado-api}:${IMAGE_TAG:?required}
+    profiles: [tools]
+    environment:
+      MIGRATION_DATABASE_URL: ${MIGRATION_DATABASE_URL:?required}
+    command: [pnpm, --filter, '@traslado/api', db:migrate]
+  bootstrap:
+    image: ${API_IMAGE:-ghcr.io/gagaismotuc/traslado-api}:${IMAGE_TAG:?required}
+    profiles: [tools]
+    environment:
+      BOOTSTRAP_DATABASE_URL: ${BOOTSTRAP_DATABASE_URL:?required}
+      MIGRATION_PASSWORD: ${MIGRATION_PASSWORD:?required}
+      APPLICATION_PASSWORD: ${APPLICATION_PASSWORD:?required}
+    command: [pnpm, --filter, '@traslado/api', db:bootstrap]
+  office:
+    image: ${OFFICE_IMAGE:-ghcr.io/gagaismotuc/traslado-office}:${IMAGE_TAG:?required}
+  driver:
+    image: ${DRIVER_IMAGE:-ghcr.io/gagaismotuc/traslado-driver}:${IMAGE_TAG:?required}
+  osrm:
+    image: ${OSRM_IMAGE:-ghcr.io/gagaismotuc/traslado-osrm:tucuman-260101-osrm26.4.0-r1}
+  vroom:
+    image: ghcr.io/vroom-project/vroom-docker:v1.14.0@sha256:c0fab009b72c7e93d8614fdbfe16a7269520bd221735bfb62c18656bb7fe5eda
+    environment:
+      VROOM_ROUTER: osrm
+    volumes:
+      - ../infra/vroom/config.yml:/conf/config.yml:ro
+    depends_on:
+      - osrm
+volumes:
+  database:
+
+networks:
+  default:
+    ipam:
+      config:
+        - subnet: ${DEPLOY_SUBNET:?required}
+  ingress:
+    external: true
+    name: ${INGRESS_PREFIX:-traslado-ingress}-${DEPLOY_PROJECT:?required}

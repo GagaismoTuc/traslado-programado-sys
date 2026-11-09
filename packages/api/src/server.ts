@@ -11,7 +11,7 @@ const geocoder = config.geocoder === "nominatim"
   ? createNominatimGeocoder({ url: config.nominatimUrl, userAgent: config.nominatimUserAgent })
   : undefined;
 const app = createApp({ db: pool, routing: createRoutingHealth(config), router: createOsrmRouter(config.osrmUrl), geocoder, solver: createVroomSolver(config), travelTime: createTravelTime(config), config });
-const server = serve({ fetch: app.fetch, port: config.port, hostname: "0.0.0.0" });
+const server = serve({ fetch: app.fetch, port: config.port, hostname: config.host });
 
 async function shutdown() {
   server.close();

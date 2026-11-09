@@ -13,7 +13,7 @@ corepack enable
 pnpm install
 ```
 
-Set `SERVER_EPOCH`, `DATABASE_URL`, `OSRM_URL` and `VROOM_URL` before starting the API; `/health` answers 200 only when PostgreSQL, OSRM and VROOM all answer. Database connections use UTC. To create the migration and application roles, connect as a PostgreSQL administrator and run `pnpm --filter @traslado/api db:bootstrap` with `BOOTSTRAP_DATABASE_URL`, `MIGRATION_PASSWORD`, and `APPLICATION_PASSWORD` set. Run `pnpm db:migrate` as the migration role.
+Set `SERVER_EPOCH`, `DATABASE_URL`, `OSRM_URL` and `VROOM_URL` before starting the API; it listens on `PORT` (default `3000`) of `HOST` (default `0.0.0.0`, every interface); `/health` answers 200 only when PostgreSQL, OSRM and VROOM all answer. Database connections use UTC. To create the migration and application roles, connect as a PostgreSQL administrator and run `pnpm --filter @traslado/api db:bootstrap` with `BOOTSTRAP_DATABASE_URL`, `MIGRATION_PASSWORD`, and `APPLICATION_PASSWORD` set. Run `pnpm db:migrate` as the migration role.
 
 ## Routing (OSRM + VROOM)
 
@@ -35,6 +35,8 @@ If nobody can sign in to the Office, reset an active Office account's password a
 
 Browser mutations must include an allowed `Origin`. The API trusts the local Office/Driver Vite origins by default; set `AUTH_ALLOWED_ORIGINS` to a comma-separated list of exact origins in other deployments. Same-origin requests are always accepted.
 
+Five failed logins lock a username, and the client address they came from, for 15 minutes. Behind reverse proxies set `TRUSTED_PROXY_CIDRS` to a comma-separated list of the proxies' CIDRs (for example `172.16.0.0/12`); a single address without a suffix, such as `172.18.0.2` or `fd00::2`, counts as a `/32` or `/128`: for a request whose socket peer is in that list, the API takes the client address from `X-Forwarded-For`, read from the right and skipping every trusted proxy; a missing header, or one with any malformed entry (an IPv6 zone suffix such as `2001:db8::1%eth0` counts as malformed), falls back to the socket address. Equivalent spellings of one address (`2001:0DB8::1` and `2001:db8::1`, or `::ffff:203.0.113.5` and `203.0.113.5`) count as one client. Empty or unset trusts no proxy and ignores `X-Forwarded-For`. A malformed list, or one with a `/0` such as `0.0.0.0/0` or `::/0` that would trust every address, stops the API at startup. With Caddy, each proxy behind another one must also list the proxy in front in its `servers > trusted_proxies` global option, or it replaces `X-Forwarded-For` with that proxy's address. The deploy in `deploy/` sets both; see `TRUSTED_PROXY_CIDRS` in `deploy/README.md`.
+
 The Office "Suggest pin" button geocodes an address through the API. Geocoding is off unless `GEOCODER=nominatim`; then the API calls `NOMINATIM_URL` (default `https://nominatim.openstreetmap.org`) with the `NOMINATIM_USER_AGENT` header, at most once per second for the whole process, caching repeated queries. Tests, CI and development keep it off. The Office map loads its style from `VITE_MAP_STYLE_URL` (OpenFreeMap Liberty by default).
 
 The Office plans each day at `/plan`. Giving a Chofer their whole day cuts it into Recorridos wherever two consecutive target times are more than `ROUTE_GAP_MINUTES` apart (default 60).
@@ -42,6 +44,20 @@ The Office plans each day at `/plan`. Giving a Chofer their whole day cuts it in
 "Order" on a Borrador Recorrido (`POST /routes/:id/order`) sends it to VROOM. The engine minimises km and keeps every Pasajero within their Tiempo máximo a bordo minus `RIDE_TIME_BUFFER_MINUTES` (default 5). VROOM's durations are scaled by the factor of the time band the Recorrido starts in, set with `SPEED_FACTORS` as `HH:MM=factor,...` (default `00:00=1`, factors above 0 and up to 5). Traslados the engine cannot place leave the Recorrido, and the response gives the reason for each. The start is not before the previous Recorrido's planned end: OSRM's `/route` adds the drive from its last Parada to where it ends (the Chofer's home when the Oficina set it to end there) and from there to this start, when they differ. If VROOM or OSRM does not answer, Order returns 502 and changes nothing; if anything the engine was given changes while it works (the Recorrido, the Chofer's Recorridos right before and after it, their Traslados, Pasajeros, Destinos or the Vehículo), it returns 409 and changes nothing; a change sent after that last check waits until Order has saved. The start and end of each Recorrido default to the Chofer's home, or to where the previous Recorrido ended, and the Oficina can override them. Each Destino has a Tolerancia de llegada that the Oficina can edit.
 
 During the day the Oficina can change a Recorrido En curso and publish it again as the next Versión del plan. A done Parada (a pickup marked Subió, Ausente or Entregado, or a drop-off marked Entregado) never changes: done Paradas stay first, in the order of the latest version, with its legs and planned times, and moving one by hand returns 409. The Oficina can add a Traslado to it, such as an early pickup at a Destino, and change its Vehículo when the same Chofer carries on in a replacement van; its Chofer stays. The validator checks what is still to come: Entregado and Ausente Traslados are left out, and a Pasajero on board rides from their actual Subió. "Order" on a Recorrido En curso goes on from its last done Parada; each Pasajero on board is only a drop-off, in this Vehículo, by their Subió plus the Tiempo máximo a bordo minus `RIDE_TIME_BUFFER_MINUTES`, and is never left out. From version 2 on, the Chofer app lists what changed (Vehículo, Traslados added or removed, planned times) since the version the Chofer acknowledged, or since the previous one.
+
+## Hosting and infrastructure setup
+
+To set up the production and staging accounts and infrastructure (Hetzner VPS in Germany, firewall rules, server hardening over SSH, Docker and Compose, GHCR access, Scaleway backup bucket in Paris, DNS records, UptimeRobot monitoring, and GitHub deploy secrets), run the committed bash wizard:
+
+```sh
+bash infra/wizard/hosting.sh
+```
+
+To inspect the 9 stages and the required deploy secrets contract non-interactively:
+
+```sh
+bash infra/wizard/hosting.sh --check
+```
 
 ## Checks
 

@@ -1,0 +1,8 @@
+services:
+  gateway:
+    environment:
+      LOCAL_DRIVER_HOST: ${LOCAL_DRIVER_HOST:-driver.invalid}
+    volumes:
+      - ./LocalGateway.Caddyfile:/etc/caddy/Caddyfile:ro
+    ports:
+      - "127.0.0.1:18780:80"

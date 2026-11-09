@@ -18,6 +18,7 @@ import {
 } from "./sessions.js";
 import type { GeocodeResult, Geocoder } from "./geocoding.js";
 import type { TravelTime } from "./routing.js";
+import { canonicalIp, createTrustedProxies, forwardedClientIp } from "./trusted-proxies.js";
 import { planRoute, speedFactorAt, type LngLat, type PlannerSettings, type PlanResult, type PlanTransfer, type VroomSolver } from "./planner.js";
 
 type QueryResult = { rows: Record<string, unknown>[]; rowCount: number | null };
@@ -42,6 +43,8 @@ export type AppConfig = {
   healthTimeoutMs?: number;
   trustedOrigins?: string[];
   getClientIp?: (context: Context) => string;
+  // Proxies allowed to name the client in X-Forwarded-For; empty or unset trusts none.
+  trustedProxyCidrs?: string[];
   now?: () => Date;
   // A Chofer's day is cut into Recorridos where two consecutive target times are further apart than this.
   routeGapMinutes?: number;
@@ -100,13 +103,15 @@ function isTrustedOrigin(origin: string | undefined, requestUrl: string, allowed
   }
 }
 
-function clientIp(context: Context, config: AppConfig) {
+function clientIp(context: Context, config: AppConfig, trustedProxies: ReturnType<typeof createTrustedProxies>) {
   if (config.getClientIp) return config.getClientIp(context);
+  let socketAddress: string;
   try {
-    return getConnInfo(context).remote.address ?? "unknown";
+    socketAddress = getConnInfo(context).remote.address ?? "unknown";
   } catch {
     return "unknown";
   }
+  return canonicalIp(trustedProxies ? forwardedClientIp(socketAddress, context.req.header("X-Forwarded-For"), trustedProxies) : socketAddress);
 }
 
 function reserveLoginAttempt(username: string, ip: string) {
@@ -923,6 +928,274 @@ async function loadDailyPlan(client: Queryable, date: string) {
     unpublishedTransferIds: unpublished.rows.map((item) => Number(item.id)),
     routes: routeRows.map(({ route }) => route),
     km: dayKm,
+  };
+}
+
+export const ROUTE_COLORS = [
+  "#2e5aa8",
+  "#bf4520",
+  "#1b998b",
+  "#7209b7",
+  "#d90429",
+  "#2a9d8f",
+  "#e76f51",
+  "#4361ee",
+  "#38b000",
+  "#7b2cbf",
+];
+
+export type LiveStop = {
+  id: number;
+  position: number;
+  kind: "pickup" | "dropoff";
+  passengerId: number;
+  passengerName: string;
+  placeName: string;
+  latitude: number;
+  longitude: number;
+  plannedTime: string;
+  eta: string | null;
+  status: string;
+  completed: boolean;
+};
+
+export type LiveLastMarca = {
+  id: number;
+  kind: string;
+  latitude: number;
+  longitude: number;
+  phoneTime: string;
+  phoneTimeHhmi: string;
+};
+
+export type LiveNextStop = {
+  id: number;
+  position: number;
+  kind: "pickup" | "dropoff";
+  passengerName: string;
+  placeName: string;
+  plannedTime: string;
+  eta: string;
+};
+
+export type LiveRoute = {
+  id: number;
+  status: string;
+  driver: { id: number; name: string };
+  vehicle: { id: number; plate: string };
+  color: string;
+  childrenOnBoard: number;
+  lastMarca: LiveLastMarca | null;
+  stops: LiveStop[];
+  nextStop: LiveNextStop | null;
+  geometry: [number, number][];
+};
+
+export type LiveDailyPlan = {
+  date: string;
+  timeZone: string;
+  routes: LiveRoute[];
+};
+
+async function loadLiveDailyPlan(client: Queryable, router: Router | undefined, date: string): Promise<LiveDailyPlan | null> {
+  const planResult = await client.query(
+    "SELECT id, to_char(plan_date, 'YYYY-MM-DD') AS date, time_zone AS \"timeZone\" FROM daily_plans WHERE plan_date = $1",
+    [date],
+  ) as QueryResult;
+  const plan = planResult.rows[0];
+  if (!plan) return null;
+  const planId = Number(plan.id);
+
+  const routesResult = await client.query(
+    `${ROUTE_SELECT_SQL} WHERE r.daily_plan_id = $1 ORDER BY r.start_time, r.id`,
+    [planId],
+  ) as QueryResult;
+
+  const clock = (minutes: number) => clockOfSeconds(Math.round(minutes * 60)).slice(0, 5);
+
+  const routes: LiveRoute[] = [];
+  for (let rIndex = 0; rIndex < routesResult.rows.length; rIndex++) {
+    const rRow = routesResult.rows[rIndex];
+    const routeId = Number(rRow.id);
+
+    const stopsResult = await client.query(
+      `SELECT
+         s.id,
+         s.route_id AS "routeId",
+         s.transfer_id AS "transferId",
+         s.kind,
+         s.position,
+         to_char(COALESCE(s.planned_time, pvl.planned_time), 'HH24:MI') AS "plannedTime",
+         p.id AS "passengerId",
+         p.name AS "passengerName",
+         t.status AS "transferStatus",
+         t.direction,
+         ${stopPointSql("s.kind")},
+         CASE
+           WHEN s.kind = t.trasbordo_stop OR (s.kind = 'dropoff' AND nx.id IS NOT NULL) THEN 'Trasbordo'
+           WHEN s.kind = 'pickup' AND t.direction = 'entrada' THEN COALESCE(o.name, p.home_address)
+           WHEN s.kind = 'pickup' AND t.direction = 'salida' THEN d.name
+           WHEN s.kind = 'dropoff' AND t.direction = 'entrada' THEN d.name
+           WHEN s.kind = 'dropoff' AND t.direction = 'salida' THEN p.home_address
+           ELSE d.name
+         END AS "placeName"
+       FROM stops s
+       ${TRANSFER_PLACES_SQL}
+       LEFT JOIN (
+         SELECT DISTINCT ON (pv.route_id) pv.id, pv.route_id
+           FROM plan_versions pv
+          ORDER BY pv.route_id, pv.version DESC
+       ) latest_pv ON latest_pv.route_id = s.route_id
+       LEFT JOIN plan_version_legs pvl ON pvl.plan_version_id = latest_pv.id AND pvl.transfer_id = s.transfer_id AND pvl.kind = s.kind
+       WHERE s.route_id = $1
+       ORDER BY s.position, s.id`,
+      [routeId],
+    ) as QueryResult;
+
+    const onBoardTransfers = new Set(
+      stopsResult.rows.filter((row) => row.transferStatus === "subio").map((row) => Number(row.transferId)),
+    );
+    const childrenOnBoard = onBoardTransfers.size;
+
+    const rawStops = stopsResult.rows.map((row) => {
+      const isDone = isDoneStop(String(row.kind), String(row.transferStatus));
+      const isVoided = String(row.kind) === "dropoff" && String(row.transferStatus) === "ausente";
+      const statusStr = isDone
+        ? (row.kind === "pickup" ? (row.transferStatus === "ausente" ? "ausente" : "subio") : String(row.transferStatus))
+        : (isVoided ? "ausente" : "pending");
+      return {
+        id: Number(row.id),
+        position: Number(row.position),
+        transferId: Number(row.transferId),
+        kind: String(row.kind) as "pickup" | "dropoff",
+        passengerId: Number(row.passengerId),
+        passengerName: String(row.passengerName),
+        placeName: String(row.placeName ?? ""),
+        latitude: Number(row.lat),
+        longitude: Number(row.lng),
+        plannedTime: (row.plannedTime as string | null) ?? "",
+        serviceMinutes: Number(row.serviceMinutes ?? 5),
+        transferStatus: String(row.transferStatus),
+        completed: isDone || isVoided,
+        status: statusStr,
+        eta: null as string | null,
+      };
+    });
+
+    const markResult = await client.query(
+      `SELECT e.id, e.kind, e.latitude, e.longitude,
+              to_char(e.phone_time AT TIME ZONE '${LOCAL_TIME_ZONE}', 'HH24:MI') AS phone_time_hhmi,
+              EXTRACT(EPOCH FROM (e.phone_time AT TIME ZONE '${LOCAL_TIME_ZONE}')::time) / 60 AS phone_minutes,
+              e.phone_time
+         FROM marks e
+         JOIN plan_versions pv ON pv.id = e.plan_version_id
+        WHERE pv.route_id = $1
+          AND ${MARK_IN_FORCE_SQL}
+        ORDER BY e.phone_time DESC, e.id DESC
+        LIMIT 1`,
+      [routeId],
+    ) as QueryResult;
+
+    const lastMarcaRow = markResult.rows[0];
+    let lastMarca: LiveLastMarca | null = null;
+    if (lastMarcaRow) {
+      const lat = lastMarcaRow.latitude !== null ? Number(lastMarcaRow.latitude) : rawStops[0]?.latitude ?? 0;
+      const lng = lastMarcaRow.longitude !== null ? Number(lastMarcaRow.longitude) : rawStops[0]?.longitude ?? 0;
+      lastMarca = {
+        id: Number(lastMarcaRow.id),
+        kind: String(lastMarcaRow.kind),
+        latitude: lat,
+        longitude: lng,
+        phoneTime: new Date(String(lastMarcaRow.phone_time)).toISOString(),
+        phoneTimeHhmi: String(lastMarcaRow.phone_time_hhmi),
+      };
+    }
+
+    const remainingStops = rawStops.filter((s) => !s.completed);
+    let nextStop: LiveNextStop | null = null;
+
+    // Regla 2: A Recorrido without Marcas shows planned times, not ETAs
+    if (!lastMarca) {
+      if (remainingStops.length > 0) {
+        nextStop = {
+          id: remainingStops[0].id,
+          position: remainingStops[0].position,
+          kind: remainingStops[0].kind,
+          passengerName: remainingStops[0].passengerName,
+          placeName: remainingStops[0].placeName,
+          plannedTime: remainingStops[0].plannedTime,
+          eta: remainingStops[0].plannedTime,
+        };
+      }
+    } else {
+      if (remainingStops.length > 0) {
+        if (router) {
+          try {
+            const points = [
+              { lat: lastMarca.latitude, lng: lastMarca.longitude },
+              ...remainingStops.map((s) => ({ lat: s.latitude, lng: s.longitude })),
+            ];
+            const legs = await router(points);
+            let currentMinutes = Number(lastMarcaRow.phone_minutes);
+            for (let i = 0; i < remainingStops.length; i++) {
+              const legSeconds = legs[i]?.durationSeconds ?? 0;
+              const travelMinutes = legSeconds / 60;
+              const arrivalMinutes = currentMinutes + travelMinutes;
+              remainingStops[i].eta = clock(arrivalMinutes);
+              currentMinutes = arrivalMinutes + remainingStops[i].serviceMinutes;
+            }
+          } catch {
+            for (const stop of remainingStops) {
+              stop.eta = stop.plannedTime;
+            }
+          }
+        } else {
+          for (const stop of remainingStops) {
+            stop.eta = stop.plannedTime;
+          }
+        }
+        nextStop = {
+          id: remainingStops[0].id,
+          position: remainingStops[0].position,
+          kind: remainingStops[0].kind,
+          passengerName: remainingStops[0].passengerName,
+          placeName: remainingStops[0].placeName,
+          plannedTime: remainingStops[0].plannedTime,
+          eta: remainingStops[0].eta ?? remainingStops[0].plannedTime,
+        };
+      }
+    }
+
+    const color = ROUTE_COLORS[rIndex % ROUTE_COLORS.length];
+
+    const geometry: [number, number][] = [];
+    if (rRow.startLat !== null && rRow.startLng !== null) {
+      geometry.push([Number(rRow.startLng), Number(rRow.startLat)]);
+    }
+    for (const stop of rawStops) {
+      geometry.push([stop.longitude, stop.latitude]);
+    }
+
+    const stops: LiveStop[] = rawStops.map(({ transferId: _, serviceMinutes: __, transferStatus: ___, ...stop }) => stop);
+
+    routes.push({
+      id: routeId,
+      status: String(rRow.status),
+      driver: { id: Number(rRow.driverId), name: String(rRow.driverName) },
+      vehicle: { id: Number(rRow.vehicleId), plate: String(rRow.vehiclePlate) },
+      color,
+      childrenOnBoard,
+      lastMarca,
+      stops,
+      nextStop,
+      geometry,
+    });
+  }
+
+  return {
+    date: String(plan.date),
+    timeZone: String(plan.timeZone),
+    routes,
   };
 }
 
@@ -2141,6 +2414,7 @@ export function createApp({ db, routing, router, geocoder, solver, travelTime, c
   const geocodeCache = new Map<string, GeocodeResult | null>();
   let nextGeocodeAt = 0;
   const totpLimiter = createAttemptLimiter(TOTP_FAILURE_LIMIT, LOGIN_WINDOW_MS, now);
+  const trustedProxies = createTrustedProxies(config.trustedProxyCidrs ?? []);
 
   function setSessionCookie(context: Context, token: string) {
     setCookie(context, SESSION_COOKIE, token, { ...COOKIE_OPTIONS, maxAge: SESSION_MAX_AGE_SECONDS });
@@ -2903,7 +3177,7 @@ export function createApp({ db, routing, router, geocoder, solver, travelTime, c
       const password = body.password;
       const deviceLabel = body.deviceLabel.trim();
       if (!username || !password || !deviceLabel || deviceLabel.length > 100) return context.json({ error: "Invalid request" }, 400);
-      const ip = clientIp(context, config);
+      const ip = clientIp(context, config, trustedProxies);
       const reservation = reserveLoginAttempt(username, ip);
       if (!reservation) {
         context.header("Retry-After", String(Math.ceil(LOGIN_WINDOW_MS / 1000)));
@@ -3873,6 +4147,14 @@ export function createApp({ db, routing, router, geocoder, solver, travelTime, c
       if (!date) return context.json({ error: "Invalid request" }, 400);
       const day = await loadDailyPlan(db, date);
       return day ? context.json(day) : context.json({ error: "Plan diario not found" }, 404);
+    })
+    .get("/daily-plans/:date/live", async (context) => {
+      const actor = await requireOffice(context);
+      if (actor instanceof Response) return actor;
+      const date = parsePlanDate(context.req.param("date"));
+      if (!date) return context.json({ error: "Invalid request" }, 400);
+      const live = await loadLiveDailyPlan(db, router, date);
+      return live ? context.json(live) : context.json({ error: "Plan diario not found" }, 404);
     })
     .post("/daily-plans/:date/transfers", async (context) => {
       const actor = await requireOffice(context);

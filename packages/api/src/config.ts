@@ -1,5 +1,6 @@
 import { z } from "zod";
 import { parseSpeedFactors, type PlannerSettings } from "./planner.js";
+import { readTrustedProxyCidrs } from "./trusted-proxies.js";
 
 const configSchema = z.object({
   SERVER_EPOCH: z.string().trim().min(1, "SERVER_EPOCH is required"),
@@ -7,6 +8,7 @@ const configSchema = z.object({
   OSRM_URL: z.string({ error: "OSRM_URL must be a valid URL" }).url("OSRM_URL must be a valid URL"),
   VROOM_URL: z.string({ error: "VROOM_URL must be a valid URL" }).url("VROOM_URL must be a valid URL"),
   PORT: z.coerce.number().int().min(1).max(65535).default(3000),
+  HOST: z.string().trim().min(1, "HOST must name an address to bind").default("0.0.0.0"),
   ROUTE_GAP_MINUTES: z.coerce.number({ error: "ROUTE_GAP_MINUTES must be a whole number of minutes from 1" })
     .int("ROUTE_GAP_MINUTES must be a whole number of minutes from 1")
     .min(1, "ROUTE_GAP_MINUTES must be a whole number of minutes from 1")
@@ -29,9 +31,11 @@ export type ServerConfig = {
   osrmUrl: string;
   vroomUrl: string;
   port: number;
+  host: string;
   routeGapMinutes: number;
   planner: PlannerSettings;
   trustedOrigins: string[];
+  trustedProxyCidrs: string[];
   geocoder: "off" | "nominatim";
   nominatimUrl: string;
   nominatimUserAgent: string;
@@ -75,10 +79,12 @@ export function readConfig(environment: NodeJS.ProcessEnv = process.env): Server
     osrmUrl: result.data.OSRM_URL,
     vroomUrl: result.data.VROOM_URL,
     port: result.data.PORT,
+    host: result.data.HOST,
     routeGapMinutes: result.data.ROUTE_GAP_MINUTES,
     // The early tolerance mirrors the route validator's default (15, inferido); calibrated later with real plans.
     planner: { rideTimeBufferMinutes: result.data.RIDE_TIME_BUFFER_MINUTES, speedFactors, earlyToleranceMinutes: 15 },
     trustedOrigins: readTrustedOrigins(environment.AUTH_ALLOWED_ORIGINS),
+    trustedProxyCidrs: readTrustedProxyCidrs(environment.TRUSTED_PROXY_CIDRS),
     geocoder: result.data.GEOCODER,
     nominatimUrl: result.data.NOMINATIM_URL,
     nominatimUserAgent: result.data.NOMINATIM_USER_AGENT,

@@ -1,0 +1,9 @@
+{$PRODUCTION_HOST}, driver.{$PRODUCTION_HOST} {
+	{$CADDY_TLS}
+	reverse_proxy gateway-production:80
+}
+
+{$STAGING_HOST}, driver.{$STAGING_HOST} {
+	{$CADDY_TLS}
+	reverse_proxy gateway-staging:80
+}
