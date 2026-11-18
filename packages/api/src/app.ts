@@ -962,8 +962,8 @@ export type LiveStop = {
 export type LiveLastMarca = {
   id: number;
   kind: string;
-  latitude: number;
-  longitude: number;
+  latitude: number | null;
+  longitude: number | null;
   phoneTime: string;
   phoneTimeHhmi: string;
 };
@@ -975,7 +975,7 @@ export type LiveNextStop = {
   passengerName: string;
   placeName: string;
   plannedTime: string;
-  eta: string;
+  eta: string | null;
 };
 
 export type LiveRoute = {
@@ -1099,8 +1099,12 @@ async function loadLiveDailyPlan(client: Queryable, router: Router | undefined, 
     const lastMarcaRow = markResult.rows[0];
     let lastMarca: LiveLastMarca | null = null;
     if (lastMarcaRow) {
-      const lat = lastMarcaRow.latitude !== null ? Number(lastMarcaRow.latitude) : rawStops[0]?.latitude ?? 0;
-      const lng = lastMarcaRow.longitude !== null ? Number(lastMarcaRow.longitude) : rawStops[0]?.longitude ?? 0;
+      const lat = lastMarcaRow.latitude !== null && lastMarcaRow.latitude !== undefined
+        ? Number(lastMarcaRow.latitude)
+        : null;
+      const lng = lastMarcaRow.longitude !== null && lastMarcaRow.longitude !== undefined
+        ? Number(lastMarcaRow.longitude)
+        : null;
       lastMarca = {
         id: Number(lastMarcaRow.id),
         kind: String(lastMarcaRow.kind),
@@ -1124,12 +1128,12 @@ async function loadLiveDailyPlan(client: Queryable, router: Router | undefined, 
           passengerName: remainingStops[0].passengerName,
           placeName: remainingStops[0].placeName,
           plannedTime: remainingStops[0].plannedTime,
-          eta: remainingStops[0].plannedTime,
+          eta: null,
         };
       }
     } else {
       if (remainingStops.length > 0) {
-        if (router) {
+        if (lastMarca.latitude !== null && lastMarca.longitude !== null && router) {
           try {
             const points = [
               { lat: lastMarca.latitude, lng: lastMarca.longitude },
@@ -1146,12 +1150,12 @@ async function loadLiveDailyPlan(client: Queryable, router: Router | undefined, 
             }
           } catch {
             for (const stop of remainingStops) {
-              stop.eta = stop.plannedTime;
+              stop.eta = null;
             }
           }
         } else {
           for (const stop of remainingStops) {
-            stop.eta = stop.plannedTime;
+            stop.eta = null;
           }
         }
         nextStop = {
@@ -1161,7 +1165,7 @@ async function loadLiveDailyPlan(client: Queryable, router: Router | undefined, 
           passengerName: remainingStops[0].passengerName,
           placeName: remainingStops[0].placeName,
           plannedTime: remainingStops[0].plannedTime,
-          eta: remainingStops[0].eta ?? remainingStops[0].plannedTime,
+          eta: remainingStops[0].eta,
         };
       }
     }
