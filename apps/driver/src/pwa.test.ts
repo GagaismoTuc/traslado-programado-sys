@@ -154,4 +154,37 @@ describe("driver app PWA shell", () => {
     expect(navigatedTo).toBe("/?routeId=99");
     expect(focused).toBe(true);
   });
+
+  it("waits for client.navigate() to settle inside notificationclick waitUntil", async () => {
+    let resolveNavigation: () => void = () => {};
+    const navigationPromise = new Promise<void>((resolve) => {
+      resolveNavigation = resolve;
+    });
+    let settled = false;
+    const client = {
+      navigate: () => navigationPromise,
+      focus: async () => client,
+    };
+    const handlers: Record<string, Handler> = {};
+    const self = {
+      location: { origin: "https://chofer.example" },
+      addEventListener: (type: string, handler: Handler) => { handlers[type] = handler; },
+      clients: { matchAll: async () => [client] },
+      registration: { showNotification: async () => undefined },
+    };
+    new Function("self", "caches", "fetch", serviceWorkerSource([], "v1"))(self, {}, async () => "network");
+
+    let pending: Promise<unknown> = Promise.resolve();
+    handlers.notificationclick({
+      notification: { data: { url: "/?routeId=42" }, close() {} },
+      waitUntil: (promise: Promise<unknown>) => { pending = promise; },
+    });
+
+    pending.then(() => { settled = true; });
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    expect(settled).toBe(false);
+    resolveNavigation();
+    await pending;
+    expect(settled).toBe(true);
+  });
 });

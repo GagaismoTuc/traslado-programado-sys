@@ -2408,6 +2408,7 @@ export function createApp({ db, routing, router, geocoder, solver, travelTime, p
           publicKey: config.vapid.publicKey,
           privateKey: config.vapid.privateKey,
         },
+        timeout: 4000,
       },
     );
   });
@@ -2897,7 +2898,7 @@ export function createApp({ db, routing, router, geocoder, solver, travelTime, p
     });
     const [version] = await loadPlanVersions(db, "pv.route_id = $1 AND pv.version = $2", [routeId, published.version]);
     if (published.created && published.driverId) {
-      await sendPushNudge(Number(published.driverId), routeId, published.version).catch(() => undefined);
+      void sendPushNudge(Number(published.driverId), routeId, published.version).catch(() => undefined);
     }
     return { created: published.created, version };
   }

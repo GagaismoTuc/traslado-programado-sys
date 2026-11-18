@@ -20,10 +20,13 @@ const fakeVapid = {
 };
 
 const sentNotifications: Array<{ subscription: PushSubscriptionData; payload: string }> = [];
-let pushSenderFailMode: "none" | "throw_410" | "throw_error" | "status_410" = "none";
+let pushSenderFailMode: "none" | "throw_410" | "throw_error" | "status_410" | "hang" = "none";
 
 const pushSender: PushSender = async (subscription, payload) => {
   sentNotifications.push({ subscription, payload });
+  if (pushSenderFailMode === "hang") {
+    await new Promise(() => {});
+  }
   if (pushSenderFailMode === "throw_410") {
     const error: any = new Error("Subscription expired");
     error.statusCode = 410;
@@ -249,6 +252,54 @@ describe("push nudge on new versions", () => {
       "SELECT id FROM push_subscriptions WHERE endpoint = 'https://push.example.com/sub/reset'",
     );
     expect(afterReset.rows).toHaveLength(0);
+
+    // 3. Disabling an account revokes sessions and deletes subscriptions
+    const { cookie: driver3Cookie, userId: user3Id } = await loginDriver("driver-disable");
+    await request("/push/subscriptions", "POST", {
+      endpoint: "https://push.example.com/sub/disable",
+      keys: { p256dh: "p256", auth: "auth" },
+    }, driver3Cookie);
+    const beforeDisable = await migrationPool.query(
+      "SELECT id FROM push_subscriptions WHERE endpoint = 'https://push.example.com/sub/disable'",
+    );
+    expect(beforeDisable.rows).toHaveLength(1);
+    await request(`/users/${user3Id}/disable`, "PATCH", {}, officeCookie);
+    const afterDisable = await migrationPool.query(
+      "SELECT id FROM push_subscriptions WHERE endpoint = 'https://push.example.com/sub/disable'",
+    );
+    expect(afterDisable.rows).toHaveLength(0);
+
+    // 4. Revoking a specific device/session deletes its subscription
+    const { cookie: driver4Cookie, userId: user4Id } = await loginDriver("driver-session-revoke");
+    await request("/push/subscriptions", "POST", {
+      endpoint: "https://push.example.com/sub/session-revoke",
+      keys: { p256dh: "p256", auth: "auth" },
+    }, driver4Cookie);
+    const sessionRes = await migrationPool.query(
+      "SELECT ps.session_id FROM push_subscriptions ps WHERE ps.endpoint = 'https://push.example.com/sub/session-revoke'",
+    );
+    expect(sessionRes.rows).toHaveLength(1);
+    const sessionId = sessionRes.rows[0].session_id;
+    await request(`/users/${user4Id}/sessions/${sessionId}`, "DELETE", undefined, officeCookie);
+    const afterSessionRevoke = await migrationPool.query(
+      "SELECT id FROM push_subscriptions WHERE endpoint = 'https://push.example.com/sub/session-revoke'",
+    );
+    expect(afterSessionRevoke.rows).toHaveLength(0);
+
+    // 5. Break glass office resets sessions and deletes push subscriptions
+    const bgOfficeId = await seedUser("office-bg", "office");
+    await signInOffice(app, migrationPool, "office-bg", "office-bg-password", "Office BG PC");
+    const bgSession = (await migrationPool.query("SELECT id FROM sessions WHERE user_id = $1", [bgOfficeId])).rows[0].id;
+    await migrationPool.query(
+      "INSERT INTO push_subscriptions (session_id, endpoint, p256dh, auth) VALUES ($1, $2, $3, $4)",
+      [bgSession, "https://push.example.com/sub/break-glass", "p256", "auth"],
+    );
+    const { runBreakGlassOffice } = await import("../src/break-glass-office.js");
+    await runBreakGlassOffice(migrationPool, ["office-bg"], { BREAK_GLASS_OFFICE_PASSWORD: "new-office-bg-password" });
+    const afterBreakGlass = await migrationPool.query(
+      "SELECT id FROM push_subscriptions WHERE endpoint = 'https://push.example.com/sub/break-glass'",
+    );
+    expect(afterBreakGlass.rows).toHaveLength(0);
   });
 
   it("delivers push nudge when publishing a new plan version", async () => {
@@ -316,5 +367,28 @@ describe("push nudge on new versions", () => {
     // Publication still succeeds!
     const publish2Res = await publish(routeId, { reason: "Nueva versión forzada" });
     expect(publish2Res.status).toBe(201);
+  });
+
+  it("AC4: a push service that never answers does not hold the publication", async () => {
+    const { vehicle, driverWithUser, passenger, route, transfer, publish } = await setup("pushhang");
+    const vehicleId = await vehicle();
+    const { driverId, driverCookie } = await driverWithUser(vehicleId);
+    const routeId = await route(driverId, "07:00", "09:00");
+    await transfer(await passenger(), "08:00", routeId);
+
+    // Subscribe driver's device
+    await request("/push/subscriptions", "POST", {
+      endpoint: "https://push.example.com/driver-hang",
+      keys: { p256dh: "p256dh", auth: "auth" },
+    }, driverCookie);
+
+    // Make custom pushSender hang forever
+    pushSenderFailMode = "hang";
+    const publishPromise = publish(routeId);
+    const outcome = await Promise.race([
+      publishPromise.then((r) => r.status),
+      new Promise((resolve) => setTimeout(() => resolve("still waiting after 3 s"), 3000)),
+    ]);
+    expect(outcome).toBe(201);
   });
 });

@@ -64,16 +64,17 @@ self.addEventListener("notificationclick", (event) => {
     self.clients.matchAll({ type: "window", includeUncontrolled: true }).then((windowClients) => {
       for (const client of windowClients) {
         if ("focus" in client) {
+          const focusPromise = Promise.resolve(client.focus()).catch(() => client);
           if ("navigate" in client && urlToOpen) {
-            client.navigate(urlToOpen);
+            return focusPromise.then(() => client.navigate(urlToOpen)).catch(() => client);
           }
-          return client.focus();
+          return focusPromise;
         }
       }
       if (self.clients.openWindow) {
-        return self.clients.openWindow(urlToOpen);
+        return self.clients.openWindow(urlToOpen).catch(() => undefined);
       }
-    })
+    }).catch(() => undefined)
   );
 });
 `;
