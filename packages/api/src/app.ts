@@ -1128,7 +1128,7 @@ async function loadLiveDailyPlan(client: Queryable, router: Router | undefined, 
           passengerName: remainingStops[0].passengerName,
           placeName: remainingStops[0].placeName,
           plannedTime: remainingStops[0].plannedTime,
-          eta: remainingStops[0].plannedTime,
+          eta: null,
         };
       }
     } else {

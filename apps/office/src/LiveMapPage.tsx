@@ -175,14 +175,24 @@ export function LiveMapPage({ initialData }: { initialData?: LiveDailyPlan } = {
                       </span>
                     </div>
                     <div>
-                      <strong>ETA:</strong>{" "}
-                      <span data-testid={`route-eta-${route.id}`} style={{ fontWeight: 600, color: route.lastMarca && route.nextStop?.eta ? "#0d6efd" : "inherit" }}>
-                        {route.nextStop
-                          ? route.lastMarca
-                            ? route.nextStop.eta ?? "No disponible"
-                            : `${route.nextStop.plannedTime} (planificada)`
-                          : "-"}
-                      </span>
+                      {route.lastMarca ? (
+                        <>
+                          <strong>ETA:</strong>{" "}
+                          <span
+                            data-testid={`route-eta-${route.id}`}
+                            style={{ fontWeight: 600, color: route.nextStop?.eta ? "#0d6efd" : "inherit" }}
+                          >
+                            {route.nextStop ? (route.nextStop.eta ?? "No disponible") : "-"}
+                          </span>
+                        </>
+                      ) : (
+                        <>
+                          <strong>Hora planificada:</strong>{" "}
+                          <span data-testid={`route-eta-${route.id}`}>
+                            {route.nextStop ? route.nextStop.plannedTime : "-"}
+                          </span>
+                        </>
+                      )}
                     </div>
                     {route.lastMarca && (
                       <div style={{ color: "#495057", fontSize: "13px", marginTop: "4px" }}>
