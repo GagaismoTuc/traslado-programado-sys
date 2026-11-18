@@ -1,6 +1,6 @@
 import { renderToStaticMarkup } from "react-dom/server";
 import { describe, expect, it } from "vitest";
-import { weekdayName } from "./PlanPage";
+import { PlanPage, weekdayName } from "./PlanPage";
 
 describe("Copy the last same weekday", () => {
   it("computes the weekday name from a YYYY-MM-DD date", () => {
@@ -19,36 +19,63 @@ describe("Copy the last same weekday", () => {
     expect(`Copy from last ${weekdayName("2026-11-13")}`).toBe("Copy from last Friday");
   });
 
-  it("renders Copy from last <weekday> button when the plan is empty or missing", () => {
-    const missing = true;
-    const day = null;
-    const date = "2026-11-09";
-    const isEmpty = missing || (day && (day as { transfers: unknown[] }).transfers.length === 0);
-
+  it("renders Copy from last <weekday> button when the plan is missing (inexistente)", () => {
     const markup = renderToStaticMarkup(
-      <div>
-        {missing && <button type="button">Create plan</button>}
-        {isEmpty && <button type="button">{`Copy from last ${weekdayName(date)}`}</button>}
-      </div>,
+      <PlanPage initialDate="2026-11-09" initialView={{ date: "2026-11-09", day: null, missing: true }} />,
     );
 
     expect(markup).toContain("Create plan");
     expect(markup).toContain("Copy from last Monday");
   });
 
-  it("does not offer Copy from last <weekday> when the plan already has transfers", () => {
-    const missing = false;
-    const day = { transfers: [{ id: 1 }] };
-    const date = "2026-11-09";
-    const isEmpty = missing || (day && day.transfers.length === 0);
-
+  it("renders Copy from last <weekday> button when the plan is empty (0 transfers)", () => {
+    const emptyDay = {
+      plan: { id: 1, date: "2026-11-09", timeZone: "America/Argentina/Tucuman" },
+      transfers: [],
+      routes: [],
+      unpublishedTransferIds: [],
+      km: 0,
+    };
     const markup = renderToStaticMarkup(
-      <div>
-        {isEmpty && <button type="button">{`Copy from last ${weekdayName(date)}`}</button>}
-      </div>,
+      <PlanPage initialDate="2026-11-09" initialView={{ date: "2026-11-09", day: emptyDay as any, missing: false }} />,
     );
 
-    expect(markup).toBe("<div></div>");
+    expect(markup).not.toContain("Create plan");
+    expect(markup).toContain("Copy from last Monday");
+  });
+
+  it("does not offer Copy from last <weekday> when the plan already has transfers", () => {
+    const dayWithTransfers = {
+      plan: { id: 1, date: "2026-11-09", timeZone: "America/Argentina/Tucuman" },
+      unpublishedTransferIds: [],
+      transfers: [
+        {
+          id: 1,
+          passengerId: 10,
+          passengerName: "Pasajero Sintético",
+          direction: "entrada",
+          destinationId: 2,
+          destinationName: "Escuela",
+          originDestinationId: null,
+          originDestinationName: null,
+          targetTime: "08:00",
+          exitTime: null,
+          companions: 0,
+          status: "planificado",
+          routeId: null,
+          chainedFromTransferId: null,
+          chainedToTransferId: null,
+          trasbordo: null,
+        },
+      ],
+      routes: [],
+      km: 0,
+    };
+
+    const markup = renderToStaticMarkup(
+      <PlanPage initialDate="2026-11-09" initialView={{ date: "2026-11-09", day: dayWithTransfers as any, missing: false }} />,
+    );
+
     expect(markup).not.toContain("Copy from last Monday");
   });
 });

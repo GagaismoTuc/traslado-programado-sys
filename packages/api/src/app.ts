@@ -969,14 +969,12 @@ async function copyFromLastWeekday(client: Queryable, actorId: number, targetDat
 
   for (const date of candidateDates) {
     const res = await client.query(
-      `SELECT dp.id, to_char(dp.plan_date, 'YYYY-MM-DD') AS date,
-              (SELECT count(*)::int FROM transfers t WHERE t.daily_plan_id = dp.id) AS transfer_count,
-              (SELECT count(*)::int FROM routes r WHERE r.daily_plan_id = dp.id) AS route_count
+      `SELECT dp.id, to_char(dp.plan_date, 'YYYY-MM-DD') AS date
          FROM daily_plans dp
         WHERE dp.plan_date = $1`,
       [date],
     ) as QueryResult;
-    if (res.rows[0] && (Number(res.rows[0].transfer_count) > 0 || Number(res.rows[0].route_count) > 0)) {
+    if (res.rows[0]) {
       sourcePlan = { id: Number(res.rows[0].id), date: String(res.rows[0].date) };
       break;
     }

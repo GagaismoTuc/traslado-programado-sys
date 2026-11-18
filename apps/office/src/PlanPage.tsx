@@ -243,10 +243,15 @@ export function MissingAcknowledgements({ missing }: { missing: MissingAcknowled
   </section>;
 }
 
-export function PlanPage() {
-  const [date, setDate] = useState(todayInPlanZone);
+export function PlanPage({ initialDate, initialView }: {
+  initialDate?: string;
+  initialView?: { date: string; day: Day | null; missing: boolean; unacknowledged?: MissingAcknowledgement[] };
+} = {}) {
+  const [date, setDate] = useState(() => initialDate ?? todayInPlanZone());
   // The loaded view remembers its date, so a day is shown and mutable only while that date is selected.
-  const [view, setView] = useState<{ date: string; day: Day | null; missing: boolean; unacknowledged: MissingAcknowledgement[] } | null>(null);
+  const [view, setView] = useState<{ date: string; day: Day | null; missing: boolean; unacknowledged: MissingAcknowledgement[] } | null>(() => (
+    initialView ? { unacknowledged: [], ...initialView } : null
+  ));
   const [passengers, setPassengers] = useState<PassengerOption[]>([]);
   const [destinations, setDestinations] = useState<Option[]>([]);
   const [drivers, setDrivers] = useState<DriverOption[]>([]);

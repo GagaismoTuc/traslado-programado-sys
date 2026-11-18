@@ -536,10 +536,33 @@ describe("Plan diario by hand", () => {
     expect(conflictRes.status).toBe(409);
     expect((await conflictRes.json()).error).toBe("Copying into a day that already has Traslados is refused");
 
+    // Change log records created and assigned entities during copy
+    const changes = (await migrationPool.query(
+      "SELECT entity, action FROM change_log WHERE entity IN ('daily_plan', 'route', 'transfer') ORDER BY id",
+    )).rows;
+    expect(changes.some((c: { entity: string; action: string }) => c.entity === "daily_plan" && c.action === "created")).toBe(true);
+    expect(changes.some((c: { entity: string; action: string }) => c.entity === "route" && c.action === "created")).toBe(true);
+    expect(changes.some((c: { entity: string; action: string }) => c.entity === "transfer" && c.action === "created")).toBe(true);
+    expect(changes.some((c: { entity: string; action: string }) => c.entity === "transfer" && c.action === "assigned")).toBe(true);
+
+    // Empty plan on previous week is not skipped for an older non-empty plan
+    await created(request("/daily-plans", "POST", { date: "2026-11-30" }, office), 201);
+    const emptyCopyRes = await created(request("/daily-plans/2026-12-07/copy-last-weekday", "POST", undefined, office), 201);
+    expect(emptyCopyRes.copiedFromDate).toBe("2026-11-30");
+    expect(emptyCopyRes.day.transfers).toHaveLength(0);
+
     // Fallback: 2 weeks back when 1 week back has no plan
     // Target 2026-11-23 (no plan on 2026-11-16, plan on 2026-11-09)
     const fallbackRes = await created(request("/daily-plans/2026-11-23/copy-last-weekday", "POST", undefined, office), 201);
     expect(fallbackRes.copiedFromDate).toBe("2026-11-09");
+
+    // Fallback: 4 weeks back (28 days) succeeds when weeks 1, 2, 3 have no plan
+    const fourWeeksRes = await created(request("/daily-plans/2027-01-04/copy-last-weekday", "POST", undefined, office), 201);
+    expect(fourWeeksRes.copiedFromDate).toBe("2026-12-07");
+
+    // Limit: 5 weeks back (35 days) exceeds the 4-week window and returns 404
+    const fiveWeeksRes = await request("/daily-plans/2027-02-15/copy-last-weekday", "POST", undefined, office);
+    expect(fiveWeeksRes.status).toBe(404);
 
     // 404 when no plan found in the last 4 weeks (e.g. on a Sunday 2026-11-15)
     const notFoundRes = await request("/daily-plans/2026-11-15/copy-last-weekday", "POST", undefined, office);
