@@ -505,7 +505,7 @@ describe("Publication and Versiones del plan", () => {
   });
 
   it("prints or exports the Plan diario with the latest published versions and refuses while any Traslado lacks a published Recorrido", async () => {
-    const { vehicle, driver, passenger, route, transfer, publish, office } = await setup("print");
+    const { vehicle, driver, passenger, route, transfer, publish, office, day } = await setup("print");
     const vehicleId = await vehicle();
     const driverId = await driver(vehicleId);
     const publishedRoute = await route(driverId, "07:00", "09:00");
@@ -530,7 +530,8 @@ describe("Publication and Versiones del plan", () => {
     expect(body1.unpublishedTransfers.map((t) => t.id)).toEqual([served, inDraft]);
 
     // Publish publishedRoute; inDraft remains unpublished
-    await ok(publish(publishedRoute));
+    const pub1 = await ok(publish(publishedRoute)) as { version: { publishedAt: string; version: number } };
+    expect(pub1.version.version).toBe(1);
     const refused2 = await request(`/daily-plans/${DAY}/print`, "GET", undefined, office);
     expect(refused2.status).toBe(409);
     const body2 = await refused2.json() as { unpublishedTransfers: { id: number }[] };
@@ -570,7 +571,8 @@ describe("Publication and Versiones del plan", () => {
     const r1 = result.routes[0];
     expect(r1.routeId).toBe(publishedRoute);
     expect(r1.version).toBe(1);
-    expect(typeof r1.publishedAt).toBe("string");
+    expect(r1.publishedAt).toBe(pub1.version.publishedAt);
+    expect(Number.isNaN(Date.parse(r1.publishedAt))).toBe(false);
     expect(r1.driver.name).toContain("chofer-print");
     expect(r1.vehicle.plate).toBeDefined();
     expect(r1.stops).toHaveLength(2); // pickup + dropoff
@@ -585,6 +587,35 @@ describe("Publication and Versiones del plan", () => {
     expect(pickup.medicalAlert).toBe("Alerta sintética");
     expect(pickup.accessNotes).toContain("Timbre blanco");
     expect(pickup.destinationName).toContain("Escuela print");
+
+    // Publish a second, distinct version of publishedRoute with an additional transfer
+    const secondPassenger = await passenger({ name: "Segundo Pasajero" });
+    await transfer(secondPassenger, "08:30", publishedRoute);
+    const pub2 = await ok(publish(publishedRoute)) as { version: { publishedAt: string; version: number } };
+    expect(pub2.version.version).toBe(2);
+    expect(pub2.version.publishedAt).toBeDefined();
+
+    // Modify the draft route afterward (change driver and vehicle in Borrador)
+    const newVehicle = await vehicle();
+    const newDriver = await driver(newVehicle);
+    await ok(request(`/routes/${publishedRoute}`, "PATCH", { driverId: newDriver, vehicleId: newVehicle }, office), 200);
+
+    // Verify draft now has newDriver in the daily plan draft
+    const dayData = await day();
+    const draftRouteState = dayData.routes.find((r: { id: number }) => r.id === publishedRoute);
+    expect(draftRouteState.driverId).toBe(newDriver);
+
+    // Regla 1: Print must contain EXCLUSIVELY the latest published version (version 2),
+    // ignoring both version 1 and subsequent Borrador modifications
+    const allowedV2 = await request(`/daily-plans/${DAY}/print`, "GET", undefined, office);
+    expect(allowedV2.status).toBe(200);
+    const resultV2 = await allowedV2.json() as typeof result;
+    const r1V2 = resultV2.routes.find((r) => r.routeId === publishedRoute)!;
+    expect(r1V2.version).toBe(2);
+    expect(r1V2.publishedAt).toBe(pub2.version.publishedAt);
+    expect(r1V2.driver.name).toContain("chofer-print"); // From v2, not newDriver from Borrador
+    expect(r1V2.stops).toHaveLength(4); // 2 pickups, 2 dropoffs from v2 (not the 2 from v1)
+    expect(new Set(r1V2.stops.map((s) => s.passengerName))).toEqual(new Set(["Pasajero Con Alerta", "Segundo Pasajero"]));
   });
 
   it("lets only the Oficina publish and read Versiones del plan", async () => {

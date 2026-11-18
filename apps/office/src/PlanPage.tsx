@@ -238,7 +238,13 @@ export function MissingAcknowledgements({ missing }: { missing: MissingAcknowled
 }
 
 export function PlanPage() {
-  const [date, setDate] = useState(todayInPlanZone);
+  const [date, setDate] = useState(() => {
+    if (typeof window !== "undefined") {
+      const q = new URLSearchParams(window.location.search).get("date");
+      if (q && /^\d{4}-\d{2}-\d{2}$/.test(q)) return q;
+    }
+    return todayInPlanZone();
+  });
   // The loaded view remembers its date, so a day is shown and mutable only while that date is selected.
   const [view, setView] = useState<{ date: string; day: Day | null; missing: boolean; unacknowledged: MissingAcknowledgement[] } | null>(null);
   const [passengers, setPassengers] = useState<PassengerOption[]>([]);

@@ -1,12 +1,18 @@
 import { renderToStaticMarkup } from "react-dom/server";
-import { describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import {
   PrintPlanView,
   PrintRefusal,
   PrintRouteSheet,
+  formatPublicationTime,
   type PrintRoute,
   type UnpublishedTransfer,
 } from "./PrintPlanPage";
+import { PlanPage } from "./PlanPage";
+
+afterEach(() => {
+  vi.unstubAllGlobals();
+});
 
 // Synthetic test data only.
 const sampleRoute: PrintRoute = {
@@ -114,7 +120,10 @@ describe("Print / export Plan diario", () => {
     expect(markup).toContain("AF123ZZ");
     expect(markup).toContain("Furgón Sintético");
     expect(markup).toContain("Versión:</strong> 3");
-    expect(markup).toContain("Publicado:");
+    const formatted = formatPublicationTime(sampleRoute.publishedAt, "America/Argentina/Tucuman");
+    expect(formatted).toContain("17:30");
+    expect(formatted).toContain("01/11/2026");
+    expect(markup).toContain(`(Publicado: ${formatted})`);
 
     // Ordered stops with planned times, Pasajeros, Acompañante, wheelchair, access notes, medical alert, Destino
     expect(markup).toContain("Pasajero Sintético 1");
@@ -161,5 +170,43 @@ describe("Print / export Plan diario", () => {
     expect(markup).toContain("Export to PDF / Print");
     expect(markup).toContain("data-testid=\"print-route-10\"");
     expect(markup).toContain("data-testid=\"print-route-11\"");
+  });
+
+  it("activates browser print when clicking the Export to PDF / Print button", () => {
+    const printMock = vi.fn();
+    vi.stubGlobal("window", { print: printMock });
+
+    const view = PrintPlanView({
+      plan: { date: "2026-11-02", timeZone: "America/Argentina/Tucuman" },
+      routes: [sampleRoute],
+    });
+
+    const toolbar = view.props.children[0];
+    const button = toolbar.props.children[0];
+    expect(button.props.children).toBe("Export to PDF / Print");
+
+    button.props.onClick();
+    expect(printMock).toHaveBeenCalledTimes(1);
+
+    const customPrint = vi.fn();
+    const customView = PrintPlanView({
+      plan: { date: "2026-11-02", timeZone: "America/Argentina/Tucuman" },
+      routes: [sampleRoute],
+      onPrint: customPrint,
+    });
+    const customButton = customView.props.children[0].props.children[0];
+    customButton.props.onClick();
+    expect(customPrint).toHaveBeenCalledTimes(1);
+  });
+
+  it("navigates back to PlanPage preserving a date parameter different from today", () => {
+    vi.stubGlobal("window", {
+      location: {
+        search: "?date=2026-11-15",
+      },
+    });
+
+    const markup = renderToStaticMarkup(<PlanPage />);
+    expect(markup).toContain('value="2026-11-15"');
   });
 });
