@@ -42,6 +42,18 @@ export const rememberedDevices = pgTable("remembered_devices", {
   expiresAt: timestamp("expires_at", { withTimezone: true, mode: "string" }).notNull(),
 });
 
+export const pushSubscriptions = pgTable("push_subscriptions", {
+  id: integer().generatedAlwaysAsIdentity().primaryKey(),
+  sessionId: integer("session_id").notNull().references(() => sessions.id, { onDelete: "cascade" }),
+  endpoint: text().notNull(),
+  p256dh: text().notNull(),
+  auth: text().notNull(),
+  createdAt: timestamp("created_at", { withTimezone: true, mode: "string" }).defaultNow().notNull(),
+}, (table) => [
+  uniqueIndex("push_subscriptions_endpoint_unique").on(table.endpoint),
+  index("push_subscriptions_session_id_idx").on(table.sessionId),
+]);
+
 export const changeLog = pgTable("change_log", {
   id: integer().generatedAlwaysAsIdentity().primaryKey(),
   actorUserId: integer("actor_user_id").references(() => users.id, { onDelete: "restrict" }),

@@ -41,5 +41,41 @@ self.addEventListener("fetch", (event) => {
   if (!APP_FILES.includes(path)) return;
   event.respondWith(caches.open(CACHE).then((cache) => cache.match(path)).then((cached) => cached || fetch(event.request)));
 });
+self.addEventListener("push", (event) => {
+  let data = {};
+  try { data = event.data ? event.data.json() : {}; } catch { data = {}; }
+  const title = data.title || "Nueva versión del plan";
+  const options = {
+    body: data.body || "Se publicó una nueva versión de tu recorrido.",
+    icon: "/icon-192.png",
+    badge: "/icon-192.png",
+    data: {
+      url: data.url || "/",
+      routeId: data.routeId,
+      version: data.version,
+    },
+  };
+  event.waitUntil(self.registration.showNotification(title, options));
+});
+self.addEventListener("notificationclick", (event) => {
+  event.notification.close();
+  const urlToOpen = (event.notification.data && event.notification.data.url) ? event.notification.data.url : "/";
+  event.waitUntil(
+    self.clients.matchAll({ type: "window", includeUncontrolled: true }).then((windowClients) => {
+      for (const client of windowClients) {
+        if ("focus" in client) {
+          const focusPromise = Promise.resolve(client.focus()).catch(() => client);
+          if ("navigate" in client && urlToOpen) {
+            return focusPromise.then(() => client.navigate(urlToOpen)).catch(() => client);
+          }
+          return focusPromise;
+        }
+      }
+      if (self.clients.openWindow) {
+        return self.clients.openWindow(urlToOpen).catch(() => undefined);
+      }
+    }).catch(() => undefined)
+  );
+});
 `;
 }
