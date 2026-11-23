@@ -2,6 +2,7 @@ import { createHash, randomBytes, randomUUID } from "node:crypto";
 import { getCookie, deleteCookie, setCookie } from "hono/cookie";
 import { getConnInfo } from "@hono/node-server/conninfo";
 import { Hono, type Context } from "hono";
+import webpush from "web-push";
 import {
   TRASBORDO_WINDOW_MINUTES, validateRoute, type RouteViolation, type ServerEpoch, type Stop as ValidatorStop, type Transfer as ValidatorTransfer,
 } from "@traslado/shared";
@@ -51,7 +52,27 @@ export type AppConfig = {
   planner?: PlannerSettings;
   // Where company staff receive a Pasajero nobody else can receive (`inferido`); null when not configured.
   baseAddress?: string | null;
+  vapid?: {
+    publicKey: string;
+    privateKey: string;
+    subject: string;
+  } | null;
 };
+
+export type PushSubscriptionKeys = {
+  p256dh: string;
+  auth: string;
+};
+
+export type PushSubscriptionData = {
+  endpoint: string;
+  keys: PushSubscriptionKeys;
+};
+
+export type PushSender = (
+  subscription: PushSubscriptionData,
+  payload: string,
+) => Promise<{ statusCode?: number } | void>;
 
 type UserRow = {
   id: number;
@@ -931,6 +952,399 @@ async function loadDailyPlan(client: Queryable, date: string) {
   };
 }
 
+function addDays(dateStr: string, days: number): string {
+  const [year, month, day] = dateStr.split("-").map(Number);
+  const d = new Date(Date.UTC(year, month - 1, day));
+  d.setUTCDate(d.getUTCDate() + days);
+  return d.toISOString().slice(0, 10);
+}
+
+async function copyFromLastWeekday(client: Queryable, actorId: number, targetDate: string) {
+  const existingTarget = await client.query(
+    "SELECT id FROM daily_plans WHERE plan_date = $1",
+    [targetDate],
+  ) as QueryResult;
+  let targetPlanId: number;
+
+  if (existingTarget.rows[0]) {
+    targetPlanId = Number(existingTarget.rows[0].id);
+    const existingTransfers = await client.query(
+      "SELECT 1 FROM transfers WHERE daily_plan_id = $1 LIMIT 1",
+      [targetPlanId],
+    ) as QueryResult;
+    if (existingTransfers.rows[0]) {
+      throw new PlanningError(409, "Copying into a day that already has Traslados is refused");
+    }
+  } else {
+    const inserted = await client.query(
+      "INSERT INTO daily_plans (plan_date) VALUES ($1) RETURNING id",
+      [targetDate],
+    ) as QueryResult;
+    targetPlanId = Number(inserted.rows[0].id);
+    await appendChange(client, actorId, "daily_plan", String(targetPlanId), "created", null, { date: targetDate });
+  }
+
+  // Find the last same weekday with a plan (up to 4 weeks back)
+  const candidateDates = [-7, -14, -21, -28].map((days) => addDays(targetDate, days));
+  let sourcePlan: { id: number; date: string } | null = null;
+
+  for (const date of candidateDates) {
+    const res = await client.query(
+      `SELECT dp.id, to_char(dp.plan_date, 'YYYY-MM-DD') AS date
+         FROM daily_plans dp
+        WHERE dp.plan_date = $1`,
+      [date],
+    ) as QueryResult;
+    if (res.rows[0]) {
+      sourcePlan = { id: Number(res.rows[0].id), date: String(res.rows[0].date) };
+      break;
+    }
+  }
+
+  if (!sourcePlan) {
+    throw new PlanningError(404, "No plan found on the last same weekdays");
+  }
+
+  const sourcePlanId = sourcePlan.id;
+  const sourceDate = sourcePlan.date;
+
+  // Source transfers
+  const sourceTransfersRes = await client.query(
+    `SELECT t.id, t.passenger_id, t.direction, t.destination_id, t.origin_destination_id,
+            to_char(t.target_time, 'HH24:MI') AS target_time,
+            to_char(t.exit_time, 'HH24:MI') AS exit_time,
+            t.companions, t.chained_from_transfer_id, t.trasbordo_stop,
+            t.trasbordo_latitude, t.trasbordo_longitude,
+            to_char(t.trasbordo_time, 'HH24:MI') AS trasbordo_time,
+            p.name AS passenger_name, p.deactivated_at
+       FROM transfers t
+       JOIN passengers p ON p.id = t.passenger_id
+      WHERE t.daily_plan_id = $1
+      ORDER BY t.chained_from_transfer_id NULLS FIRST, t.id`,
+    [sourcePlanId],
+  ) as QueryResult;
+
+  const deactivatedPassengersMap = new Map<number, string>();
+  for (const row of sourceTransfersRes.rows) {
+    if (row.deactivated_at !== null) {
+      deactivatedPassengersMap.set(Number(row.passenger_id), String(row.passenger_name));
+    }
+  }
+  const skippedPassengers = Array.from(deactivatedPassengersMap.entries()).map(([id, name]) => ({ id, name }));
+
+  // Source routes
+  const sourceRoutesRes = await client.query(
+    `SELECT r.id, r.driver_id, r.vehicle_id,
+            to_char(r.start_time, 'HH24:MI') AS start_time,
+            to_char(r.end_time, 'HH24:MI') AS end_time,
+            r.start_kind, r.start_latitude, r.start_longitude, r.end_kind
+       FROM routes r
+      WHERE r.daily_plan_id = $1
+      ORDER BY r.id`,
+    [sourcePlanId],
+  ) as QueryResult;
+
+  // Source stops
+  const sourceStopsRes = await client.query(
+    `SELECT s.id, s.route_id, s.transfer_id, s.kind, s.position, s.leg_distance_meters,
+            to_char(s.planned_time, 'HH24:MI') AS planned_time
+       FROM stops s
+       JOIN routes r ON r.id = s.route_id
+      WHERE r.daily_plan_id = $1
+      ORDER BY s.route_id, s.position`,
+    [sourcePlanId],
+  ) as QueryResult;
+
+  // Copy routes (always Borrador, keeps driver and vehicle)
+  const oldRouteIdToNewRouteId = new Map<number, number>();
+  for (const route of sourceRoutesRes.rows) {
+    const inserted = await client.query(
+      `INSERT INTO routes (daily_plan_id, driver_id, vehicle_id, start_time, end_time, status, start_kind, start_latitude, start_longitude, end_kind)
+       VALUES ($1, $2, $3, $4, $5, 'borrador', $6, $7, $8, $9)
+       RETURNING id`,
+      [
+        targetPlanId,
+        route.driver_id,
+        route.vehicle_id,
+        route.start_time,
+        route.end_time,
+        route.start_kind,
+        route.start_latitude,
+        route.start_longitude,
+        route.end_kind,
+      ],
+    ) as QueryResult;
+    const newRouteId = Number(inserted.rows[0].id);
+    oldRouteIdToNewRouteId.set(Number(route.id), newRouteId);
+    await appendChange(client, actorId, "route", String(newRouteId), "created", null, {
+      dailyPlanId: targetPlanId,
+      driverId: Number(route.driver_id),
+      vehicleId: Number(route.vehicle_id),
+      startTime: String(route.start_time),
+      endTime: String(route.end_time),
+      status: "borrador",
+      startKind: route.start_kind,
+      startLatitude: route.start_latitude,
+      startLongitude: route.start_longitude,
+      endKind: route.end_kind,
+    });
+  }
+
+  // Copy active transfers (Ausencias are NOT copied -> status is 'planificado')
+  const oldTransferIdToNewTransferId = new Map<number, number>();
+  for (const transfer of sourceTransfersRes.rows) {
+    if (deactivatedPassengersMap.has(Number(transfer.passenger_id))) {
+      continue;
+    }
+    const chainedFrom = transfer.chained_from_transfer_id
+      ? oldTransferIdToNewTransferId.get(Number(transfer.chained_from_transfer_id)) ?? null
+      : null;
+
+    const inserted = await client.query(
+      `INSERT INTO transfers (
+        daily_plan_id, passenger_id, direction, destination_id, origin_destination_id,
+        target_time, exit_time, companions, status,
+        chained_from_transfer_id, trasbordo_stop, trasbordo_latitude, trasbordo_longitude, trasbordo_time
+      ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, 'planificado', $9, $10, $11, $12, $13)
+      RETURNING id`,
+      [
+        targetPlanId,
+        transfer.passenger_id,
+        transfer.direction,
+        transfer.destination_id,
+        transfer.origin_destination_id,
+        transfer.target_time,
+        transfer.exit_time,
+        transfer.companions,
+        chainedFrom,
+        transfer.trasbordo_stop,
+        transfer.trasbordo_latitude,
+        transfer.trasbordo_longitude,
+        transfer.trasbordo_time,
+      ],
+    ) as QueryResult;
+    const newTransferId = Number(inserted.rows[0].id);
+    oldTransferIdToNewTransferId.set(Number(transfer.id), newTransferId);
+    await appendChange(client, actorId, "transfer", String(newTransferId), "created", null, {
+      dailyPlanId: targetPlanId,
+      passengerId: Number(transfer.passenger_id),
+      direction: String(transfer.direction),
+      destinationId: Number(transfer.destination_id),
+      targetTime: String(transfer.target_time),
+      status: "planificado",
+    });
+  }
+
+  // Copy stops in order (skip stops of deactivated passengers)
+  for (const route of sourceRoutesRes.rows) {
+    const newRouteId = oldRouteIdToNewRouteId.get(Number(route.id))!;
+    const routeStops = sourceStopsRes.rows
+      .filter((s) => Number(s.route_id) === Number(route.id))
+      .filter((s) => oldTransferIdToNewTransferId.has(Number(s.transfer_id)));
+
+    for (let i = 0; i < routeStops.length; i++) {
+      const stop = routeStops[i];
+      const newTransferId = oldTransferIdToNewTransferId.get(Number(stop.transfer_id))!;
+      const newPosition = i + 1;
+
+      await client.query(
+        `INSERT INTO stops (route_id, transfer_id, kind, position, leg_distance_meters, planned_time)
+         VALUES ($1, $2, $3, $4, $5, $6)`,
+        [newRouteId, newTransferId, stop.kind, newPosition, stop.leg_distance_meters, stop.planned_time],
+      );
+
+      if (stop.kind === "pickup") {
+        await appendChange(client, actorId, "transfer", String(newTransferId), "assigned", { routeId: null }, { routeId: newRouteId });
+      }
+    }
+  }
+
+  // Log copy action on daily plan
+  await appendChange(client, actorId, "daily_plan", String(targetPlanId), "copied_from_weekday", null, {
+    fromDate: sourceDate,
+    skippedPassengers,
+  });
+
+  return {
+    copiedFromDate: sourceDate,
+    skippedPassengers,
+    day: await loadDailyPlan(client, targetDate),
+  };
+}
+
+async function loadDailyPlanPrint(client: Queryable, date: string) {
+  const planResult = await client.query(
+    "SELECT id, to_char(plan_date, 'YYYY-MM-DD') AS date, time_zone AS \"timeZone\" FROM daily_plans WHERE plan_date = $1",
+    [date],
+  ) as QueryResult;
+  const plan = planResult.rows[0];
+  if (!plan) return null;
+  const planId = Number(plan.id);
+
+  // A Traslado has a published Recorrido when the latest version of its current Recorrido serves it.
+  const unpublished = await client.query(
+    `SELECT t.id, t.direction, to_char(t.target_time, 'HH24:MI') AS target_time,
+            p.name AS passenger_name, d.name AS destination_name
+       FROM transfers t
+       JOIN passengers p ON p.id = t.passenger_id
+       JOIN destinations d ON d.id = t.destination_id
+       LEFT JOIN stops s ON s.transfer_id = t.id AND s.kind = 'pickup'
+      WHERE t.daily_plan_id = $1 AND t.status <> 'cancelado_ausencia'
+        AND NOT EXISTS (
+          SELECT 1 FROM plan_version_transfers pvt JOIN plan_versions pv ON pv.id = pvt.plan_version_id
+           WHERE pvt.transfer_id = t.id AND pv.route_id = s.route_id
+             AND pv.version = (SELECT max(version) FROM plan_versions latest WHERE latest.route_id = s.route_id))
+      ORDER BY t.target_time, t.id`,
+    [planId],
+  ) as QueryResult;
+
+  if (unpublished.rows.length > 0) {
+    return {
+      status: 409 as const,
+      error: "The Plan diario cannot be printed: some Traslados have no published Recorrido",
+      unpublishedTransfers: unpublished.rows.map((row) => ({
+        id: Number(row.id),
+        passengerName: String(row.passenger_name),
+        direction: String(row.direction),
+        destinationName: String(row.destination_name),
+        targetTime: String(row.target_time),
+        label: `${row.target_time} ${row.passenger_name}: ${row.direction} → ${row.destination_name}`,
+      })),
+    };
+  }
+
+  const versions = await client.query(
+    `SELECT DISTINCT ON (pv.route_id)
+            pv.id, pv.route_id AS "routeId", pv.version,
+            to_char(pv.start_time, 'HH24:MI') AS "startTime",
+            to_char(pv.end_time, 'HH24:MI') AS "endTime",
+            pv.published_at AS "publishedAt",
+            dr.id AS "driverId", dr.name AS "driverName",
+            v.id AS "vehicleId", v.plate AS "vehiclePlate", v.model AS "vehicleModel"
+       FROM plan_versions pv
+       JOIN routes r ON r.id = pv.route_id
+       JOIN daily_plans dp ON dp.id = r.daily_plan_id
+       JOIN drivers dr ON dr.id = pv.driver_id
+       JOIN vehicles v ON v.id = pv.vehicle_id
+      WHERE dp.id = $1
+      ORDER BY pv.route_id, pv.version DESC`,
+    [planId],
+  ) as QueryResult;
+
+  if (versions.rows.length === 0) {
+    return {
+      status: 200 as const,
+      data: {
+        plan: { date: String(plan.date), timeZone: String(plan.timeZone) },
+        routes: [],
+      },
+    };
+  }
+
+  const versionIds = versions.rows.map((row) => Number(row.id));
+  const legs = await client.query(
+    `SELECT l.plan_version_id, l.position, l.kind, to_char(l.planned_time, 'HH24:MI') AS planned_time, l.transfer_id, t.direction,
+            t.status, t.destination_id, t.origin_destination_id, pvt.companions, p.name, p.home_address, p.access_notes AS home_notes, p.wheelchair, p.medical_alert,
+            CASE WHEN l.kind = 'dropoff' AND nx.id IS NOT NULL THEN 'dropoff' ELSE t.trasbordo_stop END AS trasbordo_stop,
+            CASE WHEN l.kind = 'dropoff' AND nx.id IS NOT NULL THEN nx.trasbordo_latitude ELSE t.trasbordo_latitude END AS trasbordo_latitude,
+            CASE WHEN l.kind = 'dropoff' AND nx.id IS NOT NULL THEN nx.trasbordo_longitude ELSE t.trasbordo_longitude END AS trasbordo_longitude,
+            d.name AS d_name, d.address AS d_address, d.access_notes AS d_notes,
+            o.name AS o_name, o.address AS o_address, o.access_notes AS o_notes
+       FROM plan_version_legs l
+       JOIN plan_version_transfers pvt ON pvt.plan_version_id = l.plan_version_id AND pvt.transfer_id = l.transfer_id
+       JOIN transfers t ON t.id = l.transfer_id
+       JOIN passengers p ON p.id = t.passenger_id
+       JOIN destinations d ON d.id = t.destination_id
+       LEFT JOIN destinations o ON o.id = t.origin_destination_id
+       ${NEXT_LEG_JOIN_SQL}
+      WHERE l.plan_version_id = ANY($1::int[])
+      ORDER BY l.plan_version_id, l.position`,
+    [versionIds],
+  ) as QueryResult;
+
+  const sortedVersions = [...versions.rows].sort((a, b) => {
+    const timeCmp = String(a.startTime).localeCompare(String(b.startTime));
+    return timeCmp !== 0 ? timeCmp : Number(a.routeId) - Number(b.routeId);
+  });
+
+  const routes = sortedVersions.map((row) => {
+    const routeLegs = legs.rows.filter((l) => Number(l.plan_version_id) === Number(row.id));
+    const stops = routeLegs.map((leg) => {
+      const isTrasbordo = leg.trasbordo_stop === leg.kind;
+      const prefix = leg.kind === "pickup"
+        ? (leg.direction === "entrada" ? (leg.o_name === null ? null : "o") : "d")
+        : (leg.direction === "entrada" ? "d" : null);
+
+      const placeName = isTrasbordo
+        ? "Trasbordo"
+        : prefix === null
+        ? "Domicilio"
+        : String(leg[`${prefix}_name`]);
+
+      const address = isTrasbordo
+        ? `${leg.trasbordo_latitude}, ${leg.trasbordo_longitude}`
+        : prefix === null
+        ? String(leg.home_address)
+        : String(leg[`${prefix}_address`]);
+
+      const placeAccessNotes = isTrasbordo
+        ? null
+        : prefix === null
+        ? (leg.home_notes as string | null) ?? null
+        : (leg[`${prefix}_notes`] as string | null) ?? null;
+
+      const passengerAccessNotes = (leg.home_notes as string | null) ?? null;
+      const accessNotes = [placeAccessNotes, passengerAccessNotes !== placeAccessNotes ? passengerAccessNotes : null]
+        .filter(Boolean)
+        .join(" / ") || null;
+
+      return {
+        position: Number(leg.position),
+        kind: String(leg.kind) as "pickup" | "dropoff",
+        plannedTime: String(leg.planned_time),
+        transferId: Number(leg.transfer_id),
+        direction: String(leg.direction),
+        passengerName: String(leg.name),
+        companions: Number(leg.companions),
+        wheelchair: Boolean(leg.wheelchair),
+        medicalAlert: (leg.medical_alert as string | null) ?? null,
+        accessNotes,
+        passengerAccessNotes,
+        placeAccessNotes,
+        destinationName: String(leg.d_name),
+        placeName,
+        address,
+      };
+    });
+
+    return {
+      routeId: Number(row.routeId),
+      version: Number(row.version),
+      publishedAt: new Date(String(row.publishedAt)).toISOString(),
+      startTime: String(row.startTime),
+      endTime: String(row.endTime),
+      driver: {
+        id: Number(row.driverId),
+        name: String(row.driverName),
+      },
+      vehicle: {
+        id: Number(row.vehicleId),
+        plate: String(row.vehiclePlate),
+        model: String(row.vehicleModel),
+      },
+      stops,
+    };
+  });
+
+  return {
+    status: 200 as const,
+    data: {
+      plan: { date: String(plan.date), timeZone: String(plan.timeZone) },
+      routes,
+    },
+  };
+}
+
 export const ROUTE_COLORS = [
   "#2e5aa8",
   "#bf4520",
@@ -962,8 +1376,8 @@ export type LiveStop = {
 export type LiveLastMarca = {
   id: number;
   kind: string;
-  latitude: number;
-  longitude: number;
+  latitude: number | null;
+  longitude: number | null;
   phoneTime: string;
   phoneTimeHhmi: string;
 };
@@ -975,7 +1389,7 @@ export type LiveNextStop = {
   passengerName: string;
   placeName: string;
   plannedTime: string;
-  eta: string;
+  eta: string | null;
 };
 
 export type LiveRoute = {
@@ -1099,8 +1513,12 @@ async function loadLiveDailyPlan(client: Queryable, router: Router | undefined, 
     const lastMarcaRow = markResult.rows[0];
     let lastMarca: LiveLastMarca | null = null;
     if (lastMarcaRow) {
-      const lat = lastMarcaRow.latitude !== null ? Number(lastMarcaRow.latitude) : rawStops[0]?.latitude ?? 0;
-      const lng = lastMarcaRow.longitude !== null ? Number(lastMarcaRow.longitude) : rawStops[0]?.longitude ?? 0;
+      const lat = lastMarcaRow.latitude !== null && lastMarcaRow.latitude !== undefined
+        ? Number(lastMarcaRow.latitude)
+        : null;
+      const lng = lastMarcaRow.longitude !== null && lastMarcaRow.longitude !== undefined
+        ? Number(lastMarcaRow.longitude)
+        : null;
       lastMarca = {
         id: Number(lastMarcaRow.id),
         kind: String(lastMarcaRow.kind),
@@ -1124,12 +1542,12 @@ async function loadLiveDailyPlan(client: Queryable, router: Router | undefined, 
           passengerName: remainingStops[0].passengerName,
           placeName: remainingStops[0].placeName,
           plannedTime: remainingStops[0].plannedTime,
-          eta: remainingStops[0].plannedTime,
+          eta: null,
         };
       }
     } else {
       if (remainingStops.length > 0) {
-        if (router) {
+        if (lastMarca.latitude !== null && lastMarca.longitude !== null && router) {
           try {
             const points = [
               { lat: lastMarca.latitude, lng: lastMarca.longitude },
@@ -1146,12 +1564,12 @@ async function loadLiveDailyPlan(client: Queryable, router: Router | undefined, 
             }
           } catch {
             for (const stop of remainingStops) {
-              stop.eta = stop.plannedTime;
+              stop.eta = null;
             }
           }
         } else {
           for (const stop of remainingStops) {
-            stop.eta = stop.plannedTime;
+            stop.eta = null;
           }
         }
         nextStop = {
@@ -1161,7 +1579,7 @@ async function loadLiveDailyPlan(client: Queryable, router: Router | undefined, 
           passengerName: remainingStops[0].passengerName,
           placeName: remainingStops[0].placeName,
           plannedTime: remainingStops[0].plannedTime,
-          eta: remainingStops[0].eta ?? remainingStops[0].plannedTime,
+          eta: remainingStops[0].eta,
         };
       }
     }
@@ -2423,7 +2841,7 @@ function formatIncident(row: Record<string, unknown>) {
   };
 }
 
-export function createApp({ db, routing, router, geocoder, solver, travelTime, config }: {
+export function createApp({ db, routing, router, geocoder, solver, travelTime, pushSender: customPushSender, config }: {
   db: HealthDatabase;
   routing: RoutingHealth;
   router?: Router;
@@ -2431,6 +2849,7 @@ export function createApp({ db, routing, router, geocoder, solver, travelTime, c
   // Solve VROOM problems and measure driving time for "Order"; without them ordering answers 503.
   solver?: VroomSolver;
   travelTime?: TravelTime;
+  pushSender?: PushSender;
   config: AppConfig;
 }) {
   if (!config.serverEpoch.trim()) throw new Error("SERVER_EPOCH is required");
@@ -2438,6 +2857,24 @@ export function createApp({ db, routing, router, geocoder, solver, travelTime, c
   const routeGapMinutes = config.routeGapMinutes ?? 60;
   const plannerSettings = config.planner ?? { rideTimeBufferMinutes: 5, speedFactors: [], earlyToleranceMinutes: 15 };
   const now = config.now ?? (() => new Date());
+  const pushSender: PushSender = customPushSender ?? (async (sub, payload) => {
+    if (!config.vapid) return;
+    await webpush.sendNotification(
+      {
+        endpoint: sub.endpoint,
+        keys: { p256dh: sub.keys.p256dh, auth: sub.keys.auth },
+      },
+      payload,
+      {
+        vapidDetails: {
+          subject: config.vapid.subject,
+          publicKey: config.vapid.publicKey,
+          privateKey: config.vapid.privateKey,
+        },
+        timeout: 4000,
+      },
+    );
+  });
   // One geocoder request per second for the whole process; cached answers do not use the slot.
   const geocodeCache = new Map<string, GeocodeResult | null>();
   let nextGeocodeAt = 0;
@@ -2829,6 +3266,53 @@ export function createApp({ db, routing, router, geocoder, solver, travelTime, c
     const current = now();
     return (result.rows as SessionRow[]).filter((row) => sessionState(row, current).kind !== "ended");
   }
+
+  async function sendPushNudge(driverId: number, routeId: number, version: number) {
+    try {
+      const driverResult = await db.query("SELECT user_id FROM drivers WHERE id = $1", [driverId]) as QueryResult;
+      const userId = driverResult.rows[0]?.user_id;
+      if (!userId) return;
+
+      const subsResult = await db.query(
+        `SELECT ps.id, ps.endpoint, ps.p256dh, ps.auth
+           FROM push_subscriptions ps
+           JOIN sessions s ON s.id = ps.session_id
+          WHERE s.user_id = $1 AND s.revoked_at IS NULL`,
+        [userId],
+      ) as QueryResult;
+
+      const payload = JSON.stringify({
+        title: "Nueva versión del plan",
+        body: `Se publicó la versión ${version} de tu recorrido`,
+        routeId,
+        version,
+        url: `/?routeId=${routeId}`,
+      });
+
+      for (const row of subsResult.rows) {
+        try {
+          const res = await pushSender(
+            {
+              endpoint: String(row.endpoint),
+              keys: { p256dh: String(row.p256dh), auth: String(row.auth) },
+            },
+            payload,
+          );
+          if (res && (res.statusCode === 404 || res.statusCode === 410)) {
+            await db.query("DELETE FROM push_subscriptions WHERE id = $1", [row.id]).catch(() => undefined);
+          }
+        } catch (err: any) {
+          const statusCode = err?.statusCode ?? err?.status;
+          if (statusCode === 404 || statusCode === 410) {
+            await db.query("DELETE FROM push_subscriptions WHERE id = $1", [row.id]).catch(() => undefined);
+          }
+        }
+      }
+    } catch {
+      // Failure to deliver never blocks the publication
+    }
+  }
+
   /**
    * Publishes the Recorrido as its next Versión del plan. It reads the Recorrido and asks OSRM outside the transaction,
    * then publishes only if nothing it read changed meanwhile. With `onlyIfChanged` (the whole Plan diario), a Recorrido
@@ -2940,9 +3424,12 @@ export function createApp({ db, routing, router, geocoder, solver, travelTime, c
       await appendChange(client, actorId, "route", String(routeId), "published", { version: current?.version ?? null, status }, {
         version, status: nextStatus, vehicleId, overrideReason, violations,
       });
-      return { created: true, version };
+      return { created: true, version, driverId };
     });
     const [version] = await loadPlanVersions(db, "pv.route_id = $1 AND pv.version = $2", [routeId, published.version]);
+    if (published.created && published.driverId) {
+      void sendPushNudge(Number(published.driverId), routeId, published.version).catch(() => undefined);
+    }
     return { created: published.created, version };
   }
 
@@ -3354,7 +3841,10 @@ export function createApp({ db, routing, router, geocoder, solver, travelTime, c
             [hashSessionToken(token), now()],
           ) as QueryResult;
           const session = ended.rows[0];
-          if (session) await appendChange(client, Number(session.user_id), "session", String(session.id), "revoked", { active: true }, { active: false });
+          if (session) {
+            await client.query("DELETE FROM push_subscriptions WHERE session_id = $1", [session.id]);
+            await appendChange(client, Number(session.user_id), "session", String(session.id), "revoked", { active: true }, { active: false });
+          }
         });
       }
       deleteCookie(context, SESSION_COOKIE, { path: "/", secure: true, httpOnly: true, sameSite: "Lax" });
@@ -3419,6 +3909,7 @@ export function createApp({ db, routing, router, geocoder, solver, travelTime, c
           [id, now()],
         );
         await client.query("DELETE FROM remembered_devices WHERE user_id = $1", [id]);
+        await client.query("DELETE FROM push_subscriptions WHERE session_id IN (SELECT id FROM sessions WHERE user_id = $1)", [id]);
         await appendChange(client, actor.id, "user", String(id), "password_reset", null, { username: before.username, totpReset: before.role === "office" });
         return true;
       });
@@ -3445,6 +3936,7 @@ export function createApp({ db, routing, router, geocoder, solver, travelTime, c
           "UPDATE sessions SET revoked_at = $2, ended_reason = 'account_disabled' WHERE user_id = $1 AND revoked_at IS NULL",
           [id, current],
         );
+        await client.query("DELETE FROM push_subscriptions WHERE session_id IN (SELECT id FROM sessions WHERE user_id = $1)", [id]);
         await appendChange(client, actor.id, "user", String(id), "disabled", { disabled: false }, { disabled: true, username: previous.username, role: previous.role });
         return "disabled";
       });
@@ -3505,6 +3997,7 @@ export function createApp({ db, routing, router, geocoder, solver, travelTime, c
         const session = result.rows[0];
         if (!session) return false;
         await client.query("DELETE FROM remembered_devices WHERE session_id = $1", [sessionId]);
+        await client.query("DELETE FROM push_subscriptions WHERE session_id = $1", [sessionId]);
         if (session.revoked_at) return true;
         await client.query("UPDATE sessions SET revoked_at = $2, ended_reason = 'device_revoked' WHERE id = $1", [sessionId, now()]);
         await appendChange(client, actor.id, "session", String(sessionId), "device_revoked", { active: true }, {
@@ -4193,6 +4686,30 @@ export function createApp({ db, routing, router, geocoder, solver, travelTime, c
       if (!date) return context.json({ error: "Invalid request" }, 400);
       const live = await loadLiveDailyPlan(db, router, date);
       return live ? context.json(live) : context.json({ error: "Plan diario not found" }, 404);
+    })
+    .post("/daily-plans/:date/copy-last-weekday", async (context) => {
+      const actor = await requireOffice(context);
+      if (actor instanceof Response) return actor;
+      const date = parsePlanDate(context.req.param("date"));
+      if (!date) return context.json({ error: "Invalid request" }, 400);
+      try {
+        const result = await inTransaction(db, async (client) => {
+          return await copyFromLastWeekday(client, actor.id, date);
+        });
+        return context.json(result, 201);
+      } catch (error) {
+        return planningFailure(context, error);
+      }
+    })
+    .get("/daily-plans/:date/print", async (context) => {
+      const actor = await requireOffice(context);
+      if (actor instanceof Response) return actor;
+      const date = parsePlanDate(context.req.param("date"));
+      if (!date) return context.json({ error: "Invalid request" }, 400);
+      const result = await loadDailyPlanPrint(db, date);
+      if (!result) return context.json({ error: "Plan diario not found" }, 404);
+      if (result.status === 409) return context.json({ error: result.error, unpublishedTransfers: result.unpublishedTransfers }, 409);
+      return context.json(result.data);
     })
     .post("/daily-plans/:date/transfers", async (context) => {
       const actor = await requireOffice(context);
@@ -5066,6 +5583,54 @@ export function createApp({ db, routing, router, geocoder, solver, travelTime, c
           .map((row) => ({ id: Number(row.id), name: String(row.name), dni: String(row.dni) })),
         base: config.baseAddress ? { address: config.baseAddress } : null,
       });
+    })
+    .get("/push/public-key", async (context) => {
+      const user = await authenticate(context);
+      if (user instanceof Response) return user;
+      return context.json({ publicKey: config.vapid?.publicKey ?? null });
+    })
+    .post("/push/subscriptions", async (context) => {
+      const chofer = await requireDriver(context);
+      if (chofer instanceof Response) return chofer;
+      const body = await context.req.json().catch(() => null);
+      if (!isObject(body) || typeof body.endpoint !== "string") {
+        return context.json({ error: "Invalid request" }, 400);
+      }
+      try {
+        const url = new URL(body.endpoint);
+        if (url.protocol !== "http:" && url.protocol !== "https:") {
+          return context.json({ error: "Invalid request" }, 400);
+        }
+      } catch {
+        return context.json({ error: "Invalid request" }, 400);
+      }
+      const keys = isObject(body.keys) ? body.keys : null;
+      if (!keys || typeof keys.p256dh !== "string" || !keys.p256dh || typeof keys.auth !== "string" || !keys.auth) {
+        return context.json({ error: "Invalid request" }, 400);
+      }
+      await db.query(
+        `INSERT INTO push_subscriptions (session_id, endpoint, p256dh, auth)
+         VALUES ($1, $2, $3, $4)
+         ON CONFLICT (endpoint) DO UPDATE
+         SET session_id = EXCLUDED.session_id,
+             p256dh = EXCLUDED.p256dh,
+             auth = EXCLUDED.auth,
+             created_at = now()`,
+        [chofer.user.session_id, body.endpoint, keys.p256dh, keys.auth],
+      );
+      return context.body(null, 204);
+    })
+    .delete("/push/subscriptions", async (context) => {
+      const user = await authenticate(context);
+      if (user instanceof Response) return user;
+      const body = await context.req.json().catch(() => null);
+      const endpoint = isObject(body) && typeof body.endpoint === "string" ? body.endpoint : null;
+      if (endpoint) {
+        await db.query("DELETE FROM push_subscriptions WHERE session_id = $1 AND endpoint = $2", [user.session_id, endpoint]);
+      } else {
+        await db.query("DELETE FROM push_subscriptions WHERE session_id = $1", [user.session_id]);
+      }
+      return context.body(null, 204);
     })
     .get("/transfers/:id/authorizations", async (context) => {
       const actor = await requireOffice(context);

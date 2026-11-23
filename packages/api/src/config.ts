@@ -23,6 +23,9 @@ const configSchema = z.object({
   NOMINATIM_USER_AGENT: z.string().trim().min(1).default("traslado-programado (+https://github.com/GagaismoTuc/traslado-programado-sys)"),
   // Where company staff receive a Pasajero nobody else can receive (`inferido`); empty or unset means not configured.
   BASE_ADDRESS: z.string().trim().max(500, "BASE_ADDRESS must be at most 500 characters").optional(),
+  VAPID_PUBLIC_KEY: z.string().trim().optional(),
+  VAPID_PRIVATE_KEY: z.string().trim().optional(),
+  VAPID_SUBJECT: z.string().trim().optional(),
 });
 
 export type ServerConfig = {
@@ -40,7 +43,14 @@ export type ServerConfig = {
   nominatimUrl: string;
   nominatimUserAgent: string;
   baseAddress: string | null;
+  vapid: {
+    publicKey: string;
+    privateKey: string;
+    subject: string;
+  } | null;
 };
+
+const DEFAULT_VAPID_SUBJECT = "mailto:soporte@traslado.com";
 
 const DEFAULT_TRUSTED_ORIGINS = [
   "http://localhost:5173",
@@ -73,6 +83,14 @@ export function readConfig(environment: NodeJS.ProcessEnv = process.env): Server
   const speedFactors = parseSpeedFactors(result.data.SPEED_FACTORS);
   if (!speedFactors) throw new Error("SPEED_FACTORS must be a comma-separated list of HH:MM=factor with factors above 0 and up to 5");
 
+  const vapid = result.data.VAPID_PUBLIC_KEY && result.data.VAPID_PRIVATE_KEY
+    ? {
+        publicKey: result.data.VAPID_PUBLIC_KEY,
+        privateKey: result.data.VAPID_PRIVATE_KEY,
+        subject: result.data.VAPID_SUBJECT || DEFAULT_VAPID_SUBJECT,
+      }
+    : null;
+
   return {
     serverEpoch: result.data.SERVER_EPOCH,
     databaseUrl: result.data.DATABASE_URL,
@@ -89,5 +107,6 @@ export function readConfig(environment: NodeJS.ProcessEnv = process.env): Server
     nominatimUrl: result.data.NOMINATIM_URL,
     nominatimUserAgent: result.data.NOMINATIM_USER_AGENT,
     baseAddress: result.data.BASE_ADDRESS || null,
+    vapid,
   };
 }

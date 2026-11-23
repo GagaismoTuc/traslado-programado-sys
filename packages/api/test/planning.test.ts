@@ -476,11 +476,195 @@ describe("Plan diario by hand", () => {
     expect((await request(`/daily-plans/${DAY}/routes`, "POST", { driverId, startTime: "10:00", endTime: "09:00" }, office)).status).toBe(400);
   });
 
+  it("copies Traslados, Recorridos (as Borrador), assignments and stop order from the last same weekday, skipping deactivated Pasajeros and reporting them", async () => {
+    const { office, destinationId, driverId, vehicleId } = await setup("copy");
+    // Source: 2026-11-02 (Monday)
+    // Destination: 2026-11-09 (next Monday)
+    const active1 = await passenger(office, { name: "Pasajero Activo 1" });
+    const active2 = await passenger(office, { name: "Pasajero Activo 2" });
+    const deactivated = await passenger(office, { name: "Pasajero Inactivo" });
+
+    // Route on 2026-11-02
+    const sourceRoute = await route(office, { driverId, vehicleId, startTime: "07:00", endTime: "09:00" }, "2026-11-02");
+
+    // Transfers on 2026-11-02
+    const t1 = await transfer(office, { passengerId: active1, direction: "entrada", destinationId, targetTime: "08:00" }, "2026-11-02");
+    const t2 = await transfer(office, { passengerId: active2, direction: "entrada", destinationId, targetTime: "08:15" }, "2026-11-02");
+    const tDeact = await transfer(office, { passengerId: deactivated, direction: "entrada", destinationId, targetTime: "08:30" }, "2026-11-02");
+    const tAbsent = await transfer(office, { passengerId: active1, direction: "salida", destinationId, targetTime: "12:00" }, "2026-11-02");
+
+    // Assign t1, t2, tDeact to sourceRoute
+    await created(request(`/transfers/${t1.id}`, "PATCH", { routeId: sourceRoute.id }, office), 200);
+    await created(request(`/transfers/${t2.id}`, "PATCH", { routeId: sourceRoute.id }, office), 200);
+    await created(request(`/transfers/${tDeact.id}`, "PATCH", { routeId: sourceRoute.id }, office), 200);
+
+    // Reorder stops so stop-order preservation is tested on a non-default sequence
+    const sourceStops = await stopsOf(office, sourceRoute.id);
+    const stopId = (transferId: number, kind: string) =>
+      sourceStops.find((s) => s.transferId === transferId && s.kind === kind)!.id;
+    await created(request(`/routes/${sourceRoute.id}/stops`, "PATCH", {
+      stopIds: [
+        stopId(t1.id, "pickup"),
+        stopId(t2.id, "pickup"),
+        stopId(tDeact.id, "pickup"),
+        stopId(tDeact.id, "dropoff"),
+        stopId(t2.id, "dropoff"),
+        stopId(t1.id, "dropoff"),
+      ],
+    }, office), 200);
+
+    // Register absence on tAbsent
+    await created(request(`/transfers/${tAbsent.id}/absence`, "POST", {}, office), 201);
+
+    // Deactivate passenger after their transfer was already created in the source plan
+    expect((await request(`/passengers/${deactivated}/deactivate`, "PATCH", {}, office)).status).toBe(204);
+
+    // Publish the source route so Rule 2 (copied routes are always Borrador, never Publicado) is actually exercised
+    await migrationPool.query("UPDATE routes SET status = 'publicado' WHERE id = $1", [sourceRoute.id]);
+
+    // Capture change_log high-water mark before copying so assertions are isolated from setup events
+    const maxChangeIdBeforeCopy = Number(
+      (await migrationPool.query("SELECT COALESCE(MAX(id), 0) AS max_id FROM change_log")).rows[0].max_id,
+    );
+
+    // Copy to 2026-11-09
+    const copyRes = await created(request("/daily-plans/2026-11-09/copy-last-weekday", "POST", undefined, office), 201);
+    expect(copyRes.copiedFromDate).toBe("2026-11-02");
+    expect(copyRes.skippedPassengers).toEqual([{ id: deactivated, name: "Pasajero Inactivo" }]);
+
+    const targetDay = await day(office, "2026-11-09");
+    // Regla 2: Copied Recorridos are always Borrador, even when the source Recorrido was Publicado
+    expect(targetDay.routes).toHaveLength(1);
+    expect(targetDay.routes[0]).toMatchObject({
+      startTime: "07:00",
+      endTime: "09:00",
+      status: "borrador",
+      driverId,
+      vehicleId,
+    });
+
+    // Active transfers and absent transfer copied as planificado (without copying the absence); deactivated passenger skipped
+    expect(targetDay.transfers).toHaveLength(3);
+    const activeTransfers = targetDay.transfers.filter((t: { passengerId: number }) => t.passengerId === active1 || t.passengerId === active2);
+    expect(activeTransfers).toHaveLength(3);
+    expect(targetDay.transfers.every((t: { status: string }) => t.status === "planificado")).toBe(true);
+    expect((await stored("absences")).map((row) => row.transfer_id)).toEqual([tAbsent.id]);
+
+    // Stops for active transfers are copied in their exact source order with deactivated passenger stops omitted
+    const copiedRoute = targetDay.routes[0];
+    const transferPassenger = new Map<number, number>(
+      targetDay.transfers.map((t: { id: number; passengerId: number }) => [t.id, t.passengerId]),
+    );
+    expect(
+      copiedRoute.stops.map((s: { transferId: number; kind: string; position: number }) => [
+        transferPassenger.get(s.transferId),
+        s.kind,
+        s.position,
+      ]),
+    ).toEqual([
+      [active1, "pickup", 1],
+      [active2, "pickup", 2],
+      [active2, "dropoff", 3],
+      [active1, "dropoff", 4],
+    ]);
+
+    // Change log records the copied plan, route, transfers, assignments, and copy operation itself (isolated from setup)
+    const copyChanges = (await migrationPool.query(
+      "SELECT entity, entity_id, action, before_data, after_data FROM change_log WHERE id > $1 ORDER BY id",
+      [maxChangeIdBeforeCopy],
+    )).rows;
+    const copiedTransferIds = targetDay.transfers.map((t: { id: number }) => String(t.id));
+    const assignedTransferIds = Array.from(new Set(copiedRoute.stops.map((s: { transferId: number }) => String(s.transferId))));
+    expect(copyChanges).toHaveLength(8);
+    expect(copyChanges).toContainEqual({
+      entity: "daily_plan",
+      entity_id: String(targetDay.plan.id),
+      action: "created",
+      before_data: null,
+      after_data: { date: "2026-11-09" },
+    });
+    expect(copyChanges).toContainEqual(expect.objectContaining({
+      entity: "route",
+      entity_id: String(copiedRoute.id),
+      action: "created",
+      before_data: null,
+      after_data: expect.objectContaining({
+        dailyPlanId: targetDay.plan.id,
+        driverId,
+        vehicleId,
+        status: "borrador",
+      }),
+    }));
+    expect(
+      copyChanges.filter((c) => c.entity === "transfer" && c.action === "created").map((c) => c.entity_id).sort(),
+    ).toEqual([...copiedTransferIds].sort());
+    expect(
+      copyChanges.filter((c) => c.entity === "transfer" && c.action === "assigned"),
+    ).toEqual(
+      assignedTransferIds.map((id) => ({
+        entity: "transfer",
+        entity_id: id,
+        action: "assigned",
+        before_data: { routeId: null },
+        after_data: { routeId: copiedRoute.id },
+      })),
+    );
+    expect(copyChanges.at(-1)).toEqual({
+      entity: "daily_plan",
+      entity_id: String(targetDay.plan.id),
+      action: "copied_from_weekday",
+      before_data: null,
+      after_data: {
+        fromDate: "2026-11-02",
+        skippedPassengers: [{ id: deactivated, name: "Pasajero Inactivo" }],
+      },
+    });
+
+    // Regla 1: Copying into a day that already has Traslados is refused without mutating state or change_log
+    const maxChangeIdBeforeConflict = Number(
+      (await migrationPool.query("SELECT COALESCE(MAX(id), 0) AS max_id FROM change_log")).rows[0].max_id,
+    );
+    const conflictRes = await request("/daily-plans/2026-11-09/copy-last-weekday", "POST", undefined, office);
+    expect(conflictRes.status).toBe(409);
+    expect((await conflictRes.json()).error).toBe("Copying into a day that already has Traslados is refused");
+    expect((await day(office, "2026-11-09")).transfers).toHaveLength(3);
+    expect(
+      (await migrationPool.query("SELECT id FROM change_log WHERE id > $1", [maxChangeIdBeforeConflict])).rows,
+    ).toEqual([]);
+
+    // Fallback: 2 weeks back when 1 week back has no plan
+    // Target 2026-11-23 (no plan on 2026-11-16, plan on 2026-11-09)
+    const fallbackRes = await created(request("/daily-plans/2026-11-23/copy-last-weekday", "POST", undefined, office), 201);
+    expect(fallbackRes.copiedFromDate).toBe("2026-11-09");
+
+    // Empty plan on previous week is not skipped for an older non-empty plan (2026-11-23 exists 2 weeks back)
+    await created(request("/daily-plans", "POST", { date: "2026-11-30" }, office), 201);
+    const emptyCopyRes = await created(request("/daily-plans/2026-12-07/copy-last-weekday", "POST", undefined, office), 201);
+    expect(emptyCopyRes.copiedFromDate).toBe("2026-11-30");
+    expect(emptyCopyRes.day.transfers).toHaveLength(0);
+
+    // Fallback: 4 weeks back (exact 28 days) succeeds when weeks 1, 2, 3 have no plan
+    // 2026-12-07 + 28 days = 2027-01-04 (no plans on 2026-12-14, 2026-12-21, 2026-12-28)
+    const fourWeeksRes = await created(request("/daily-plans/2027-01-04/copy-last-weekday", "POST", undefined, office), 201);
+    expect(fourWeeksRes.copiedFromDate).toBe("2026-12-07");
+
+    // Limit: exactly 5 weeks back (35 days) exceeds the 4-week window and returns 404
+    // 2027-01-04 + 35 days = 2027-02-08 (no plans on 2027-01-11, 2027-01-18, 2027-01-25, 2027-02-01; only plan is at -35 days)
+    const fiveWeeksRes = await request("/daily-plans/2027-02-08/copy-last-weekday", "POST", undefined, office);
+    expect(fiveWeeksRes.status).toBe(404);
+    expect((await request("/daily-plans/2027-02-08", "GET", undefined, office)).status).toBe(404);
+
+    // 404 when no plan found in the last 4 weeks (e.g. on a Sunday 2026-11-15)
+    const notFoundRes = await request("/daily-plans/2026-11-15/copy-last-weekday", "POST", undefined, office);
+    expect(notFoundRes.status).toBe(404);
+  });
+
   it("lets only the Oficina read and write the Plan diario", async () => {
     const chofer = await signIn("chofer-plan", "driver");
     for (const [method, path, body] of [
       ["POST", "/daily-plans", { date: DAY }],
       ["GET", `/daily-plans/${DAY}`, undefined],
+      ["POST", `/daily-plans/${DAY}/copy-last-weekday`, undefined],
       ["POST", `/daily-plans/${DAY}/transfers`, { passengerId: 1, direction: "entrada", destinationId: 1, targetTime: "08:00" }],
       ["PATCH", "/transfers/1", { companions: 1 }],
       ["POST", "/transfers/1/absence", {}],

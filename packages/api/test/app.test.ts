@@ -1,5 +1,7 @@
+import { createECDH, randomBytes } from "node:crypto";
 import { spawnSync } from "node:child_process";
 import { hc } from "hono/client";
+import webpush from "web-push";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { createApp, type AppType, type RoutingHealth } from "../src/app.js";
 import { readConfig } from "../src/config.js";
@@ -149,5 +151,53 @@ describe("API test seam", () => {
     const response = await app.request("/error");
     expect(response.status).toBe(500);
     expect(response.headers.get("X-Server-Epoch")).toBe("server-error");
+  });
+
+  it("applies default VAPID_SUBJECT when omitted or empty/whitespace so web-push accepts it", () => {
+    const base = {
+      SERVER_EPOCH: "epoch",
+      DATABASE_URL: "postgres://app:secret@localhost:5432/app",
+      OSRM_URL: "http://127.0.0.1:5000",
+      VROOM_URL: "http://127.0.0.1:3001",
+    };
+    expect(readConfig(base as NodeJS.ProcessEnv).vapid).toBeNull();
+    expect(readConfig({ ...base, VAPID_PUBLIC_KEY: "", VAPID_PRIVATE_KEY: "", VAPID_SUBJECT: "" } as NodeJS.ProcessEnv).vapid).toBeNull();
+    expect(readConfig({ ...base, VAPID_PUBLIC_KEY: "   ", VAPID_PRIVATE_KEY: "   ", VAPID_SUBJECT: "   " } as NodeJS.ProcessEnv).vapid).toBeNull();
+
+    const keys = webpush.generateVAPIDKeys();
+    const ecdh = createECDH("prime256v1");
+    ecdh.generateKeys();
+    const subscription = {
+      endpoint: "https://push.example.invalid/sub/1",
+      keys: {
+        p256dh: ecdh.getPublicKey().toString("base64url"),
+        auth: randomBytes(16).toString("base64url"),
+      },
+    };
+
+    for (const subjectEnv of [undefined, "", "   "]) {
+      const env: Record<string, string | undefined> = {
+        ...base,
+        VAPID_PUBLIC_KEY: keys.publicKey,
+        VAPID_PRIVATE_KEY: keys.privateKey,
+        ...(subjectEnv === undefined ? {} : { VAPID_SUBJECT: subjectEnv }),
+      };
+      const cfg = readConfig(env as NodeJS.ProcessEnv);
+      expect(cfg.vapid).toEqual({
+        publicKey: keys.publicKey,
+        privateKey: keys.privateKey,
+        subject: "mailto:soporte@traslado.com",
+      });
+      const details = webpush.generateRequestDetails(subscription, "nudge", { vapidDetails: cfg.vapid! });
+      expect(details.endpoint).toBe(subscription.endpoint);
+    }
+
+    const custom = readConfig({
+      ...base,
+      VAPID_PUBLIC_KEY: keys.publicKey,
+      VAPID_PRIVATE_KEY: keys.privateKey,
+      VAPID_SUBJECT: " mailto:ops@example.invalid ",
+    } as NodeJS.ProcessEnv);
+    expect(custom.vapid?.subject).toBe("mailto:ops@example.invalid");
   });
 });

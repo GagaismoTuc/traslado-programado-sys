@@ -1,5 +1,5 @@
 {
-  "id": "aaf809cf-cafa-4608-8d13-aa60df2540f0",
+  "id": "2e39928c-b290-4d54-a24c-aa8f8f82960b",
   "prevId": "067cc1af-4fbf-4a4b-8b6e-456887082e5a",
   "version": "7",
   "dialect": "postgresql",
@@ -226,7 +226,7 @@
       "checkConstraints": {
         "alerts_kind_check": {
           "name": "alerts_kind_check",
-          "value": "\"alerts\".\"kind\" IN ('other_adult_handover', 'mark_flagged', 'mark_conflict', 'authorization_conflict', 'absent_on_entrada', 'close_refused', 'incident')"
+          "value": "\"alerts\".\"kind\" IN ('other_adult_handover', 'mark_flagged', 'mark_conflict', 'authorization_conflict', 'absent_on_entrada', 'close_refused')"
         }
       },
       "isRLSEnabled": false
@@ -975,177 +975,6 @@
       "uniqueConstraints": {},
       "policies": {},
       "checkConstraints": {},
-      "isRLSEnabled": false
-    },
-    "public.incidents": {
-      "name": "incidents",
-      "schema": "",
-      "columns": {
-        "id": {
-          "name": "id",
-          "type": "integer",
-          "primaryKey": true,
-          "notNull": true,
-          "identity": {
-            "type": "always",
-            "name": "incidents_id_seq",
-            "schema": "public",
-            "increment": "1",
-            "startWith": "1",
-            "minValue": "1",
-            "maxValue": "2147483647",
-            "cache": "1",
-            "cycle": false
-          }
-        },
-        "client_id": {
-          "name": "client_id",
-          "type": "uuid",
-          "primaryKey": false,
-          "notNull": true
-        },
-        "route_id": {
-          "name": "route_id",
-          "type": "integer",
-          "primaryKey": false,
-          "notNull": true
-        },
-        "driver_id": {
-          "name": "driver_id",
-          "type": "integer",
-          "primaryKey": false,
-          "notNull": true
-        },
-        "session_id": {
-          "name": "session_id",
-          "type": "integer",
-          "primaryKey": false,
-          "notNull": true
-        },
-        "kind": {
-          "name": "kind",
-          "type": "text",
-          "primaryKey": false,
-          "notNull": true
-        },
-        "note": {
-          "name": "note",
-          "type": "text",
-          "primaryKey": false,
-          "notNull": true
-        },
-        "phone_time": {
-          "name": "phone_time",
-          "type": "timestamp with time zone",
-          "primaryKey": false,
-          "notNull": true
-        },
-        "server_time": {
-          "name": "server_time",
-          "type": "timestamp with time zone",
-          "primaryKey": false,
-          "notNull": true,
-          "default": "now()"
-        },
-        "latitude": {
-          "name": "latitude",
-          "type": "double precision",
-          "primaryKey": false,
-          "notNull": false
-        },
-        "longitude": {
-          "name": "longitude",
-          "type": "double precision",
-          "primaryKey": false,
-          "notNull": false
-        }
-      },
-      "indexes": {
-        "incidents_client_id_unique": {
-          "name": "incidents_client_id_unique",
-          "columns": [
-            {
-              "expression": "client_id",
-              "isExpression": false,
-              "asc": true,
-              "nulls": "last"
-            }
-          ],
-          "isUnique": true,
-          "concurrently": false,
-          "method": "btree",
-          "with": {}
-        },
-        "incidents_route_id_index": {
-          "name": "incidents_route_id_index",
-          "columns": [
-            {
-              "expression": "route_id",
-              "isExpression": false,
-              "asc": true,
-              "nulls": "last"
-            }
-          ],
-          "isUnique": false,
-          "concurrently": false,
-          "method": "btree",
-          "with": {}
-        }
-      },
-      "foreignKeys": {
-        "incidents_route_id_routes_id_fk": {
-          "name": "incidents_route_id_routes_id_fk",
-          "tableFrom": "incidents",
-          "tableTo": "routes",
-          "columnsFrom": [
-            "route_id"
-          ],
-          "columnsTo": [
-            "id"
-          ],
-          "onDelete": "restrict",
-          "onUpdate": "no action"
-        },
-        "incidents_driver_id_drivers_id_fk": {
-          "name": "incidents_driver_id_drivers_id_fk",
-          "tableFrom": "incidents",
-          "tableTo": "drivers",
-          "columnsFrom": [
-            "driver_id"
-          ],
-          "columnsTo": [
-            "id"
-          ],
-          "onDelete": "restrict",
-          "onUpdate": "no action"
-        },
-        "incidents_session_id_sessions_id_fk": {
-          "name": "incidents_session_id_sessions_id_fk",
-          "tableFrom": "incidents",
-          "tableTo": "sessions",
-          "columnsFrom": [
-            "session_id"
-          ],
-          "columnsTo": [
-            "id"
-          ],
-          "onDelete": "restrict",
-          "onUpdate": "no action"
-        }
-      },
-      "compositePrimaryKeys": {},
-      "uniqueConstraints": {},
-      "policies": {},
-      "checkConstraints": {
-        "incidents_kind_check": {
-          "name": "incidents_kind_check",
-          "value": "\"incidents\".\"kind\" IN ('delay', 'vehicle_fault', 'accident', 'health_crisis', 'other')"
-        },
-        "incidents_location_check": {
-          "name": "incidents_location_check",
-          "value": "(\"incidents\".\"latitude\" IS NULL AND \"incidents\".\"longitude\" IS NULL)\n      OR (\"incidents\".\"latitude\" BETWEEN -90 AND 90 AND \"incidents\".\"longitude\" BETWEEN -180 AND 180)"
-        }
-      },
       "isRLSEnabled": false
     },
     "public.marks": {
@@ -2391,6 +2220,112 @@
           "value": "\"positions\".\"accuracy_meters\" >= 0 AND \"positions\".\"accuracy_meters\" < 'Infinity'::double precision"
         }
       },
+      "isRLSEnabled": false
+    },
+    "public.push_subscriptions": {
+      "name": "push_subscriptions",
+      "schema": "",
+      "columns": {
+        "id": {
+          "name": "id",
+          "type": "integer",
+          "primaryKey": true,
+          "notNull": true,
+          "identity": {
+            "type": "always",
+            "name": "push_subscriptions_id_seq",
+            "schema": "public",
+            "increment": "1",
+            "startWith": "1",
+            "minValue": "1",
+            "maxValue": "2147483647",
+            "cache": "1",
+            "cycle": false
+          }
+        },
+        "session_id": {
+          "name": "session_id",
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "endpoint": {
+          "name": "endpoint",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "p256dh": {
+          "name": "p256dh",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "auth": {
+          "name": "auth",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "created_at": {
+          "name": "created_at",
+          "type": "timestamp with time zone",
+          "primaryKey": false,
+          "notNull": true,
+          "default": "now()"
+        }
+      },
+      "indexes": {
+        "push_subscriptions_endpoint_unique": {
+          "name": "push_subscriptions_endpoint_unique",
+          "columns": [
+            {
+              "expression": "endpoint",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            }
+          ],
+          "isUnique": true,
+          "concurrently": false,
+          "method": "btree",
+          "with": {}
+        },
+        "push_subscriptions_session_id_idx": {
+          "name": "push_subscriptions_session_id_idx",
+          "columns": [
+            {
+              "expression": "session_id",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            }
+          ],
+          "isUnique": false,
+          "concurrently": false,
+          "method": "btree",
+          "with": {}
+        }
+      },
+      "foreignKeys": {
+        "push_subscriptions_session_id_sessions_id_fk": {
+          "name": "push_subscriptions_session_id_sessions_id_fk",
+          "tableFrom": "push_subscriptions",
+          "tableTo": "sessions",
+          "columnsFrom": [
+            "session_id"
+          ],
+          "columnsTo": [
+            "id"
+          ],
+          "onDelete": "cascade",
+          "onUpdate": "no action"
+        }
+      },
+      "compositePrimaryKeys": {},
+      "uniqueConstraints": {},
+      "policies": {},
+      "checkConstraints": {},
       "isRLSEnabled": false
     },
     "public.remembered_devices": {
