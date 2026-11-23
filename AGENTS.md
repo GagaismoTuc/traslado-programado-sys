@@ -15,6 +15,7 @@ Single-context: one `GLOSSARY.md` and `docs/adr/` at the repo root. See `docs/ag
 ### Project data and migrations
 
 - Never use real personal data in development, CI, or staging; use synthetic test data only.
+- The only exception is the field-test environment (Prueba de campo) for the December tracking demo: it may store the real location of team members who accepted in writing, and nothing else real; every person record in it (Chofer, Pasajero, Adulto autorizado, Oficina account) has a synthetic name. It is a separate environment from staging, never shares its database, and its database is deleted when the test ends. Staging, development and CI stay synthetic-only. See `docs/adr/0003-december-demo-on-local-staging-seeded-through-the-api.md`.
 - Never store a Pasajero's sex, gender or diagnosis. Seat or travel restrictions are stored as neutral requirements (for example, the Asiento delantero) without their reason.
 - Keep one database migration per ticket. If another migration lands first, merge `origin/main` and regenerate with `db:generate` before continuing.
 

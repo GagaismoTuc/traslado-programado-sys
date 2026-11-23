@@ -13,6 +13,13 @@
         reverse_proxy driver:80
     }
     handle {
-        reverse_proxy office:80
+        # The throwaway offline prototype of issue #40 lives on the office host, where no service worker claims "/".
+        redir /offline-prototype /offline-prototype/ 308
+        handle_path /offline-prototype/* {
+            reverse_proxy offline-prototype:8080
+        }
+        handle {
+            reverse_proxy office:80
+        }
     }
 }

@@ -486,3 +486,23 @@ export const absences = pgTable("absences", {
 }, (table) => [
   uniqueIndex("absences_transfer_unique").on(table.transferId),
 ]);
+
+// A Posición reported by the Chofer's phone during Seguimiento of a Recorrido en curso.
+// Stored separately from Marcas (never purged) and never references Pasajeros; purged after 90 days.
+// The app role can SELECT, INSERT and DELETE (for the 90-day purge), never UPDATE.
+export const positions = pgTable("positions", {
+  id: integer().generatedAlwaysAsIdentity().primaryKey(),
+  routeId: integer("route_id").notNull().references(() => routes.id, { onDelete: "restrict" }),
+  driverId: integer("driver_id").notNull().references(() => drivers.id, { onDelete: "restrict" }),
+  latitude: doublePrecision().notNull(),
+  longitude: doublePrecision().notNull(),
+  accuracyMeters: doublePrecision("accuracy_meters").notNull(),
+  phoneTime: timestamp("phone_time", { withTimezone: true, mode: "string" }).notNull(),
+  serverTime: timestamp("server_time", { withTimezone: true, mode: "string" }).defaultNow().notNull(),
+}, (table) => [
+  uniqueIndex("positions_route_phone_time_unique").on(table.routeId, table.phoneTime),
+  index("positions_server_time_index").on(table.serverTime),
+  check("positions_latitude_check", sql`${table.latitude} BETWEEN -90 AND 90`),
+  check("positions_longitude_check", sql`${table.longitude} BETWEEN -180 AND 180`),
+  check("positions_accuracy_check", sql`${table.accuracyMeters} >= 0 AND ${table.accuracyMeters} < 'Infinity'::double precision`),
+]);

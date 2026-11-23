@@ -2224,6 +2224,34 @@ function parseMark(body: unknown): MarkFields | { error: string } | null {
   return { id, transferId, kind, phoneTime: phoneTime.toISOString(), location, version, receiver, ...(corrects ? { corrects } : {}) };
 }
 
+const POSITION_BATCH_LIMIT = 100;
+const POSITION_FUTURE_TOLERANCE_MS = 2 * 60 * 1000;
+
+type PositionInput = { lat: number; lng: number; accuracyMeters: number; phoneTime: string };
+
+/** A batch of Chofer phone Posiciones; every entry is validated before anything is stored. */
+function parsePositionBatch(body: unknown, serverNow: Date): PositionInput[] | null {
+  if (!isObject(body) || !Array.isArray(body.positions)) return null;
+  if (body.positions.length === 0 || body.positions.length > POSITION_BATCH_LIMIT) return null;
+  const latestAllowed = serverNow.getTime() + POSITION_FUTURE_TOLERANCE_MS;
+  const items: PositionInput[] = [];
+  for (const entry of body.positions) {
+    if (!isObject(entry)) return null;
+    const lat = coordinate(entry.lat, 90);
+    const lng = coordinate(entry.lng, 180);
+    const accuracyMeters = typeof entry.accuracyMeters === "number" && Number.isFinite(entry.accuracyMeters) && entry.accuracyMeters >= 0
+      ? entry.accuracyMeters
+      : null;
+    const phoneTime = typeof entry.phoneTime === "string" && /T.*(Z|[+-]\d{2}:\d{2})$/.test(entry.phoneTime)
+      ? new Date(entry.phoneTime)
+      : null;
+    if (lat === null || lng === null || accuracyMeters === null || !phoneTime || Number.isNaN(phoneTime.getTime())) return null;
+    if (phoneTime.getTime() > latestAllowed) return null;
+    items.push({ lat, lng, accuracyMeters, phoneTime: phoneTime.toISOString() });
+  }
+  return items;
+}
+
 const MARK_SELECT_SQL = `
   SELECT m.id, m.client_id, m.driver_id, m.transfer_id, pv.route_id, pv.version, m.kind, m.phone_time, m.server_time, m.latitude, m.longitude,
          m.receiver_kind, m.receiver_adult_id, m.receiver_destination_id, m.receiver_name, m.receiver_dni, m.authorization_id, m.flags,
@@ -4957,6 +4985,45 @@ export function createApp({ db, routing, router, geocoder, solver, travelTime, c
       try {
         const { status, ...result } = await inTransaction(db, async (client) => await recordIncident(client, chofer, id, fields));
         return context.json(result, status);
+      } catch (error) {
+        return planningFailure(context, error);
+      }
+    })
+    // A batch of phone Posiciones during Seguimiento of an En curso Recorrido; resending the same phoneTime is ignored.
+    .post("/driver/routes/:id/positions", async (context) => {
+      const chofer = await requireDriver(context);
+      if (chofer instanceof Response) return chofer;
+      const id = parseId(context.req.param("id"));
+      const current = now();
+      const batch = parsePositionBatch(await context.req.json().catch(() => null), current);
+      if (!id || !batch) return context.json({ error: "Invalid request" }, 400);
+      const route = await ownRoute(context, chofer.driverId, id, true);
+      if (route instanceof Response) return route;
+      try {
+        const result = await inTransaction(db, async (client) => {
+          const status = await lockOwnRoute(client, chofer.driverId, id);
+          if (status !== "en_curso") throw new PlanningError(409, "Positions can only be recorded while the Recorrido is en curso");
+          const inserted = await client.query(
+            `INSERT INTO positions (route_id, driver_id, latitude, longitude, accuracy_meters, phone_time, server_time)
+             SELECT $1, $2, lat, lng, accuracy_meters, phone_time, $7
+               FROM unnest($3::double precision[], $4::double precision[], $5::double precision[], $6::timestamptz[])
+                 AS batch(lat, lng, accuracy_meters, phone_time)
+             ON CONFLICT (route_id, phone_time) DO NOTHING
+             RETURNING id`,
+            [
+              id,
+              chofer.driverId,
+              batch.map((item) => item.lat),
+              batch.map((item) => item.lng),
+              batch.map((item) => item.accuracyMeters),
+              batch.map((item) => item.phoneTime),
+              current,
+            ],
+          ) as QueryResult;
+          const saved = inserted.rows.length;
+          return { saved, ignored: batch.length - saved };
+        });
+        return context.json(result, result.saved > 0 ? 201 : 200);
       } catch (error) {
         return planningFailure(context, error);
       }
