@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState } from "react";
 import type { Map as MapLibreMap, Marker } from "maplibre-gl";
-import type { LiveRoute, LiveStop } from "@traslado/api";
+import type { LiveCurrentPosition, LiveRoute, LiveStop } from "@traslado/api";
 import { MAP_STYLE_URL } from "./PinPicker";
 
 type MapLibre = typeof import("maplibre-gl");
@@ -40,10 +40,16 @@ export function createStopPopupContent(stop: LiveStop): HTMLElement {
   return container;
 }
 
+/** Where the 🚐 marker's position comes from and when: "Celular, 08:12" or "Última marca, 08:14". */
+export function currentPositionLabel(position: LiveCurrentPosition): string {
+  return `${position.source === "posicion" ? "Celular" : "Última marca"}, ${position.phoneTimeHhmi}`;
+}
+
+/** Popup of the 🚐 marker: the Vehículo and Chofer, the origin of its position and its time. */
 export function createMarcaPopupContent(
   vehiclePlate: string,
   driverName: string,
-  lastMarcaKind: string,
+  origin: string,
   phoneTimeHhmi: string,
 ): HTMLElement {
   const container = document.createElement("div");
@@ -56,9 +62,9 @@ export function createMarcaPopupContent(
   container.appendChild(title);
 
   const marcaRow = document.createElement("div");
-  marcaRow.appendChild(document.createTextNode("Última marca: "));
+  marcaRow.appendChild(document.createTextNode("Posición: "));
   const marcaStrong = document.createElement("strong");
-  marcaStrong.textContent = lastMarcaKind;
+  marcaStrong.textContent = origin;
   marcaRow.appendChild(marcaStrong);
   container.appendChild(marcaRow);
 
@@ -197,17 +203,14 @@ export function updateMapRoutes(
       markersRef.current.push(marker);
     }
 
-    // 3. Last-Marca marker (if any and has valid location - Regla 1)
-    if (
-      route.lastMarca &&
-      route.lastMarca.latitude !== null &&
-      route.lastMarca.longitude !== null
-    ) {
+    // 3. Vehicle marker at the current position: the latest Posición or located Marca; none without one (never invented)
+    const position = route.currentPosition;
+    if (position) {
       const marcaPopup = createMarcaPopupContent(
         route.vehicle.plate,
         route.driver.name,
-        route.lastMarca.kind,
-        route.lastMarca.phoneTimeHhmi,
+        position.source === "posicion" ? "Celular" : "Última marca",
+        position.phoneTimeHhmi,
       );
 
       const vehicleEl = document.createElement("div");
@@ -224,10 +227,10 @@ export function updateMapRoutes(
       vehicleEl.style.fontSize = "14px";
       vehicleEl.style.boxShadow = "0 2px 5px rgba(0,0,0,0.4)";
       vehicleEl.textContent = "🚐";
-      vehicleEl.title = `Vehículo ${route.vehicle.plate} - ${route.lastMarca.kind} a las ${route.lastMarca.phoneTimeHhmi}`;
+      vehicleEl.title = `Vehículo ${route.vehicle.plate} - ${currentPositionLabel(position)}`;
 
       const marker = new library.Marker({ element: vehicleEl })
-        .setLngLat([route.lastMarca.longitude, route.lastMarca.latitude])
+        .setLngLat([position.longitude, position.latitude])
         .setPopup(new library.Popup({ offset: 16 }).setDOMContent(marcaPopup))
         .addTo(map);
 

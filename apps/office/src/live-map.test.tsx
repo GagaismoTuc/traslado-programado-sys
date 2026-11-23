@@ -2,6 +2,7 @@ import { renderToStaticMarkup } from "react-dom/server";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { App } from "./App";
 import { LiveMapPage } from "./LiveMapPage";
+import type { LiveRoute } from "@traslado/api";
 import { createMarcaPopupContent, createStopPopupContent, updateMapRoutes } from "./LiveMap";
 import liveMapSource from "./LiveMap.tsx?raw";
 import secondFactorSource from "./SecondFactor.tsx?raw";
@@ -144,6 +145,7 @@ describe("Office live map and ETAs", () => {
           vehicle: { id: 1, plate: "AF123CD" },
           color: "#2e5aa8",
           childrenOnBoard: 2,
+          passengersOnBoard: [{ id: 10, name: "Ana Gómez" }, { id: 11, name: "Bruno Díaz" }],
           lastMarca: {
             id: 99,
             kind: "subio",
@@ -151,6 +153,14 @@ describe("Office live map and ETAs", () => {
             longitude: -65.21,
             phoneTime: "2026-10-23T11:30:00.000Z",
             phoneTimeHhmi: "08:30",
+          },
+          currentPosition: {
+            source: "marca" as const,
+            latitude: -26.83,
+            longitude: -65.21,
+            phoneTime: "2026-10-23T11:30:00.000Z",
+            phoneTimeHhmi: "08:30",
+            accuracyMeters: null,
           },
           stops: [
             {
@@ -219,7 +229,9 @@ describe("Office live map and ETAs", () => {
       vehicle: { id: 2, plate: "AA000BB" },
       color: "#bf4520",
       childrenOnBoard: 0,
+      passengersOnBoard: [],
       lastMarca: null,
+      currentPosition: null,
       stops: [
         {
           id: 1,
@@ -288,6 +300,7 @@ describe("Office live map and ETAs", () => {
       vehicle: { id: 3, plate: "CC111DD" },
       color: "#198754",
       childrenOnBoard: 1,
+      passengersOnBoard: [{ id: 5, name: "Lucas Pérez" }],
       lastMarca: {
         id: 5,
         kind: "subio",
@@ -296,6 +309,7 @@ describe("Office live map and ETAs", () => {
         phoneTime: "2026-10-23T11:30:00.000Z",
         phoneTimeHhmi: "08:30",
       },
+      currentPosition: null,
       stops: [
         {
           id: 1,
@@ -337,7 +351,7 @@ describe("Office live map and ETAs", () => {
 
   it("does not label a planned time as ETA without a mark", () => {
     const stop = { id: 1, position: 1, kind: "pickup" as const, passengerId: 1, passengerName: "Synthetic", placeName: "Synthetic", latitude: 0, longitude: 0, plannedTime: "08:55", eta: null, status: "pending", completed: false };
-    const route = { id: 1, status: "planned", driver: { id: 1, name: "Synthetic" }, vehicle: { id: 1, plate: "TEST" }, color: "#000", childrenOnBoard: 0, lastMarca: null, stops: [stop], nextStop: { ...stop, eta: "08:55" }, geometry: [] as [number, number][] };
+    const route = { id: 1, status: "planned", driver: { id: 1, name: "Synthetic" }, vehicle: { id: 1, plate: "TEST" }, color: "#000", childrenOnBoard: 0, passengersOnBoard: [], lastMarca: null, currentPosition: null, stops: [stop], nextStop: { ...stop, eta: "08:55" }, geometry: [] as [number, number][] };
     const html = renderToStaticMarkup(<LiveMapPage initialData={{ date: "2026-10-23", timeZone: "America/Argentina/Tucuman", routes: [route] }} />);
     expect(html).not.toMatch(/<strong>ETA:<\/strong>\s*<span[^>]*>08:55/);
     expect(html).toContain("Hora planificada:");
@@ -410,6 +424,7 @@ describe("Office live map and ETAs", () => {
       vehicle: { id: 1, plate: "NO-GPS" },
       color: "#ff0000",
       childrenOnBoard: 0,
+      passengersOnBoard: [],
       lastMarca: {
         id: 99,
         kind: "subio",
@@ -418,6 +433,7 @@ describe("Office live map and ETAs", () => {
         phoneTime: "2026-10-23T11:00:00Z",
         phoneTimeHhmi: "08:00",
       },
+      currentPosition: null,
       stops: [
         {
           id: 1,
@@ -459,6 +475,7 @@ describe("Office live map and ETAs", () => {
       vehicle: { id: 1, plate: "ABC123" },
       color: "#00ff00",
       childrenOnBoard: 0,
+      passengersOnBoard: [],
       lastMarca: {
         id: 1,
         kind: "subio",
@@ -466,6 +483,14 @@ describe("Office live map and ETAs", () => {
         longitude: -65.20,
         phoneTime: "2026-10-23T11:00:00Z",
         phoneTimeHhmi: "08:00",
+      },
+      currentPosition: {
+        source: "marca" as const,
+        latitude: -26.82,
+        longitude: -65.20,
+        phoneTime: "2026-10-23T11:00:00Z",
+        phoneTimeHhmi: "08:00",
+        accuracyMeters: null,
       },
       stops: [
         {
@@ -505,5 +530,103 @@ describe("Office live map and ETAs", () => {
     expect(sources.has("route-line-42")).toBe(false);
     expect(markersRef.current).toHaveLength(0);
     expect(createdMarkers.every((m) => m.removed)).toBe(true);
+  });
+  function issue135Route(overrides: Partial<LiveRoute> = {}): LiveRoute {
+    return {
+      id: 7,
+      status: "en_curso",
+      driver: { id: 1, name: "Chofer Sintético" },
+      vehicle: { id: 1, plate: "SIN135" },
+      color: "#2e5aa8",
+      childrenOnBoard: 0,
+      passengersOnBoard: [],
+      lastMarca: null,
+      currentPosition: null,
+      stops: [
+        {
+          id: 1,
+          position: 1,
+          kind: "dropoff",
+          passengerId: 1,
+          passengerName: "Pasajero Sintético",
+          placeName: "Escuela Sintética",
+          latitude: -26.82,
+          longitude: -65.2,
+          plannedTime: "08:45",
+          eta: "08:18",
+          status: "pending",
+          completed: false,
+        },
+      ],
+      nextStop: { id: 1, position: 1, kind: "dropoff", passengerName: "Pasajero Sintético", placeName: "Escuela Sintética", plannedTime: "08:45", eta: "08:18" },
+      geometry: [[-65.21, -26.83], [-65.2, -26.82]],
+      ...overrides,
+    };
+  }
+
+  function renderPanel(route: LiveRoute) {
+    return renderToStaticMarkup(<LiveMapPage initialData={{ date: "2026-10-23", timeZone: "America/Argentina/Tucuman", routes: [route] }} />);
+  }
+
+  function vehicleMarkers(route: LiveRoute) {
+    const { map, library, createdMarkers } = createMockMap();
+    updateMapRoutes(map, library, [route], null, { current: [] }, { current: new Set<number>() });
+    return createdMarkers.filter((m) => m.element?.className === "live-vehicle-marker");
+  }
+
+  it("Regla 1: draws the vehicle marker at the phone's Posición, labelled Celular with its time, and shows its ETA", () => {
+    const route = issue135Route({
+      lastMarca: { id: 1, kind: "subio", latitude: -26.83, longitude: -65.21, phoneTime: "2026-10-23T11:10:00.000Z", phoneTimeHhmi: "08:10" },
+      currentPosition: { source: "posicion", latitude: -26.8, longitude: -65.18, phoneTime: "2026-10-23T11:12:00.000Z", phoneTimeHhmi: "08:12", accuracyMeters: 15 },
+    });
+
+    const markers = vehicleMarkers(route);
+    expect(markers).toHaveLength(1);
+    expect(markers[0].lngLat).toEqual([-65.18, -26.8]);
+
+    const markup = renderPanel(route);
+    expect(markup).toContain('data-testid="route-position-7">Celular, 08:12</span>');
+    expect(markup).toMatch(/<strong>ETA:<\/strong>\s*<span[^>]*>08:18/);
+  });
+
+  it("shows the ETA from a Posición when the Recorrido has no Marcas yet", () => {
+    const markup = renderPanel(issue135Route({
+      currentPosition: { source: "posicion", latitude: -26.8, longitude: -65.18, phoneTime: "2026-10-23T11:12:00.000Z", phoneTimeHhmi: "08:12", accuracyMeters: 15 },
+    }));
+    expect(markup).toMatch(/<strong>ETA:<\/strong>\s*<span[^>]*>08:18/);
+    expect(markup).not.toContain("Hora planificada:");
+  });
+
+  it("Regla 2: labels a position taken from a Marca as Última marca with its time", () => {
+    const route = issue135Route({
+      lastMarca: { id: 2, kind: "entregado", latitude: -26.82, longitude: -65.2, phoneTime: "2026-10-23T11:14:00.000Z", phoneTimeHhmi: "08:14" },
+      currentPosition: { source: "marca", latitude: -26.82, longitude: -65.2, phoneTime: "2026-10-23T11:14:00.000Z", phoneTimeHhmi: "08:14", accuracyMeters: null },
+    });
+
+    expect(vehicleMarkers(route)[0].lngLat).toEqual([-65.2, -26.82]);
+    expect(renderPanel(route)).toContain('data-testid="route-position-7">Última marca, 08:14</span>');
+  });
+
+  it("Regla 3: without a current position there is no vehicle marker, no position label and no ETA", () => {
+    const route = issue135Route({
+      lastMarca: { id: 3, kind: "subio", latitude: null, longitude: null, phoneTime: "2026-10-23T11:10:00.000Z", phoneTimeHhmi: "08:10" },
+      currentPosition: null,
+      stops: [{ ...issue135Route().stops[0], eta: null }],
+      nextStop: { ...issue135Route().nextStop!, eta: null },
+    });
+
+    expect(vehicleMarkers(route)).toEqual([]);
+    const markup = renderPanel(route);
+    expect(markup).not.toContain('data-testid="route-position-7"');
+    expect(markup).toContain("No disponible");
+  });
+
+  it("Regla 8: lists the Pasajeros on board by name next to their count", () => {
+    const markup = renderPanel(issue135Route({
+      childrenOnBoard: 2,
+      passengersOnBoard: [{ id: 2, name: "Pasajero Sintético 2" }, { id: 3, name: "Pasajero Sintético 3" }],
+    }));
+    expect(markup).toContain('data-testid="route-boarded-7">2</span>');
+    expect(markup).toContain('data-testid="route-boarded-names-7">Pasajero Sintético 2, Pasajero Sintético 3</span>');
   });
 });
