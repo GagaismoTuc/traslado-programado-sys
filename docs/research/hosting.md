@@ -2,7 +2,26 @@
 
 **Research date: 2026-10-20.** Prices and offers are snapshots of provider pages on that date, before Argentine taxes, exchange fees, and possible FX/tax charges. A displayed “from” price or promotional rate is not a guaranteed renewal quote. Links are primary sources unless explicitly marked otherwise.
 
+## Decision 2026-11-06
+
+**Hostinger VPS KVM 2 in Alemania (Germany; 2 vCPU, 8 GB RAM, 100 GB NVMe) is the chosen host.** Lautaro confirmed it on 2026-11-06 (see issue #121 and the comment in #35). Reasons: Hostinger bills in ARS, offers installments, and accepts local cards and a Santander Río bank transfer. The Hetzner CX33 recommendation below, and the Hetzner comparison rows, are kept as history.
+
+Price observations from the Hostinger Argentina checkout, read on 2026-11-06 under the “Ofertas Cyber” promo (observations, not guarantees):
+
+| KVM 2 term | Price (ARS) | Renewal |
+|---|---|---|
+| 1 month | 28.599 | 43.899 |
+| 12 months | 241.188 | 35.799/month |
+| 24 months | 415.176 | 31.399/month |
+
+Open questions:
+
+- Whether KVM includes a dedicated IPv4 at no extra cost is UNKNOWN (the plan page does not say).
+- Whether the Hostinger public API (developers.hostinger.com) exposes the VPS data center and firewall rules was not verified. The wizard therefore verifies stages 1-2 by human confirmation (location shown in hPanel, inbound rules listed by the human) plus an external TCP 22 probe, and never calls the Hostinger API or buys anything.
+
 ## Recommendation
+
+> Superseded 2026-11-06 by the decision above: the chosen host is Hostinger KVM 2. The text below is kept as history.
 
 **Recommend Hetzner Cloud in Germany (CX33, 8 GB) plus encrypted off-site backups in Scaleway Paris Object Storage.** The 8 GB EU VPS is a low-cost, contract-flexible single host with a German contracting entity, and the recommended object store is in France; both jurisdictions are on Argentina’s current AAIP adequate-protection list. At captured prices, compute + one IPv4 is about **$10.59/month**, and 20 GB of Scaleway Standard Multi-AZ storage is approximately **€0.32/month (~$0.36)** before VAT. Add **$0** for UptimeRobot’s free external checks and budget **$1–2/month** for a domain (allowance, not a registrar quote): estimated total **$12–13/month before tax and FX**.
 

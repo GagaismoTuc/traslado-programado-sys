@@ -247,7 +247,14 @@ export function PlanPage({ initialDate, initialView }: {
   initialDate?: string;
   initialView?: { date: string; day: Day | null; missing: boolean; unacknowledged?: MissingAcknowledgement[] };
 } = {}) {
-  const [date, setDate] = useState(() => initialDate ?? todayInPlanZone());
+  const [date, setDate] = useState(() => {
+    if (initialDate) return initialDate;
+    if (typeof window !== "undefined") {
+      const q = new URLSearchParams(window.location.search).get("date");
+      if (q && /^\d{4}-\d{2}-\d{2}$/.test(q)) return q;
+    }
+    return todayInPlanZone();
+  });
   // The loaded view remembers its date, so a day is shown and mutable only while that date is selected.
   const [view, setView] = useState<{ date: string; day: Day | null; missing: boolean; unacknowledged: MissingAcknowledgement[] } | null>(() => (
     initialView ? { unacknowledged: [], ...initialView } : null
@@ -264,6 +271,7 @@ export function PlanPage({ initialDate, initialView }: {
   // The last "Order" answer per Recorrido, so what the engine could not place stays on screen.
   const [orders, setOrders] = useState<Record<number, OrderResult>>({});
   const [refusal, setRefusal] = useState<Refusal | null>(null);
+  const [printRefusal, setPrintRefusal] = useState<{ message: string; transfers: Transfer[] } | null>(null);
   const [cascade, setCascade] = useState<CascadeWarning[]>([]);
   const [warnings, setWarnings] = useState<DocumentWarning[]>([]);
   const [warningsUnavailable, setWarningsUnavailable] = useState(false);
@@ -318,6 +326,7 @@ export function PlanPage({ initialDate, initialView }: {
   useEffect(() => {
     // Publication results belong to the day they were made for.
     setRefusal(null);
+    setPrintRefusal(null);
     setCascade([]);
     setWarnings([]);
     setWarningsUnavailable(false);
@@ -428,6 +437,18 @@ export function PlanPage({ initialDate, initialView }: {
     } finally {
       setCopying(false);
     }
+  }
+
+  function handlePrintExport() {
+    if (view?.day && view.day.unpublishedTransferIds.length > 0) {
+      const unpublished = view.day.transfers.filter((t) => view.day!.unpublishedTransferIds.includes(t.id));
+      setPrintRefusal({
+        message: "The Plan diario cannot be printed: some Traslados have no published Recorrido",
+        transfers: unpublished,
+      });
+      return;
+    }
+    window.location.assign(`/plan/print?date=${date}`);
   }
 
   function submit(handler: (values: FormData) => Promise<boolean>) {
@@ -685,7 +706,14 @@ export function PlanPage({ initialDate, initialView }: {
           </form>}
         </div>}
       </li>)}</ul>
-      <button type="button" disabled={publishing} onClick={() => void publishDay()}>Publish the whole plan</button>
+      <div className="plan-actions">
+        <button type="button" disabled={publishing} onClick={() => void publishDay()}>Publish the whole plan</button>
+        <button type="button" onClick={handlePrintExport}>Print or export Plan diario</button>
+      </div>
+      {printRefusal && <div role="alert" data-testid="print-refusal">
+        <p>{printRefusal.message}</p>
+        <ul>{printRefusal.transfers.map((t) => <li key={t.id}>{transferLabel(t)}</li>)}</ul>
+      </div>}
       {summary && <DaySummaryView summary={summary} routes={routes} />}
 
       <form onSubmit={addRoute}>

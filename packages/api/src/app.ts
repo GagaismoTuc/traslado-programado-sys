@@ -1151,6 +1151,179 @@ async function copyFromLastWeekday(client: Queryable, actorId: number, targetDat
   };
 }
 
+async function loadDailyPlanPrint(client: Queryable, date: string) {
+  const planResult = await client.query(
+    "SELECT id, to_char(plan_date, 'YYYY-MM-DD') AS date, time_zone AS \"timeZone\" FROM daily_plans WHERE plan_date = $1",
+    [date],
+  ) as QueryResult;
+  const plan = planResult.rows[0];
+  if (!plan) return null;
+  const planId = Number(plan.id);
+
+  // A Traslado has a published Recorrido when the latest version of its current Recorrido serves it.
+  const unpublished = await client.query(
+    `SELECT t.id, t.direction, to_char(t.target_time, 'HH24:MI') AS target_time,
+            p.name AS passenger_name, d.name AS destination_name
+       FROM transfers t
+       JOIN passengers p ON p.id = t.passenger_id
+       JOIN destinations d ON d.id = t.destination_id
+       LEFT JOIN stops s ON s.transfer_id = t.id AND s.kind = 'pickup'
+      WHERE t.daily_plan_id = $1 AND t.status <> 'cancelado_ausencia'
+        AND NOT EXISTS (
+          SELECT 1 FROM plan_version_transfers pvt JOIN plan_versions pv ON pv.id = pvt.plan_version_id
+           WHERE pvt.transfer_id = t.id AND pv.route_id = s.route_id
+             AND pv.version = (SELECT max(version) FROM plan_versions latest WHERE latest.route_id = s.route_id))
+      ORDER BY t.target_time, t.id`,
+    [planId],
+  ) as QueryResult;
+
+  if (unpublished.rows.length > 0) {
+    return {
+      status: 409 as const,
+      error: "The Plan diario cannot be printed: some Traslados have no published Recorrido",
+      unpublishedTransfers: unpublished.rows.map((row) => ({
+        id: Number(row.id),
+        passengerName: String(row.passenger_name),
+        direction: String(row.direction),
+        destinationName: String(row.destination_name),
+        targetTime: String(row.target_time),
+        label: `${row.target_time} ${row.passenger_name}: ${row.direction} → ${row.destination_name}`,
+      })),
+    };
+  }
+
+  const versions = await client.query(
+    `SELECT DISTINCT ON (pv.route_id)
+            pv.id, pv.route_id AS "routeId", pv.version,
+            to_char(pv.start_time, 'HH24:MI') AS "startTime",
+            to_char(pv.end_time, 'HH24:MI') AS "endTime",
+            pv.published_at AS "publishedAt",
+            dr.id AS "driverId", dr.name AS "driverName",
+            v.id AS "vehicleId", v.plate AS "vehiclePlate", v.model AS "vehicleModel"
+       FROM plan_versions pv
+       JOIN routes r ON r.id = pv.route_id
+       JOIN daily_plans dp ON dp.id = r.daily_plan_id
+       JOIN drivers dr ON dr.id = pv.driver_id
+       JOIN vehicles v ON v.id = pv.vehicle_id
+      WHERE dp.id = $1
+      ORDER BY pv.route_id, pv.version DESC`,
+    [planId],
+  ) as QueryResult;
+
+  if (versions.rows.length === 0) {
+    return {
+      status: 200 as const,
+      data: {
+        plan: { date: String(plan.date), timeZone: String(plan.timeZone) },
+        routes: [],
+      },
+    };
+  }
+
+  const versionIds = versions.rows.map((row) => Number(row.id));
+  const legs = await client.query(
+    `SELECT l.plan_version_id, l.position, l.kind, to_char(l.planned_time, 'HH24:MI') AS planned_time, l.transfer_id, t.direction,
+            t.status, t.destination_id, t.origin_destination_id, pvt.companions, p.name, p.home_address, p.access_notes AS home_notes, p.wheelchair, p.medical_alert,
+            CASE WHEN l.kind = 'dropoff' AND nx.id IS NOT NULL THEN 'dropoff' ELSE t.trasbordo_stop END AS trasbordo_stop,
+            CASE WHEN l.kind = 'dropoff' AND nx.id IS NOT NULL THEN nx.trasbordo_latitude ELSE t.trasbordo_latitude END AS trasbordo_latitude,
+            CASE WHEN l.kind = 'dropoff' AND nx.id IS NOT NULL THEN nx.trasbordo_longitude ELSE t.trasbordo_longitude END AS trasbordo_longitude,
+            d.name AS d_name, d.address AS d_address, d.access_notes AS d_notes,
+            o.name AS o_name, o.address AS o_address, o.access_notes AS o_notes
+       FROM plan_version_legs l
+       JOIN plan_version_transfers pvt ON pvt.plan_version_id = l.plan_version_id AND pvt.transfer_id = l.transfer_id
+       JOIN transfers t ON t.id = l.transfer_id
+       JOIN passengers p ON p.id = t.passenger_id
+       JOIN destinations d ON d.id = t.destination_id
+       LEFT JOIN destinations o ON o.id = t.origin_destination_id
+       ${NEXT_LEG_JOIN_SQL}
+      WHERE l.plan_version_id = ANY($1::int[])
+      ORDER BY l.plan_version_id, l.position`,
+    [versionIds],
+  ) as QueryResult;
+
+  const sortedVersions = [...versions.rows].sort((a, b) => {
+    const timeCmp = String(a.startTime).localeCompare(String(b.startTime));
+    return timeCmp !== 0 ? timeCmp : Number(a.routeId) - Number(b.routeId);
+  });
+
+  const routes = sortedVersions.map((row) => {
+    const routeLegs = legs.rows.filter((l) => Number(l.plan_version_id) === Number(row.id));
+    const stops = routeLegs.map((leg) => {
+      const isTrasbordo = leg.trasbordo_stop === leg.kind;
+      const prefix = leg.kind === "pickup"
+        ? (leg.direction === "entrada" ? (leg.o_name === null ? null : "o") : "d")
+        : (leg.direction === "entrada" ? "d" : null);
+
+      const placeName = isTrasbordo
+        ? "Trasbordo"
+        : prefix === null
+        ? "Domicilio"
+        : String(leg[`${prefix}_name`]);
+
+      const address = isTrasbordo
+        ? `${leg.trasbordo_latitude}, ${leg.trasbordo_longitude}`
+        : prefix === null
+        ? String(leg.home_address)
+        : String(leg[`${prefix}_address`]);
+
+      const placeAccessNotes = isTrasbordo
+        ? null
+        : prefix === null
+        ? (leg.home_notes as string | null) ?? null
+        : (leg[`${prefix}_notes`] as string | null) ?? null;
+
+      const passengerAccessNotes = (leg.home_notes as string | null) ?? null;
+      const accessNotes = [placeAccessNotes, passengerAccessNotes !== placeAccessNotes ? passengerAccessNotes : null]
+        .filter(Boolean)
+        .join(" / ") || null;
+
+      return {
+        position: Number(leg.position),
+        kind: String(leg.kind) as "pickup" | "dropoff",
+        plannedTime: String(leg.planned_time),
+        transferId: Number(leg.transfer_id),
+        direction: String(leg.direction),
+        passengerName: String(leg.name),
+        companions: Number(leg.companions),
+        wheelchair: Boolean(leg.wheelchair),
+        medicalAlert: (leg.medical_alert as string | null) ?? null,
+        accessNotes,
+        passengerAccessNotes,
+        placeAccessNotes,
+        destinationName: String(leg.d_name),
+        placeName,
+        address,
+      };
+    });
+
+    return {
+      routeId: Number(row.routeId),
+      version: Number(row.version),
+      publishedAt: new Date(String(row.publishedAt)).toISOString(),
+      startTime: String(row.startTime),
+      endTime: String(row.endTime),
+      driver: {
+        id: Number(row.driverId),
+        name: String(row.driverName),
+      },
+      vehicle: {
+        id: Number(row.vehicleId),
+        plate: String(row.vehiclePlate),
+        model: String(row.vehicleModel),
+      },
+      stops,
+    };
+  });
+
+  return {
+    status: 200 as const,
+    data: {
+      plan: { date: String(plan.date), timeZone: String(plan.timeZone) },
+      routes,
+    },
+  };
+}
+
 export const ROUTE_COLORS = [
   "#2e5aa8",
   "#bf4520",
@@ -2442,6 +2615,34 @@ function parseMark(body: unknown): MarkFields | { error: string } | null {
   const receiver = kind === "entregado" ? parseMarkReceiver(body.receiver) : null;
   if (kind === "entregado" && !receiver) return null;
   return { id, transferId, kind, phoneTime: phoneTime.toISOString(), location, version, receiver, ...(corrects ? { corrects } : {}) };
+}
+
+const POSITION_BATCH_LIMIT = 100;
+const POSITION_FUTURE_TOLERANCE_MS = 2 * 60 * 1000;
+
+type PositionInput = { lat: number; lng: number; accuracyMeters: number; phoneTime: string };
+
+/** A batch of Chofer phone Posiciones; every entry is validated before anything is stored. */
+function parsePositionBatch(body: unknown, serverNow: Date): PositionInput[] | null {
+  if (!isObject(body) || !Array.isArray(body.positions)) return null;
+  if (body.positions.length === 0 || body.positions.length > POSITION_BATCH_LIMIT) return null;
+  const latestAllowed = serverNow.getTime() + POSITION_FUTURE_TOLERANCE_MS;
+  const items: PositionInput[] = [];
+  for (const entry of body.positions) {
+    if (!isObject(entry)) return null;
+    const lat = coordinate(entry.lat, 90);
+    const lng = coordinate(entry.lng, 180);
+    const accuracyMeters = typeof entry.accuracyMeters === "number" && Number.isFinite(entry.accuracyMeters) && entry.accuracyMeters >= 0
+      ? entry.accuracyMeters
+      : null;
+    const phoneTime = typeof entry.phoneTime === "string" && /T.*(Z|[+-]\d{2}:\d{2})$/.test(entry.phoneTime)
+      ? new Date(entry.phoneTime)
+      : null;
+    if (lat === null || lng === null || accuracyMeters === null || !phoneTime || Number.isNaN(phoneTime.getTime())) return null;
+    if (phoneTime.getTime() > latestAllowed) return null;
+    items.push({ lat, lng, accuracyMeters, phoneTime: phoneTime.toISOString() });
+  }
+  return items;
 }
 
 const MARK_SELECT_SQL = `
@@ -4295,6 +4496,16 @@ export function createApp({ db, routing, router, geocoder, solver, travelTime, c
         return planningFailure(context, error);
       }
     })
+    .get("/daily-plans/:date/print", async (context) => {
+      const actor = await requireOffice(context);
+      if (actor instanceof Response) return actor;
+      const date = parsePlanDate(context.req.param("date"));
+      if (!date) return context.json({ error: "Invalid request" }, 400);
+      const result = await loadDailyPlanPrint(db, date);
+      if (!result) return context.json({ error: "Plan diario not found" }, 404);
+      if (result.status === 409) return context.json({ error: result.error, unpublishedTransfers: result.unpublishedTransfers }, 409);
+      return context.json(result.data);
+    })
     .post("/daily-plans/:date/transfers", async (context) => {
       const actor = await requireOffice(context);
       if (actor instanceof Response) return actor;
@@ -5077,6 +5288,45 @@ export function createApp({ db, routing, router, geocoder, solver, travelTime, c
       try {
         const { status, ...result } = await inTransaction(db, async (client) => await recordMark(client, chofer, id, fields));
         return context.json(result, status);
+      } catch (error) {
+        return planningFailure(context, error);
+      }
+    })
+    // A batch of phone Posiciones during Seguimiento of an En curso Recorrido; resending the same phoneTime is ignored.
+    .post("/driver/routes/:id/positions", async (context) => {
+      const chofer = await requireDriver(context);
+      if (chofer instanceof Response) return chofer;
+      const id = parseId(context.req.param("id"));
+      const current = now();
+      const batch = parsePositionBatch(await context.req.json().catch(() => null), current);
+      if (!id || !batch) return context.json({ error: "Invalid request" }, 400);
+      const route = await ownRoute(context, chofer.driverId, id, true);
+      if (route instanceof Response) return route;
+      try {
+        const result = await inTransaction(db, async (client) => {
+          const status = await lockOwnRoute(client, chofer.driverId, id);
+          if (status !== "en_curso") throw new PlanningError(409, "Positions can only be recorded while the Recorrido is en curso");
+          const inserted = await client.query(
+            `INSERT INTO positions (route_id, driver_id, latitude, longitude, accuracy_meters, phone_time, server_time)
+             SELECT $1, $2, lat, lng, accuracy_meters, phone_time, $7
+               FROM unnest($3::double precision[], $4::double precision[], $5::double precision[], $6::timestamptz[])
+                 AS batch(lat, lng, accuracy_meters, phone_time)
+             ON CONFLICT (route_id, phone_time) DO NOTHING
+             RETURNING id`,
+            [
+              id,
+              chofer.driverId,
+              batch.map((item) => item.lat),
+              batch.map((item) => item.lng),
+              batch.map((item) => item.accuracyMeters),
+              batch.map((item) => item.phoneTime),
+              current,
+            ],
+          ) as QueryResult;
+          const saved = inserted.rows.length;
+          return { saved, ignored: batch.length - saved };
+        });
+        return context.json(result, result.saved > 0 ? 201 : 200);
       } catch (error) {
         return planningFailure(context, error);
       }
