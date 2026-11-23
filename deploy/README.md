@@ -65,9 +65,17 @@ commit and the pinned OSRM image, creates a synthetic database, and prints an
 office URL and a driver URL. Set `IMAGE_TAG` before the first `up` to select a
 different published application image tag. The driver username is
 `synthetic-driver`; its generated password is in
-`$HOME/traslado-staging/staging/driver-password`. The generated env and tunnel
-state are alongside it, outside the repository; keep that directory private.
-`DEPLOY_ROOT` may select a different external directory before the first `up`.
+`$HOME/traslado-staging/staging/driver-password`. The office username is
+`demo-oficina`; its generated password is in
+`$HOME/traslado-staging/staging/office-password` (or
+`$DEPLOY_ROOT/staging/office-password`), with operator-only permissions. Its
+second factor (TOTP) stays active and is enrolled by the demo seed command. If
+`office-password` is missing while the office account already exists in the
+staging database, `up` fails without overwriting it; remove the local staging
+state or recover the account with `db:break-glass-office`. The generated env
+and tunnel state are alongside them, outside the repository; keep that
+directory private. `DEPLOY_ROOT` may select a different external directory
+before the first `up`.
 
 `down` stops the containers and tunnels but retains the staging database volume.
 Never import production data into it. Quick Tunnels are temporary and have no
