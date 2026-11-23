@@ -4,7 +4,7 @@
 
 export const KEEP_SCREEN_ON_NOTICE = "Dejá la pantalla encendida y la app abierta para que la Oficina te siga";
 
-/** idle: nothing to keep awake or app hidden; held: the screen Wake Lock is active; unavailable: show the notice. */
+/** idle: no Recorrido en curso; held: the screen Wake Lock was granted; unavailable: show the notice. Hiding the app changes nothing. */
 export type ScreenWakeState = "idle" | "held" | "unavailable";
 
 export type ScreenWakeLockSentinel = Pick<EventTarget, "addEventListener" | "removeEventListener"> & {
