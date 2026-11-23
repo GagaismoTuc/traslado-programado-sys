@@ -4,7 +4,7 @@ set -eu
 if [ "$#" -ne 1 ]; then echo 'Usage: local-staging.sh <up|down>' >&2; exit 2; fi
 case "$1" in up|down) ;; *) echo 'Usage: local-staging.sh <up|down>' >&2; exit 2;; esac
 requested_tag=${IMAGE_TAG-}
-unset IMAGE_TAG POSTGRES_USER POSTGRES_PASSWORD POSTGRES_DB DATABASE_URL MIGRATION_DATABASE_URL BOOTSTRAP_DATABASE_URL MIGRATION_PASSWORD APPLICATION_PASSWORD SERVER_EPOCH AUTH_ALLOWED_ORIGINS PRODUCTION_HOST STAGING_HOST DEPLOY_SUBNET INGRESS_SUBNET INGRESS_PREFIX TRUSTED_PROXY_CIDRS LOCAL_DRIVER_HOST COMPOSE_PROFILES COMPOSE_FILE COMPOSE_PROJECT_NAME COMPOSE_ENV_FILES
+unset IMAGE_TAG POSTGRES_USER POSTGRES_PASSWORD POSTGRES_DB DATABASE_URL MIGRATION_DATABASE_URL BOOTSTRAP_DATABASE_URL BOOTSTRAP_OFFICE_PASSWORD MIGRATION_PASSWORD APPLICATION_PASSWORD SERVER_EPOCH AUTH_ALLOWED_ORIGINS PRODUCTION_HOST STAGING_HOST DEPLOY_SUBNET INGRESS_SUBNET INGRESS_PREFIX TRUSTED_PROXY_CIDRS LOCAL_DRIVER_HOST COMPOSE_PROFILES COMPOSE_FILE COMPOSE_PROJECT_NAME COMPOSE_ENV_FILES
 DEPLOY_PROJECT=staging; export DEPLOY_PROJECT
 root=$(CDPATH='' cd -- "$(dirname -- "$0")/.." && pwd -P)
 DEPLOY_ROOT=${DEPLOY_ROOT:-${HOME:?HOME is required}/traslado-staging}
@@ -57,7 +57,7 @@ stop_all() {
   rm -f "$state/local-staging-active" "$state/urls"
 }
 if [ "$1" = down ]; then stop_all; exit 0; fi
-if [ -f "$state/urls" ] && tunnel_alive office && tunnel_alive driver &&
+if [ ! -L "$state/office-password" ] && [ -f "$state/office-password" ] && [ -n "$(tr -d ' \t\r\n' < "$state/office-password")" ] && [ -f "$state/urls" ] && tunnel_alive office && tunnel_alive driver &&
    compose exec -T api node -e 'fetch("http://127.0.0.1:3000/health",{signal:AbortSignal.timeout(3000)}).then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))' >/dev/null 2>&1; then
   cat "$state/urls"; exit 0
 fi
@@ -172,6 +172,50 @@ SELECT id, 'Synthetic Driver 001', 'Synthetic address 002', -26.8241, -65.2036
 FROM users WHERE username = 'synthetic-driver' AND role = 'driver'
 ON CONFLICT (user_id) DO NOTHING;
 SQL
+office_password_file=$state/office-password
+if [ -L "$office_password_file" ] || { [ -e "$office_password_file" ] && [ ! -f "$office_password_file" ]; }; then
+  echo 'Invalid local staging office-password; remove local staging state or run db:break-glass-office' >&2
+  exit 1
+fi
+if [ -f "$office_password_file" ]; then
+  office_password_existed=1
+  BOOTSTRAP_OFFICE_PASSWORD=$(tr -d '\r\n' < "$office_password_file")
+  if [ -z "$(printf '%s' "$BOOTSTRAP_OFFICE_PASSWORD" | tr -d ' \t')" ]; then
+    unset BOOTSTRAP_OFFICE_PASSWORD
+    echo 'Empty local staging office-password; remove local staging state or run db:break-glass-office' >&2
+    exit 1
+  fi
+else
+  office_password_existed=0
+  BOOTSTRAP_OFFICE_PASSWORD=$(openssl rand -hex 12)
+fi
+export BOOTSTRAP_OFFICE_PASSWORD
+office_bootstrap_status=0
+office_bootstrap_out=$(compose run --rm --no-deps -e BOOTSTRAP_OFFICE_PASSWORD bootstrap pnpm --filter @traslado/api db:bootstrap-office demo-oficina 2>&1) || office_bootstrap_status=$?
+if [ "$office_bootstrap_status" -eq 0 ]; then
+  if [ "$office_password_existed" -eq 0 ]; then
+    rm -f "$office_password_file.tmp"
+    printf '%s\n' "$BOOTSTRAP_OFFICE_PASSWORD" > "$office_password_file.tmp"
+    chmod 600 "$office_password_file.tmp"
+    mv "$office_password_file.tmp" "$office_password_file"
+  fi
+  unset BOOTSTRAP_OFFICE_PASSWORD
+  [ -z "$office_bootstrap_out" ] || printf '%s\n' "$office_bootstrap_out" >&2
+else
+  unset BOOTSTRAP_OFFICE_PASSWORD
+  if printf '%s\n' "$office_bootstrap_out" | grep -Fq 'An Office account already exists'; then
+    if [ "$office_password_existed" -eq 1 ]; then
+      printf '%s\n' "$office_bootstrap_out" >&2
+    else
+      echo 'Office account already exists in local staging, but office-password is missing; remove local staging state or run db:break-glass-office' >&2
+      exit 1
+    fi
+  else
+    [ -z "$office_bootstrap_out" ] || printf '%s\n' "$office_bootstrap_out" >&2
+    echo 'Office bootstrap failed' >&2
+    exit 1
+  fi
+fi
 compose up -d --pull never >&2
 attempt=0
 until compose exec -T api node -e 'fetch("http://127.0.0.1:3000/health",{signal:AbortSignal.timeout(3000)}).then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))' >/dev/null 2>&1; do
