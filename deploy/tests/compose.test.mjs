@@ -83,6 +83,22 @@ test('the example trusts only the gateway and edge networks of the project', () 
   assert.doesNotMatch(readFileSync('deploy/Caddyfile', 'utf8'), /trusted_proxies/, 'the edge faces clients and trusts no proxy');
 });
 
+test('the API receives VAPID keys and a non-empty default VAPID_SUBJECT when VAPID_SUBJECT is unset', () => {
+  const envWithoutSubject = { ...process.env, IMAGE_TAG: 'review', VAPID_PUBLIC_KEY: 'pub-key', VAPID_PRIVATE_KEY: 'priv-key' };
+  delete envWithoutSubject.VAPID_SUBJECT;
+  const withoutSubject = JSON.parse(execFileSync('docker', ['compose', '--env-file', 'deploy/.env.example', '-f', 'deploy/compose.yaml', 'config', '--format', 'json'], {
+    encoding: 'utf8', env: envWithoutSubject,
+  }));
+  assert.equal(withoutSubject.services.api.environment.VAPID_PUBLIC_KEY, 'pub-key');
+  assert.equal(withoutSubject.services.api.environment.VAPID_PRIVATE_KEY, 'priv-key');
+  assert.equal(withoutSubject.services.api.environment.VAPID_SUBJECT, 'mailto:soporte@traslado.com');
+
+  const withSubject = JSON.parse(execFileSync('docker', ['compose', '--env-file', 'deploy/.env.example', '-f', 'deploy/compose.yaml', 'config', '--format', 'json'], {
+    encoding: 'utf8', env: { ...envWithoutSubject, VAPID_SUBJECT: 'mailto:ops@example.invalid' },
+  }));
+  assert.equal(withSubject.services.api.environment.VAPID_SUBJECT, 'mailto:ops@example.invalid');
+});
+
 test('local staging runs the offline prototype from the already-pulled API image, read-only and unpublished', () => {
   const text = execFileSync('docker', ['compose', '--project-name', 'traslado-staging', '--env-file', 'deploy/.env.example', '-f', 'deploy/compose.yaml', '-f', 'deploy/local-staging.compose.yaml', 'config', '--format', 'json'], {
     encoding: 'utf8', env: { ...process.env, IMAGE_TAG: 'test', DEPLOY_PROJECT: 'staging' },

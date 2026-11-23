@@ -25,7 +25,7 @@ const configSchema = z.object({
   BASE_ADDRESS: z.string().trim().max(500, "BASE_ADDRESS must be at most 500 characters").optional(),
   VAPID_PUBLIC_KEY: z.string().trim().optional(),
   VAPID_PRIVATE_KEY: z.string().trim().optional(),
-  VAPID_SUBJECT: z.string().trim().default("mailto:soporte@traslado.com"),
+  VAPID_SUBJECT: z.string().trim().optional(),
 });
 
 export type ServerConfig = {
@@ -49,6 +49,8 @@ export type ServerConfig = {
     subject: string;
   } | null;
 };
+
+const DEFAULT_VAPID_SUBJECT = "mailto:soporte@traslado.com";
 
 const DEFAULT_TRUSTED_ORIGINS = [
   "http://localhost:5173",
@@ -85,7 +87,7 @@ export function readConfig(environment: NodeJS.ProcessEnv = process.env): Server
     ? {
         publicKey: result.data.VAPID_PUBLIC_KEY,
         privateKey: result.data.VAPID_PRIVATE_KEY,
-        subject: result.data.VAPID_SUBJECT,
+        subject: result.data.VAPID_SUBJECT || DEFAULT_VAPID_SUBJECT,
       }
     : null;
 
