@@ -1,0 +1,92 @@
+# Self-hosted GlitchTip error tracker behind a private Caddy admin path.
+# Only Caddy binds a host port, and only on 127.0.0.1 so edge TLS (#36) or an SSH tunnel fronts it.
+# Measured RSS across all 3 containers under C2 ingest: ~252-336 MiB (glitchtip ~176-259 MiB, postgres ~61-63 MiB, caddy ~14 MiB).
+name: traslado-glitchtip
+
+x-logging: &default-logging
+  driver: json-file
+  options:
+    max-size: "10m"
+    max-file: "3"
+
+services:
+  postgres:
+    image: postgres:16.15-alpine@sha256:0cefaabd882e42bcb2a2f3dc56d3ce4770560ba62fd7f197f1a2e008fd5731ab
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: ${GLITCHTIP_POSTGRES_DB:-glitchtip}
+      POSTGRES_USER: ${GLITCHTIP_POSTGRES_USER:-glitchtip}
+      POSTGRES_PASSWORD: ${GLITCHTIP_POSTGRES_PASSWORD:?GLITCHTIP_POSTGRES_PASSWORD is required}
+    volumes:
+      - glitchtip-postgres:/var/lib/postgresql/data
+    logging: *default-logging
+    deploy:
+      resources:
+        limits:
+          memory: 256M
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U \"$${POSTGRES_USER}\" -d \"$${POSTGRES_DB}\""]
+      interval: 2s
+      timeout: 3s
+      retries: 30
+
+  glitchtip:
+    image: glitchtip/glitchtip:6.2.6@sha256:a3d8eb1b36c1e1603d55ab32711ea3dd8115874742a781a57391a62a16e0dff6
+    command: ["./bin/run-all-in-one.sh"]
+    restart: unless-stopped
+    depends_on:
+      postgres:
+        condition: service_healthy
+    environment:
+      DATABASE_URL: postgres://${GLITCHTIP_POSTGRES_USER:-glitchtip}:${GLITCHTIP_POSTGRES_PASSWORD}@postgres:5432/${GLITCHTIP_POSTGRES_DB:-glitchtip}
+      VALKEY_URL: ""
+      SECRET_KEY: ${GLITCHTIP_SECRET_KEY:?GLITCHTIP_SECRET_KEY is required}
+      GLITCHTIP_DOMAIN: ${GLITCHTIP_DOMAIN:-http://127.0.0.1:8080}
+      ALLOWED_HOSTS: ${GLITCHTIP_ALLOWED_HOSTS:-127.0.0.1,localhost,glitchtip}
+      BASE_PATH: ${GLITCHTIP_ADMIN_PATH:-/_glitchtip}
+      PORT: "8000"
+      WEB_CONCURRENCY: "1"
+      ENABLE_USER_REGISTRATION: "false"
+      ENABLE_ORGANIZATION_CREATION: "false"
+      GLITCHTIP_ENABLE_MCP: "false"
+      GLITCHTIP_MAX_EVENT_LIFE_DAYS: "${GLITCHTIP_RETENTION_DAYS:-30}"
+      EMAIL_URL: "${GLITCHTIP_EMAIL_URL:-consolemail://}"
+    logging: *default-logging
+    deploy:
+      resources:
+        limits:
+          memory: 768M
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/_health/', timeout=3)"]
+      interval: 2s
+      timeout: 5s
+      retries: 60
+      start_period: 120s
+
+  caddy:
+    image: caddy:2.11.7-alpine@sha256:e70b164da81ef698b3ad19af799ea6086ce6d9e48ed4079eb9fe26f6fbf14ee5
+    restart: unless-stopped
+    depends_on:
+      glitchtip:
+        condition: service_healthy
+    ports:
+      - "127.0.0.1:${GLITCHTIP_PORT:-8080}:8080"
+    environment:
+      GLITCHTIP_ADMIN_PATH: ${GLITCHTIP_ADMIN_PATH:-/_glitchtip}
+      GLITCHTIP_ADMIN_USER: ${GLITCHTIP_ADMIN_USER:?GLITCHTIP_ADMIN_USER is required}
+      GLITCHTIP_ADMIN_PASSWORD_HASH: ${GLITCHTIP_ADMIN_PASSWORD_HASH:?GLITCHTIP_ADMIN_PASSWORD_HASH is required}
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+    logging: *default-logging
+    deploy:
+      resources:
+        limits:
+          memory: 128M
+    healthcheck:
+      test: ["CMD", "wget", "-q", "-O", "/dev/null", "http://127.0.0.1:8080/healthz"]
+      interval: 2s
+      timeout: 3s
+      retries: 30
+
+volumes:
+  glitchtip-postgres:

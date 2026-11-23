@@ -9,6 +9,7 @@
     "test:e2e": "playwright test"
   },
   "dependencies": {
+    "@sentry/browser": "11.10.0",
     "@traslado/api": "workspace:*",
     "@traslado/shared": "workspace:*",
     "hono": "4.13.13",

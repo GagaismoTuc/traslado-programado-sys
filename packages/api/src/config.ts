@@ -43,6 +43,7 @@ export type ServerConfig = {
   nominatimUrl: string;
   nominatimUserAgent: string;
   baseAddress: string | null;
+  glitchtipDsn: string | null;
   vapid: {
     publicKey: string;
     privateKey: string;
@@ -73,6 +74,18 @@ function readTrustedOrigins(value: string | undefined) {
   });
 }
 
+function readOptionalUrl(value: string | undefined, message: string): string | null {
+  const trimmed = value?.trim();
+  if (!trimmed) return null;
+  try {
+    const url = new URL(trimmed);
+    if (!["http:", "https:"].includes(url.protocol)) throw new Error();
+    return trimmed;
+  } catch {
+    throw new Error(message);
+  }
+}
+
 export function readConfig(environment: NodeJS.ProcessEnv = process.env): ServerConfig {
   if (!environment.SERVER_EPOCH?.trim()) throw new Error("SERVER_EPOCH is required");
   const result = configSchema.safeParse(environment);
@@ -82,6 +95,7 @@ export function readConfig(environment: NodeJS.ProcessEnv = process.env): Server
   }
   const speedFactors = parseSpeedFactors(result.data.SPEED_FACTORS);
   if (!speedFactors) throw new Error("SPEED_FACTORS must be a comma-separated list of HH:MM=factor with factors above 0 and up to 5");
+  const glitchtipDsn = readOptionalUrl(environment.GLITCHTIP_DSN, "GLITCHTIP_DSN must be a valid URL");
 
   const vapid = result.data.VAPID_PUBLIC_KEY && result.data.VAPID_PRIVATE_KEY
     ? {
@@ -107,6 +121,7 @@ export function readConfig(environment: NodeJS.ProcessEnv = process.env): Server
     nominatimUrl: result.data.NOMINATIM_URL,
     nominatimUserAgent: result.data.NOMINATIM_USER_AGENT,
     baseAddress: result.data.BASE_ADDRESS || null,
+    glitchtipDsn,
     vapid,
   };
 }

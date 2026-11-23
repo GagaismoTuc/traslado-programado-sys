@@ -17,6 +17,7 @@ import {
   type SecondFactorStep,
   type SessionRow,
 } from "./sessions.js";
+import type { ApiRequestMetadata } from "./error-tracking.js";
 import type { GeocodeResult, Geocoder } from "./geocoding.js";
 import type { TravelTime } from "./routing.js";
 import { canonicalIp, createTrustedProxies, forwardedClientIp } from "./trusted-proxies.js";
@@ -38,6 +39,7 @@ export type RoutingHealth = {
 export type RouteLeg = { distanceMeters: number; durationSeconds: number };
 /** Road legs between consecutive points, in order: n points give n - 1 legs. */
 export type Router = (points: { lat: number; lng: number }[]) => Promise<RouteLeg[]>;
+export type ErrorReporter = (error: unknown, request: ApiRequestMetadata) => void;
 
 export type AppConfig = {
   serverEpoch: ServerEpoch;
@@ -2841,7 +2843,7 @@ function formatIncident(row: Record<string, unknown>) {
   };
 }
 
-export function createApp({ db, routing, router, geocoder, solver, travelTime, pushSender: customPushSender, config }: {
+export function createApp({ db, routing, router, geocoder, solver, travelTime, errorReporter, pushSender: customPushSender, config }: {
   db: HealthDatabase;
   routing: RoutingHealth;
   router?: Router;
@@ -2849,6 +2851,7 @@ export function createApp({ db, routing, router, geocoder, solver, travelTime, p
   // Solve VROOM problems and measure driving time for "Order"; without them ordering answers 503.
   solver?: VroomSolver;
   travelTime?: TravelTime;
+  errorReporter?: ErrorReporter;
   pushSender?: PushSender;
   config: AppConfig;
 }) {
@@ -5920,7 +5923,12 @@ export function createApp({ db, routing, router, geocoder, solver, travelTime, p
       if (!result) return context.json({ error: "No match for this address" }, 404);
       return context.json({ lat: result.lat, lng: result.lng, displayName: result.displayName });
     })
-    .onError((_error, context) => {
+    .onError((error, context) => {
+      try {
+        errorReporter?.(error, { method: context.req.method, url: context.req.url, headers: context.req.header() });
+      } catch {
+        // Error reporting must never change the HTTP 500 response.
+      }
       context.header("X-Server-Epoch", config.serverEpoch);
       return context.body(null, 500);
     });
