@@ -1384,6 +1384,19 @@ export type LiveLastMarca = {
   phoneTimeHhmi: string;
 };
 
+/** Where the Oficina sees a Recorrido: its latest Posición or, if a located Marca is more recent, that Marca. */
+export type LiveCurrentPosition = {
+  source: "posicion" | "marca";
+  latitude: number;
+  longitude: number;
+  phoneTime: string;
+  phoneTimeHhmi: string;
+  /** Only a Posición carries the phone's accuracy; null for a Marca. */
+  accuracyMeters: number | null;
+};
+
+export type LiveOnBoardPassenger = { id: number; name: string };
+
 export type LiveNextStop = {
   id: number;
   position: number;
@@ -1401,7 +1414,9 @@ export type LiveRoute = {
   vehicle: { id: number; plate: string };
   color: string;
   childrenOnBoard: number;
+  passengersOnBoard: LiveOnBoardPassenger[];
   lastMarca: LiveLastMarca | null;
+  currentPosition: LiveCurrentPosition | null;
   stops: LiveStop[];
   nextStop: LiveNextStop | null;
   geometry: [number, number][];
@@ -1412,6 +1427,19 @@ export type LiveDailyPlan = {
   timeZone: string;
   routes: LiveRoute[];
 };
+
+// The OSRM extract's bounding box (infra/osrm/source.env TUCUMAN_BBOX): outside it OSRM either fails or snaps the point to
+// the extract's edge and answers an absurd route, so a position there gets no ETA.
+const OSRM_ZONE = { minLng: -66.3, minLat: -28.1, maxLng: -64.4, maxLat: -26.0 };
+
+function insideOsrmZone(point: { latitude: number; longitude: number }) {
+  return point.latitude >= OSRM_ZONE.minLat && point.latitude <= OSRM_ZONE.maxLat
+    && point.longitude >= OSRM_ZONE.minLng && point.longitude <= OSRM_ZONE.maxLng;
+}
+
+const LIVE_PHONE_TIME_SQL = (column: string) => `
+  to_char(${column} AT TIME ZONE '${LOCAL_TIME_ZONE}', 'HH24:MI') AS phone_time_hhmi,
+  EXTRACT(EPOCH FROM (${column} AT TIME ZONE '${LOCAL_TIME_ZONE}')::time) / 60 AS phone_minutes`;
 
 async function loadLiveDailyPlan(client: Queryable, router: Router | undefined, date: string): Promise<LiveDailyPlan | null> {
   const planResult = await client.query(
@@ -1472,6 +1500,12 @@ async function loadLiveDailyPlan(client: Queryable, router: Router | undefined, 
       stopsResult.rows.filter((row) => row.transferStatus === "subio").map((row) => Number(row.transferId)),
     );
     const childrenOnBoard = onBoardTransfers.size;
+    const passengersOnBoard: LiveOnBoardPassenger[] = [];
+    for (const row of stopsResult.rows) {
+      if (row.kind === "pickup" && onBoardTransfers.has(Number(row.transferId))) {
+        passengersOnBoard.push({ id: Number(row.passengerId), name: String(row.passengerName) });
+      }
+    }
 
     const rawStops = stopsResult.rows.map((row) => {
       const isDone = isDoneStop(String(row.kind), String(row.transferStatus));
@@ -1499,10 +1533,7 @@ async function loadLiveDailyPlan(client: Queryable, router: Router | undefined, 
     });
 
     const markResult = await client.query(
-      `SELECT e.id, e.kind, e.latitude, e.longitude,
-              to_char(e.phone_time AT TIME ZONE '${LOCAL_TIME_ZONE}', 'HH24:MI') AS phone_time_hhmi,
-              EXTRACT(EPOCH FROM (e.phone_time AT TIME ZONE '${LOCAL_TIME_ZONE}')::time) / 60 AS phone_minutes,
-              e.phone_time
+      `SELECT e.id, e.kind, e.latitude, e.longitude, ${LIVE_PHONE_TIME_SQL("e.phone_time")}, e.phone_time
          FROM marks e
          JOIN plan_versions pv ON pv.id = e.plan_version_id
         WHERE pv.route_id = $1
@@ -1531,60 +1562,86 @@ async function loadLiveDailyPlan(client: Queryable, router: Router | undefined, 
       };
     }
 
-    const remainingStops = rawStops.filter((s) => !s.completed);
-    let nextStop: LiveNextStop | null = null;
+    // Only this Recorrido's Posiciones count, never those of another Recorrido of the same Chofer.
+    const positionResult = await client.query(
+      `SELECT latitude, longitude, accuracy_meters, ${LIVE_PHONE_TIME_SQL("phone_time")}, phone_time
+         FROM positions
+        WHERE route_id = $1
+        ORDER BY phone_time DESC, id DESC
+        LIMIT 1`,
+      [routeId],
+    ) as QueryResult;
+    // The last located Marca: the last Marca itself when it has a location, else the latest earlier one that does.
+    const locatedMarcaRow = lastMarca && lastMarca.latitude !== null && lastMarca.longitude !== null
+      ? lastMarcaRow
+      : lastMarca
+        ? ((await client.query(
+          `SELECT e.latitude, e.longitude, ${LIVE_PHONE_TIME_SQL("e.phone_time")}, e.phone_time
+             FROM marks e
+             JOIN plan_versions pv ON pv.id = e.plan_version_id
+            WHERE pv.route_id = $1
+              AND ${MARK_IN_FORCE_SQL}
+              AND e.latitude IS NOT NULL AND e.longitude IS NOT NULL
+            ORDER BY e.phone_time DESC, e.id DESC
+            LIMIT 1`,
+          [routeId],
+        ) as QueryResult).rows[0])
+        : undefined;
+    const candidates: { position: LiveCurrentPosition; minutes: number }[] = [];
+    for (const [source, row] of [["posicion", positionResult.rows[0]], ["marca", locatedMarcaRow]] as const) {
+      if (!row || row.latitude === null || row.latitude === undefined || row.longitude === null || row.longitude === undefined) continue;
+      candidates.push({
+        position: {
+          source,
+          latitude: Number(row.latitude),
+          longitude: Number(row.longitude),
+          phoneTime: new Date(String(row.phone_time)).toISOString(),
+          phoneTimeHhmi: String(row.phone_time_hhmi),
+          accuracyMeters: source === "posicion" ? Number(row.accuracy_meters) : null,
+        },
+        minutes: Number(row.phone_minutes),
+      });
+    }
+    // The most recent phone time wins; on a tie the Posición wins, since only a strictly newer Marca replaces it.
+    const current = candidates.reduce<(typeof candidates)[number] | null>(
+      (best, candidate) => !best || Date.parse(candidate.position.phoneTime) > Date.parse(best.position.phoneTime) ? candidate : best,
+      null,
+    );
+    const currentPosition = current?.position ?? null;
 
-    // Regla 2: A Recorrido without Marcas shows planned times, not ETAs
-    if (!lastMarca) {
-      if (remainingStops.length > 0) {
-        nextStop = {
-          id: remainingStops[0].id,
-          position: remainingStops[0].position,
-          kind: remainingStops[0].kind,
-          passengerName: remainingStops[0].passengerName,
-          placeName: remainingStops[0].placeName,
-          plannedTime: remainingStops[0].plannedTime,
-          eta: null,
-        };
-      }
-    } else {
-      if (remainingStops.length > 0) {
-        if (lastMarca.latitude !== null && lastMarca.longitude !== null && router) {
-          try {
-            const points = [
-              { lat: lastMarca.latitude, lng: lastMarca.longitude },
-              ...remainingStops.map((s) => ({ lat: s.latitude, lng: s.longitude })),
-            ];
-            const legs = await router(points);
-            let currentMinutes = Number(lastMarcaRow.phone_minutes);
-            for (let i = 0; i < remainingStops.length; i++) {
-              const legSeconds = legs[i]?.durationSeconds ?? 0;
-              const travelMinutes = legSeconds / 60;
-              const arrivalMinutes = currentMinutes + travelMinutes;
-              remainingStops[i].eta = clock(arrivalMinutes);
-              currentMinutes = arrivalMinutes + remainingStops[i].serviceMinutes;
-            }
-          } catch {
-            for (const stop of remainingStops) {
-              stop.eta = null;
-            }
-          }
-        } else {
-          for (const stop of remainingStops) {
-            stop.eta = null;
-          }
+    const remainingStops = rawStops.filter((s) => !s.completed);
+    // Without a current position, or outside the OSRM zone, or when the router fails, no ETA is shown: never invented.
+    if (current && remainingStops.length > 0 && router && insideOsrmZone(current.position)) {
+      try {
+        const points = [
+          { lat: current.position.latitude, lng: current.position.longitude },
+          ...remainingStops.map((s) => ({ lat: s.latitude, lng: s.longitude })),
+        ];
+        const legs = await router(points);
+        let currentMinutes = current.minutes;
+        for (let i = 0; i < remainingStops.length; i++) {
+          const legSeconds = legs[i]?.durationSeconds ?? 0;
+          const arrivalMinutes = currentMinutes + legSeconds / 60;
+          remainingStops[i].eta = clock(arrivalMinutes);
+          currentMinutes = arrivalMinutes + remainingStops[i].serviceMinutes;
         }
-        nextStop = {
-          id: remainingStops[0].id,
-          position: remainingStops[0].position,
-          kind: remainingStops[0].kind,
-          passengerName: remainingStops[0].passengerName,
-          placeName: remainingStops[0].placeName,
-          plannedTime: remainingStops[0].plannedTime,
-          eta: remainingStops[0].eta,
-        };
+      } catch {
+        for (const stop of remainingStops) {
+          stop.eta = null;
+        }
       }
     }
+    const nextStop: LiveNextStop | null = remainingStops.length > 0
+      ? {
+        id: remainingStops[0].id,
+        position: remainingStops[0].position,
+        kind: remainingStops[0].kind,
+        passengerName: remainingStops[0].passengerName,
+        placeName: remainingStops[0].placeName,
+        plannedTime: remainingStops[0].plannedTime,
+        eta: remainingStops[0].eta,
+      }
+      : null;
 
     const color = ROUTE_COLORS[rIndex % ROUTE_COLORS.length];
 
@@ -1605,7 +1662,9 @@ async function loadLiveDailyPlan(client: Queryable, router: Router | undefined, 
       vehicle: { id: Number(rRow.vehicleId), plate: String(rRow.vehiclePlate) },
       color,
       childrenOnBoard,
+      passengersOnBoard,
       lastMarca,
+      currentPosition,
       stops,
       nextStop,
       geometry,
