@@ -1,5 +1,11 @@
 import { describe, expect, it } from "vitest";
-import { scrubBreadcrumb, scrubErrorEvent, scrubString, stripUrlQueryAndFragment } from "./index";
+import {
+  scrubBreadcrumb,
+  scrubErrorEvent,
+  scrubString,
+  stripUrlQueryAndFragment,
+  type ScrubbableErrorEvent,
+} from "./index";
 
 describe("scrubErrorEvent", () => {
   it("strips Pasajero personal data, request bodies, query strings, cookies, auth headers and locations while keeping stack frames", () => {
@@ -285,5 +291,129 @@ describe("scrubErrorEvent", () => {
     expect(event.exception?.values?.[0]?.mechanism).toMatchObject({ type: "generic", handled: true });
     expect(event.breadcrumbs?.[0]?.data).toMatchObject({ method: "POST", status_code: 500, note: "[REDACTED]" });
     expect(event.fingerprint).toEqual(["{{ default }}", "[REDACTED]"]);
+  });
+
+  it("runtime context does not expose passenger name", () => {
+    const event = scrubErrorEvent({ contexts: { runtime: { name: "Juana-Perez" } } });
+    expect(JSON.stringify(event)).not.toMatch(/Juana-Perez/);
+    expect(event.contexts?.runtime?.name).toBe("[REDACTED]");
+  });
+
+  it("disk message does not expose passenger name", () => {
+    const event = scrubErrorEvent({ message: "Disk usage high: 95% on /home/Juana-Perez (threshold 90%)" });
+    expect(JSON.stringify(event)).not.toMatch(/Juana-Perez/);
+    expect(event.message).toBe("[REDACTED]");
+
+    const allowed = scrubErrorEvent({ message: "Disk usage high: 85% on / (threshold 80%)" });
+    expect(allowed.message).toBe("Disk usage high: 85% on / (threshold 80%)");
+    expect(scrubErrorEvent({ message: "Disk usage high: 85% on /var/Juana-Perez (threshold 80%)" }).message).toBe("[REDACTED]");
+  });
+
+  it("allows only known metadata values across contexts, tags, headers, exceptions, breadcrumbs, fingerprint and top-level Sentry fields", () => {
+    const leakedAttempt = scrubErrorEvent({
+      event_id: "Juana-Perez",
+      platform: "Juana-Perez",
+      level: "Juana-Perez",
+      environment: "Juana-Perez",
+      logger: "Juana-Perez",
+      release: "Juana-Perez",
+      dist: "Juana-Perez",
+      type: "Juana-Perez",
+      sdk: { name: "Juana-Perez", version: "Juana-Perez", integrations: ["Juana-Perez"], packages: [{ name: "Juana-Perez", version: "Juana-Perez" }] },
+      modules: { "Juana-Perez": "1.0.0" },
+      debug_meta: { images: [{ debug_id: "Juana-Perez" }] },
+      request: {
+        headers: {
+          "Content-Type": "text/Juana-Perez",
+          Accept: "application/json; note=Juana-Perez",
+          "X-Server-Epoch": "Juana-Perez",
+        },
+      },
+      exception: {
+        values: [{
+          type: "Juana-Perez",
+          value: "Failed to fetch",
+          mechanism: { type: "Juana-Perez", handled: true },
+        }],
+      },
+      contexts: {
+        runtime: { name: "Juana-Perez", version: "Juana-Perez" },
+        os: { name: "Juana-Perez", version: "Juana-Perez" },
+        browser: { name: "Juana-Perez", version: "Juana-Perez" },
+        trace: { trace_id: "Juana-Perez", span_id: "Juana-Perez", parent_span_id: "Juana-Perez", op: "Juana-Perez" },
+        app: { app_name: "Juana-Perez", app_version: "Juana-Perez" },
+        custom: "Juana-Perez" as unknown as Record<string, unknown>,
+      },
+      tags: {
+        app: "Juana-Perez",
+        environment: "Juana-Perez",
+        level: "Juana-Perez",
+        handled: "Juana-Perez",
+        mechanism: "Juana-Perez",
+        alert: "Juana-Perez",
+        server_epoch: "Juana-Perez",
+      },
+      breadcrumbs: [{
+        category: "Juana-Perez",
+        type: "Juana-Perez",
+        level: "Juana-Perez",
+      } as Record<string, unknown>],
+      fingerprint: ["{{ default }}", "Juana-Perez"],
+    } as ScrubbableErrorEvent & Record<string, unknown>);
+
+    expect(JSON.stringify(leakedAttempt)).not.toMatch(/Juana-Perez/);
+    expect(leakedAttempt.fingerprint).toEqual(["{{ default }}", "[REDACTED]"]);
+    expect(leakedAttempt.contexts?.custom).toBe("[REDACTED]");
+
+    const allowedMetadata = scrubErrorEvent({
+      event_id: "a1b2c3d4e5f64789a1b2c3d4e5f64789",
+      platform: "node",
+      level: "error",
+      environment: "production",
+      sdk: {
+        name: "sentry.javascript.node",
+        version: "10.0.0",
+        integrations: ["EventFilters", "LinkedErrors", "Dedupe"],
+        packages: [{ name: "npm:@sentry/node", version: "10.0.0" }],
+      },
+      request: {
+        headers: {
+          "Content-Type": "application/json; charset=utf-8",
+          "X-Server-Epoch": "a1b2c3d4e5f60718293a4b5c6d7e8f90",
+        },
+      },
+      exception: { values: [{ type: "DatabaseError", value: "database unavailable", mechanism: { type: "generic", handled: false } }] },
+      contexts: {
+        runtime: { name: "node", version: "24.22.1" },
+        os: { name: "Linux", version: "6.8.0" },
+        browser: { name: "Chrome", version: "131.0.6778.85" },
+        trace: { trace_id: "a1b2c3d4e5f64789a1b2c3d4e5f64789", span_id: "a1b2c3d4e5f64789", op: "http.server" },
+        app: { app_name: "api", app_version: "1.0.0" },
+      },
+      tags: { app: "api", environment: "production", alert: "disk_usage", server_epoch: "epoch-1" },
+      breadcrumbs: [{ category: "fetch", type: "http", message: "GET /passengers" }],
+    } as ScrubbableErrorEvent & Record<string, unknown>);
+
+    expect(allowedMetadata).toMatchObject({
+      event_id: "a1b2c3d4e5f64789a1b2c3d4e5f64789",
+      platform: "node",
+      level: "error",
+      environment: "production",
+      request: {
+        headers: {
+          "Content-Type": "application/json; charset=utf-8",
+          "X-Server-Epoch": "a1b2c3d4e5f60718293a4b5c6d7e8f90",
+        },
+      },
+      contexts: {
+        runtime: { name: "node", version: "24.22.1" },
+        os: { name: "Linux", version: "6.8.0" },
+        browser: { name: "Chrome", version: "131.0.6778.85" },
+        trace: { trace_id: "a1b2c3d4e5f64789a1b2c3d4e5f64789", span_id: "a1b2c3d4e5f64789", op: "http.server" },
+        app: { app_name: "api", app_version: "1.0.0" },
+      },
+      tags: { app: "api", environment: "production", alert: "disk_usage", server_epoch: "epoch-1" },
+      breadcrumbs: [{ category: "fetch", type: "http", message: "GET /passengers" }],
+    });
   });
 });

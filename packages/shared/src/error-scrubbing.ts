@@ -69,22 +69,236 @@ export type ScrubbableErrorEvent = {
 const SAFE_KEYS = new Set(["filename", "abspath", "dirname", "basename", "pathname", "typename", "function"]);
 const URL_DATA_KEYS = new Set(["url", "from", "to"]);
 const SAFE_HTTP_METHOD_RE = /^(?:GET|POST|PUT|PATCH|DELETE|HEAD|OPTIONS)$/i;
-const SAFE_IDENTIFIER_RE = /^[A-Za-z_$][A-Za-z0-9_$.-]{0,63}$/;
-const SAFE_SHORT_TOKEN_RE = /^[A-Za-z0-9._:/-]{1,64}$/;
 const SAFE_URL_SEGMENT_RE = /^(?:[A-Za-z0-9._~-]|\[REDACTED\]|;){1,128}$/;
-const SAFE_MIME_RE = /^[a-z0-9.+-]+\/[a-z0-9.+-]+(?:\s*;\s*[a-z0-9-]+=[a-z0-9._+-]+)*$/i;
+const NUMERIC_VERSION_RE = /^v?\d+(?:\.\d+){0,3}$/;
+const HEX_16_RE = /^[0-9a-f]{16}$/i;
+const HEX_32_RE = /^[0-9a-f]{32}$/i;
+const ISO_TIMESTAMP_RE = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?Z$/;
+const SAFE_SERVER_EPOCH_RE = /^(?:(?=[0-9a-f]*[a-f])[0-9a-f]{16,64}|[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}|epoch-\d{1,6}|c3-e2e-[0-9a-f]{4,16})$/i;
+const SAFE_SENTRY_PACKAGE_RE = /^npm:@sentry\/[a-z0-9-]+$/;
 
 const SAFE_HEADER_KEYS = new Set(["content-type", "content-length", "accept", "x-server-epoch"]);
-const SAFE_TAG_KEYS = new Set(["app", "server_epoch", "environment", "handled", "level", "mechanism", "alert"]);
-const SAFE_CONTEXT_FIELDS: Record<string, ReadonlySet<string>> = {
-  runtime: new Set(["name", "version"]),
-  os: new Set(["name", "version"]),
-  browser: new Set(["name", "version"]),
-  trace: new Set(["trace_id", "span_id", "parent_span_id", "op"]),
-  app: new Set(["app_name", "app_version"]),
+const SAFE_MIME_TYPES = new Set([
+  "application/json",
+  "application/x-www-form-urlencoded",
+  "application/octet-stream",
+  "application/problem+json",
+  "application/x-sentry-envelope",
+  "multipart/form-data",
+  "text/plain",
+  "text/html",
+  "text/csv",
+  "text/event-stream",
+  "*/*",
+]);
+const SAFE_MIME_CHARSETS = new Set(["utf-8", "utf8", "iso-8859-1", "us-ascii"]);
+
+const KNOWN_APP_NAMES = new Set(["api", "office", "driver", "traslado-api", "traslado-office", "traslado-driver"]);
+const KNOWN_ENVIRONMENTS = new Set(["production", "staging", "development", "test", "local", "preview"]);
+const KNOWN_LEVELS = new Set(["fatal", "error", "warning", "log", "info", "debug"]);
+const KNOWN_PLATFORMS = new Set(["node", "javascript", "other"]);
+const KNOWN_EVENT_TYPES = new Set(["error", "transaction", "event", "default"]);
+const KNOWN_BOOLEAN_STRINGS = new Set(["yes", "no", "true", "false"]);
+const KNOWN_ALERT_TAGS = new Set(["disk_usage", "disk_usage_high"]);
+const KNOWN_MECHANISM_TYPES = new Set([
+  "generic",
+  "onerror",
+  "onunhandledrejection",
+  "onuncaughtexception",
+  "instrument",
+  "middleware",
+  "http",
+  "fetch",
+  "xhr",
+  "chained",
+  "auto.http",
+  "auto.browser",
+  "auto.http.node.http",
+  "auto.http.browser.fetch",
+  "auto.http.browser.xhr",
+  "auto.ui.browser",
+]);
+const KNOWN_EXCEPTION_TYPES = new Set([
+  "Error",
+  "TypeError",
+  "RangeError",
+  "ReferenceError",
+  "SyntaxError",
+  "URIError",
+  "EvalError",
+  "AggregateError",
+  "DOMException",
+  "AbortError",
+  "TimeoutError",
+  "DatabaseError",
+  "error",
+  "HTTPException",
+  "HttpError",
+  "ZodError",
+  "FetchError",
+  "NetworkError",
+  "SecurityError",
+  "QuotaExceededError",
+  "NotAllowedError",
+  "SystemError",
+  "AssertionError",
+  "InternalError",
+  "InvalidReferenceError",
+  "PlanningError",
+  "RoutingEngineError",
+]);
+const KNOWN_BREADCRUMB_CATEGORIES = new Set([
+  "fetch",
+  "xhr",
+  "http",
+  "navigation",
+  "console",
+  "ui.click",
+  "sentry.event",
+  "sentry.transaction",
+  "error",
+  "exception",
+  "log",
+  "info",
+  "debug",
+  "query",
+  "default",
+]);
+const KNOWN_BREADCRUMB_TYPES = new Set([
+  "default",
+  "debug",
+  "error",
+  "navigation",
+  "http",
+  "info",
+  "query",
+  "transaction",
+  "ui",
+]);
+const KNOWN_RUNTIME_NAMES = new Set([
+  "node",
+  "browser",
+  "v8",
+  "deno",
+  "bun",
+  "cloudflare-workers",
+  "edge-light",
+  "workerd",
+  "javascript",
+]);
+const KNOWN_OS_NAMES = new Set([
+  "linux",
+  "windows",
+  "macos",
+  "mac os x",
+  "darwin",
+  "android",
+  "ios",
+  "ipados",
+  "chrome os",
+  "chromeos",
+  "ubuntu",
+  "debian",
+  "alpine",
+  "centos",
+  "fedora",
+  "redhat",
+  "freebsd",
+  "openbsd",
+]);
+const KNOWN_BROWSER_NAMES = new Set([
+  "chrome",
+  "chromium",
+  "chrome mobile",
+  "chrome mobile webview",
+  "firefox",
+  "firefox mobile",
+  "safari",
+  "mobile safari",
+  "edge",
+  "edge mobile",
+  "opera",
+  "opera mobile",
+  "samsung internet",
+  "webkit",
+  "brave",
+  "vivaldi",
+]);
+const KNOWN_TRACE_OPS = new Set([
+  "default",
+  "http.server",
+  "http.client",
+  "pageload",
+  "navigation",
+  "ui.action",
+  "ui.action.click",
+  "db",
+  "db.query",
+  "db.sql.query",
+  "function",
+  "middleware",
+  "resource",
+]);
+const KNOWN_SDK_NAMES = new Set(["sentry.javascript.node", "sentry.javascript.browser"]);
+const KNOWN_SDK_INTEGRATIONS = new Set([
+  "InboundFilters",
+  "FunctionToString",
+  "LinkedErrors",
+  "Dedupe",
+  "EventFilters",
+  "Breadcrumbs",
+  "GlobalHandlers",
+  "OnUncaughtException",
+  "OnUnhandledRejection",
+  "Http",
+  "Console",
+  "ContextLines",
+  "LocalVariables",
+  "Modules",
+  "Context",
+  "RequestData",
+  "NodeFetch",
+  "BrowserApiErrors",
+  "TryCatch",
+]);
+
+const SAFE_TAG_VALIDATORS: Record<string, (value: string) => boolean> = {
+  app: (value) => KNOWN_APP_NAMES.has(value.toLowerCase()),
+  server_epoch: (value) => isSafeServerEpoch(value),
+  environment: (value) => KNOWN_ENVIRONMENTS.has(value.toLowerCase()),
+  handled: (value) => KNOWN_BOOLEAN_STRINGS.has(value.toLowerCase()),
+  level: (value) => KNOWN_LEVELS.has(value.toLowerCase()),
+  mechanism: (value) => KNOWN_MECHANISM_TYPES.has(value.toLowerCase()),
+  alert: (value) => KNOWN_ALERT_TAGS.has(value.toLowerCase()),
 };
-const KNOWN_SENTRY_TOP_LEVEL_KEYS = new Set([
-  "event_id", "timestamp", "platform", "level", "logger", "environment", "release", "dist", "sdk", "modules",
+
+const SAFE_CONTEXT_VALIDATORS: Record<string, Record<string, (value: string) => boolean>> = {
+  runtime: {
+    name: (value) => KNOWN_RUNTIME_NAMES.has(value.toLowerCase()),
+    version: (value) => NUMERIC_VERSION_RE.test(value),
+  },
+  os: {
+    name: (value) => KNOWN_OS_NAMES.has(value.toLowerCase()),
+    version: (value) => NUMERIC_VERSION_RE.test(value),
+  },
+  browser: {
+    name: (value) => KNOWN_BROWSER_NAMES.has(value.toLowerCase()),
+    version: (value) => NUMERIC_VERSION_RE.test(value),
+  },
+  trace: {
+    trace_id: (value) => HEX_32_RE.test(value),
+    span_id: (value) => HEX_16_RE.test(value),
+    parent_span_id: (value) => HEX_16_RE.test(value),
+    op: (value) => KNOWN_TRACE_OPS.has(value.toLowerCase()),
+  },
+  app: {
+    app_name: (value) => KNOWN_APP_NAMES.has(value.toLowerCase()),
+    app_version: (value) => NUMERIC_VERSION_RE.test(value),
+  },
+};
+
+const HANDLED_EVENT_KEYS = new Set([
+  "event_id", "timestamp", "platform", "level", "environment", "sdk", "modules",
   "type", "debug_meta", "user", "server_name", "message", "transaction", "logentry", "request", "exception",
   "breadcrumbs", "extra", "contexts", "tags", "fingerprint", "threads",
 ]);
@@ -158,11 +372,21 @@ const SAFE_EXACT_MESSAGES = new Set([
   "an office account already exists",
 ]);
 
-// Tightly anchored full-string structural patterns admitting only bounded numeric codes or static mount paths.
-const SAFE_FULL_MESSAGE_PATTERNS = [
-  /^Nominatim answered \d{3}$/,
-  /^Disk usage high: \d{1,3}% on \/[A-Za-z0-9._/-]* \(threshold \d{1,3}%\)$/,
-];
+// Tightly anchored structural patterns admitting only bounded numeric codes or exact known system mount points.
+const NOMINATIM_STATUS_RE = /^Nominatim answered \d{3}$/;
+const DISK_ALERT_RE = /^Disk usage high: \d{1,3}% on (\/[A-Za-z0-9._/-]*) \(threshold \d{1,3}%\)$/;
+const SAFE_DISK_MOUNTS = new Set([
+  "/",
+  "/var",
+  "/var/lib",
+  "/var/lib/docker",
+  "/var/lib/postgresql",
+  "/var/log",
+  "/data",
+  "/srv",
+  "/opt",
+  "/tmp",
+]);
 
 function isSensitiveKey(key: string): boolean {
   const normalized = key.toLowerCase().replace(/[_-]/g, "");
@@ -195,8 +419,38 @@ function isCoordinatePair(value: unknown): boolean {
   return Math.abs(a) <= 180 && Math.abs(b) <= 180 && (Math.abs(a) <= 90 || Math.abs(b) <= 90);
 }
 
-function isSafeToken(value: string): boolean {
-  return SAFE_SHORT_TOKEN_RE.test(value) && !hasNumericPii(value);
+function isSafeServerEpoch(value: string): boolean {
+  return SAFE_SERVER_EPOCH_RE.test(value) && !hasNumericPii(value);
+}
+
+function isSafeTimestamp(value: unknown): boolean {
+  if (typeof value === "number") return Number.isFinite(value);
+  if (typeof value === "string") return ISO_TIMESTAMP_RE.test(value.trim());
+  return false;
+}
+
+function isSafeMimeHeader(value: string): boolean {
+  const parts = value.split(",").map((entry) => entry.trim()).filter(Boolean);
+  if (parts.length === 0) return false;
+  for (const part of parts) {
+    const [rawType, ...params] = part.split(";").map((segment) => segment.trim());
+    if (!rawType || !SAFE_MIME_TYPES.has(rawType.toLowerCase())) return false;
+    for (const param of params) {
+      if (!param) return false;
+      const eqIndex = param.indexOf("=");
+      if (eqIndex <= 0) return false;
+      const key = param.slice(0, eqIndex).trim().toLowerCase();
+      const val = param.slice(eqIndex + 1).trim().toLowerCase();
+      if (key === "charset") {
+        if (!SAFE_MIME_CHARSETS.has(val)) return false;
+      } else if (key === "q") {
+        if (!/^(?:0(?:\.\d{1,3})?|1(?:\.0{1,3})?)$/.test(val)) return false;
+      } else {
+        return false;
+      }
+    }
+  }
+  return true;
 }
 
 export function stripUrlQueryAndFragment(url: string): string {
@@ -246,7 +500,9 @@ function scrubTransaction(transaction: string): string {
 export function isWhitelistedMessage(message: string): boolean {
   const trimmed = message.trim();
   if (!trimmed) return false;
-  return SAFE_EXACT_MESSAGES.has(trimmed.toLowerCase()) || SAFE_FULL_MESSAGE_PATTERNS.some((pattern) => pattern.test(trimmed));
+  if (SAFE_EXACT_MESSAGES.has(trimmed.toLowerCase()) || NOMINATIM_STATUS_RE.test(trimmed)) return true;
+  const diskMatch = DISK_ALERT_RE.exec(trimmed);
+  return Boolean(diskMatch && SAFE_DISK_MOUNTS.has(diskMatch[1]!));
 }
 
 export function scrubMessage(message: string | undefined): string | undefined {
@@ -302,11 +558,11 @@ function scrubHeaders(headers: Record<string, string> | undefined): Record<strin
     }
     const trimmed = value.trim();
     if (normalized === "content-type" || normalized === "accept") {
-      cleaned[header] = SAFE_MIME_RE.test(trimmed) ? trimmed : REDACTED;
+      cleaned[header] = isSafeMimeHeader(trimmed) ? trimmed : REDACTED;
     } else if (normalized === "content-length") {
-      cleaned[header] = /^\d{1,9}$/.test(trimmed) ? trimmed : REDACTED;
+      cleaned[header] = /^\d{1,6}$/.test(trimmed) ? trimmed : REDACTED;
     } else {
-      cleaned[header] = isSafeToken(trimmed) ? trimmed : REDACTED;
+      cleaned[header] = isSafeServerEpoch(trimmed) ? trimmed : REDACTED;
     }
   }
   return cleaned;
@@ -315,16 +571,17 @@ function scrubHeaders(headers: Record<string, string> | undefined): Record<strin
 function scrubTags(tags: Record<string, unknown>, seen: WeakSet<object>): Record<string, unknown> {
   const cleaned: Record<string, unknown> = {};
   for (const [key, value] of Object.entries(tags)) {
-    if (!SAFE_TAG_KEYS.has(key.toLowerCase())) {
+    const normalized = key.toLowerCase();
+    const validator = SAFE_TAG_VALIDATORS[normalized];
+    if (!validator) {
       cleaned[key] = typeof value === "object" && value !== null ? scrubUntrustedValue(value, seen) : REDACTED;
       continue;
     }
     if (typeof value === "string") {
-      cleaned[key] = isSafeToken(value.trim()) ? value.trim() : REDACTED;
-    } else if (typeof value === "boolean") {
+      const trimmed = value.trim();
+      cleaned[key] = validator(trimmed) ? trimmed : REDACTED;
+    } else if (typeof value === "boolean" && normalized === "handled") {
       cleaned[key] = value;
-    } else if (typeof value === "number") {
-      cleaned[key] = isSensitiveNumber(value) ? REDACTED : value;
     } else {
       cleaned[key] = scrubUntrustedValue(value, seen);
     }
@@ -338,24 +595,63 @@ function scrubContexts(
 ): Record<string, Record<string, unknown> | undefined> {
   const cleaned: Record<string, Record<string, unknown> | undefined> = {};
   for (const [contextKey, entry] of Object.entries(contexts)) {
-    if (!entry || typeof entry !== "object") {
+    if (entry === undefined || entry === null) {
       cleaned[contextKey] = entry;
       continue;
     }
-    const allowedFields = SAFE_CONTEXT_FIELDS[contextKey.toLowerCase()];
-    if (!allowedFields) {
+    if (typeof entry !== "object" || Array.isArray(entry)) {
+      cleaned[contextKey] = scrubUntrustedValue(entry, seen) as Record<string, unknown>;
+      continue;
+    }
+    const fieldValidators = SAFE_CONTEXT_VALIDATORS[contextKey.toLowerCase()];
+    if (!fieldValidators) {
       cleaned[contextKey] = scrubUntrustedValue(entry, seen) as Record<string, unknown>;
       continue;
     }
     const nextEntry: Record<string, unknown> = {};
     for (const [field, value] of Object.entries(entry)) {
-      if (allowedFields.has(field.toLowerCase()) && typeof value === "string" && isSafeToken(value.trim())) {
+      const validator = fieldValidators[field.toLowerCase()];
+      if (validator && typeof value === "string" && validator(value.trim())) {
         nextEntry[field] = value.trim();
       } else {
         nextEntry[field] = isSensitiveKey(field) ? REDACTED : scrubUntrustedValue(value, seen);
       }
     }
     cleaned[contextKey] = nextEntry;
+  }
+  return cleaned;
+}
+
+function scrubSdk(sdk: unknown, seen: WeakSet<object>): unknown {
+  if (!sdk || typeof sdk !== "object" || Array.isArray(sdk)) return scrubUntrustedValue(sdk, seen);
+  const cleaned: Record<string, unknown> = {};
+  for (const [key, value] of Object.entries(sdk as Record<string, unknown>)) {
+    if (key === "name") {
+      cleaned.name = typeof value === "string" && KNOWN_SDK_NAMES.has(value.trim()) ? value.trim() : REDACTED;
+    } else if (key === "version") {
+      cleaned.version = typeof value === "string" && NUMERIC_VERSION_RE.test(value.trim()) ? value.trim() : REDACTED;
+    } else if (key === "integrations" && Array.isArray(value)) {
+      cleaned.integrations = value.map((item) =>
+        typeof item === "string" && KNOWN_SDK_INTEGRATIONS.has(item.trim()) ? item.trim() : REDACTED,
+      );
+    } else if (key === "packages" && Array.isArray(value)) {
+      cleaned.packages = value.map((pkg) => {
+        if (!pkg || typeof pkg !== "object" || Array.isArray(pkg)) return scrubUntrustedValue(pkg, seen);
+        const nextPkg: Record<string, unknown> = {};
+        for (const [pkgKey, pkgVal] of Object.entries(pkg as Record<string, unknown>)) {
+          if (pkgKey === "name") {
+            nextPkg.name = typeof pkgVal === "string" && SAFE_SENTRY_PACKAGE_RE.test(pkgVal.trim()) ? pkgVal.trim() : REDACTED;
+          } else if (pkgKey === "version") {
+            nextPkg.version = typeof pkgVal === "string" && NUMERIC_VERSION_RE.test(pkgVal.trim()) ? pkgVal.trim() : REDACTED;
+          } else {
+            nextPkg[pkgKey] = scrubUntrustedValue(pkgVal, seen);
+          }
+        }
+        return nextPkg;
+      });
+    } else {
+      cleaned[key] = isSensitiveKey(key) ? REDACTED : scrubUntrustedValue(value, seen);
+    }
   }
   return cleaned;
 }
@@ -368,7 +664,7 @@ function scrubMechanism(
   const cleaned: Record<string, unknown> = {};
   for (const [key, value] of Object.entries(mechanism)) {
     if (key === "type") {
-      cleaned.type = typeof value === "string" && SAFE_IDENTIFIER_RE.test(value) ? value : REDACTED;
+      cleaned.type = typeof value === "string" && KNOWN_MECHANISM_TYPES.has(value.trim().toLowerCase()) ? value.trim() : REDACTED;
     } else if (key === "handled" || key === "synthetic") {
       cleaned[key] = typeof value === "boolean" ? value : REDACTED;
     } else {
@@ -408,8 +704,23 @@ export function scrubBreadcrumb<T extends ScrubbableBreadcrumb>(breadcrumb: T): 
   if (category.startsWith("ui.input") || category.startsWith("geolocation") || breadcrumb.type === "user") return null;
   const seen = new WeakSet<object>();
   const next = { ...breadcrumb } as T;
-  if (typeof next.category === "string" && !SAFE_IDENTIFIER_RE.test(next.category)) next.category = REDACTED;
-  if (typeof next.type === "string" && !SAFE_IDENTIFIER_RE.test(next.type)) next.type = REDACTED;
+  const record = next as Record<string, unknown>;
+  for (const [key, value] of Object.entries(record)) {
+    if (key === "category" || key === "type" || key === "message" || key === "data") continue;
+    if (key === "level") {
+      record.level = typeof value === "string" && KNOWN_LEVELS.has(value.trim().toLowerCase()) ? value.trim() : REDACTED;
+    } else if (key === "timestamp") {
+      record.timestamp = isSafeTimestamp(value) ? value : REDACTED;
+    } else {
+      record[key] = isSensitiveKey(key) ? REDACTED : scrubUntrustedValue(value, seen);
+    }
+  }
+  if (typeof next.category === "string") {
+    next.category = KNOWN_BREADCRUMB_CATEGORIES.has(next.category.trim().toLowerCase()) ? next.category.trim() : REDACTED;
+  }
+  if (typeof next.type === "string") {
+    next.type = KNOWN_BREADCRUMB_TYPES.has(next.type.trim().toLowerCase()) ? next.type.trim() : REDACTED;
+  }
   if (typeof next.message === "string") next.message = scrubBreadcrumbMessage(next.message);
   if (next.data && typeof next.data === "object") {
     const cleanedData: Record<string, unknown> = {};
@@ -434,10 +745,28 @@ export function scrubBreadcrumb<T extends ScrubbableBreadcrumb>(breadcrumb: T): 
 export function scrubErrorEvent<T extends ScrubbableErrorEvent>(event: T): T {
   const seen = new WeakSet<object>();
   const next = { ...event, user: undefined, server_name: undefined } as T;
+  const record = next as Record<string, unknown>;
 
-  for (const [key, value] of Object.entries(next as Record<string, unknown>)) {
-    if (!KNOWN_SENTRY_TOP_LEVEL_KEYS.has(key)) {
-      (next as Record<string, unknown>)[key] = isSensitiveKey(key) ? REDACTED : scrubUntrustedValue(value, seen);
+  for (const [key, value] of Object.entries(record)) {
+    if (value === undefined) continue;
+    if (key === "event_id") {
+      record.event_id = typeof value === "string" && HEX_32_RE.test(value.trim()) ? value.trim() : REDACTED;
+    } else if (key === "timestamp") {
+      record.timestamp = isSafeTimestamp(value) ? value : REDACTED;
+    } else if (key === "platform") {
+      record.platform = typeof value === "string" && KNOWN_PLATFORMS.has(value.trim().toLowerCase()) ? value.trim() : REDACTED;
+    } else if (key === "level") {
+      record.level = typeof value === "string" && KNOWN_LEVELS.has(value.trim().toLowerCase()) ? value.trim() : REDACTED;
+    } else if (key === "environment") {
+      record.environment = typeof value === "string" && KNOWN_ENVIRONMENTS.has(value.trim().toLowerCase()) ? value.trim() : REDACTED;
+    } else if (key === "type") {
+      record.type = typeof value === "string" && KNOWN_EVENT_TYPES.has(value.trim().toLowerCase()) ? value.trim() : REDACTED;
+    } else if (key === "sdk") {
+      record.sdk = scrubSdk(value, seen);
+    } else if (key === "modules" || key === "debug_meta") {
+      record[key] = undefined;
+    } else if (!HANDLED_EVENT_KEYS.has(key)) {
+      record[key] = isSensitiveKey(key) ? REDACTED : scrubUntrustedValue(value, seen);
     }
   }
 
@@ -466,7 +795,7 @@ export function scrubErrorEvent<T extends ScrubbableErrorEvent>(event: T): T {
       ...next.exception,
       values: next.exception.values.map((item) => ({
         ...item,
-        ...(typeof item.type === "string" ? { type: SAFE_IDENTIFIER_RE.test(item.type) ? item.type : REDACTED } : {}),
+        ...(typeof item.type === "string" ? { type: KNOWN_EXCEPTION_TYPES.has(item.type.trim()) ? item.type.trim() : REDACTED } : {}),
         ...(typeof item.value === "string" ? { value: scrubMessage(item.value) } : {}),
         ...(item.mechanism ? { mechanism: scrubMechanism(item.mechanism, seen) } : {}),
         ...(item.stacktrace?.frames
@@ -507,7 +836,7 @@ export function scrubErrorEvent<T extends ScrubbableErrorEvent>(event: T): T {
   if (next.tags) next.tags = scrubTags(next.tags, seen);
   if (Array.isArray(next.fingerprint)) {
     next.fingerprint = next.fingerprint.map((item) =>
-      item === "{{ default }}" || isSafeToken(item.trim()) ? item.trim() : REDACTED,
+      typeof item === "string" && item.trim() === "{{ default }}" ? "{{ default }}" : REDACTED,
     );
   }
   return next;
