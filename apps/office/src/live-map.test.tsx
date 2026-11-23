@@ -243,7 +243,7 @@ describe("Office live map and ETAs", () => {
         passengerName: "Lucas Pérez",
         placeName: "Domicilio 456",
         plannedTime: "07:30",
-        eta: "07:30",
+        eta: null,
       },
       geometry: [[-65.22, -26.84]] as [number, number][],
     };

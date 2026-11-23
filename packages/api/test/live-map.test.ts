@@ -42,9 +42,10 @@ describe("GET /daily-plans/:date/live", () => {
       expect(stop.status).toBe("pending");
     }
 
-    // nextStop shows planned time, not recalculated ETA
+    // nextStop keeps planned time without labelling it as ETA
     expect(route.nextStop).toBeDefined();
-    expect(route.nextStop.eta).toBe(route.nextStop.plannedTime);
+    expect(route.nextStop.eta).toBeNull();
+    expect(route.nextStop.plannedTime).toMatch(/^\d{2}:\d{2}$/);
     expect(route.geometry.length).toBeGreaterThanOrEqual(2);
   });
 
@@ -238,6 +239,7 @@ describe("Rule 1, Rule 2 and absent dropoff live map verification", () => {
     const route = await get();
     expect(calls).toEqual([]);
     expect(route.nextStop.plannedTime).toBe("08:00");
+    expect(route.nextStop.eta).toBeNull();
     expect(route.stops.map((s: any) => s.eta)).toEqual([null, null, null, null]);
   });
 
