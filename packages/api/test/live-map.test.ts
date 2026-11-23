@@ -167,6 +167,7 @@ function setupMockReview(
   options?: {
     markCoordinates?: { lat: number | null; lng: number | null };
     routerFails?: boolean;
+    position?: { lat: number; lng: number };
   },
 ) {
   const calls: { lat: number; lng: number }[][] = [];
@@ -193,6 +194,11 @@ function setupMockReview(
         result = rows;
       } else if (sql.includes("FROM marks e")) {
         result = hasMark ? [{ id: 1, kind: status, latitude: markLat, longitude: markLng, phone_time_hhmi: "08:30", phone_minutes: 510, phone_time: mockNow }] : [];
+      } else if (sql.includes("FROM positions")) {
+        const position = options?.position;
+        result = position
+          ? [{ latitude: position.lat, longitude: position.lng, accuracy_meters: 12, phone_time_hhmi: "08:30", phone_minutes: 510, phone_time: mockNow }]
+          : [];
       } else {
         throw new Error(`Unexpected SQL: ${sql}`);
       }
@@ -275,3 +281,195 @@ describe("Rule 1, Rule 2 and absent dropoff live map verification", () => {
     expect(route.stops.slice(1).map((s: any) => s.eta)).toEqual([null, null, null]);
   });
 });
+
+describe("Issue #135: each Recorrido at its latest Posición, with the Pasajeros on board", () => {
+  const B = { lat: -26.8, lng: -65.18 };
+  const SCHOOL_POINT = { lat: -26.82, lng: -65.2 };
+
+  async function live(cookie: string) {
+    return await answer(request(`/daily-plans/${TODAY}/live`, "GET", undefined, cookie), 200) as { routes: any[] };
+  }
+
+  async function sendPositions(cookie: string, routeId: number, positions: { lat: number; lng: number; accuracyMeters: number; phoneTime: string }[]) {
+    await answer(request(`/driver/routes/${routeId}/positions`, "POST", { positions }, cookie), 201);
+  }
+
+  it("Regla 1: the Posición with the most recent phone time wins over an older Marca and drives the ETA", async () => {
+    const { office, passenger, served } = await setup("issue-135-rule-1");
+    const { passengerId } = await passenger();
+    const { driver, routeId, transferId } = await served(passengerId, "entrada");
+    await answer(request(`/driver/routes/${routeId}/start`, "POST", {}, driver.cookie), 200);
+    await answer(mark(driver.cookie, routeId, markBody(transferId, "subio", { location: HOME, phoneTime: "2026-10-23T11:10:00.000Z" })), 201);
+    await sendPositions(driver.cookie, routeId, [
+      { ...HOME, accuracyMeters: 30, phoneTime: "2026-10-23T11:11:00.000Z" },
+      { ...B, accuracyMeters: 15, phoneTime: "2026-10-23T11:12:00.000Z" },
+    ]);
+
+    const route = (await live(office)).routes.find((r) => r.id === routeId);
+
+    expect(route.currentPosition).toEqual({
+      source: "posicion",
+      latitude: B.lat,
+      longitude: B.lng,
+      phoneTime: "2026-10-23T11:12:00.000Z",
+      phoneTimeHhmi: "08:12",
+      accuracyMeters: 15,
+    });
+    // From B at 08:12: 4000 synthetic meters at 10 m/s = 6 min 40 s → 08:18 (from the Marca at A it would be 08:13).
+    expect(route.nextStop.eta).toBe("08:18");
+    expect(route.lastMarca.kind).toBe("subio");
+  });
+
+  it("Regla 2: a located Marca more recent than the last Posición wins, with origin marca", async () => {
+    const { office, passenger, served, school } = await setup("issue-135-rule-2");
+    const { passengerId } = await passenger();
+    const { driver, routeId, transferId } = await served(passengerId, "entrada");
+    await answer(request(`/driver/routes/${routeId}/start`, "POST", {}, driver.cookie), 200);
+    await answer(mark(driver.cookie, routeId, markBody(transferId, "subio", { location: HOME, phoneTime: "2026-10-23T11:10:00.000Z" })), 201);
+    await sendPositions(driver.cookie, routeId, [{ ...B, accuracyMeters: 15, phoneTime: "2026-10-23T11:12:00.000Z" }]);
+    await answer(mark(driver.cookie, routeId, markBody(transferId, "entregado", {
+      location: SCHOOL_POINT,
+      phoneTime: "2026-10-23T11:14:00.000Z",
+      receiver: { kind: "destination", destinationId: school },
+    })), 201);
+
+    const route = (await live(office)).routes.find((r) => r.id === routeId);
+
+    expect(route.currentPosition).toEqual({
+      source: "marca",
+      latitude: SCHOOL_POINT.lat,
+      longitude: SCHOOL_POINT.lng,
+      phoneTime: "2026-10-23T11:14:00.000Z",
+      phoneTimeHhmi: "08:14",
+      accuracyMeters: null,
+    });
+  });
+
+  it("Regla 2: a more recent Marca without location does not replace the last Posición", async () => {
+    const { office, passenger, served } = await setup("issue-135-rule-2-unlocated");
+    const { driver, routeId, transferId } = await served((await passenger()).passengerId, "entrada");
+    await answer(request(`/driver/routes/${routeId}/start`, "POST", {}, driver.cookie), 200);
+    await sendPositions(driver.cookie, routeId, [{ ...B, accuracyMeters: 15, phoneTime: "2026-10-23T11:12:00.000Z" }]);
+    await answer(mark(driver.cookie, routeId, markBody(transferId, "subio", { location: null, phoneTime: "2026-10-23T11:14:00.000Z" })), 201);
+
+    const route = (await live(office)).routes.find((r) => r.id === routeId);
+
+    expect(route.currentPosition).toMatchObject({ source: "posicion", latitude: B.lat, longitude: B.lng, phoneTimeHhmi: "08:12" });
+  });
+
+  it("Regla 2: without Posiciones, a last Marca without GPS falls back to the latest located Marca", async () => {
+    const { office, passenger, served, school } = await setup("issue-135-rule-2-fallback");
+    const { driver, routeId, transferId } = await served((await passenger()).passengerId, "entrada");
+    await answer(mark(driver.cookie, routeId, markBody(transferId, "subio", { location: HOME, phoneTime: "2026-10-23T11:10:00.000Z" })), 201);
+    await answer(mark(driver.cookie, routeId, markBody(transferId, "entregado", {
+      location: null, phoneTime: "2026-10-23T11:14:00.000Z", receiver: { kind: "destination", destinationId: school },
+    })), 201);
+
+    const route = (await live(office)).routes.find((r) => r.id === routeId);
+
+    expect(route.lastMarca.latitude).toBeNull();
+    expect(route.currentPosition).toEqual({
+      source: "marca", latitude: HOME.lat, longitude: HOME.lng,
+      phoneTime: "2026-10-23T11:10:00.000Z", phoneTimeHhmi: "08:10", accuracyMeters: null,
+    });
+  });
+
+  it("Regla 3: without Posiciones and without located Marcas the position is null and no ETA is invented", async () => {
+    const { office, passenger, served } = await setup("issue-135-rule-3");
+    const first = await served((await passenger()).passengerId, "entrada");
+    const second = await served((await passenger()).passengerId, "entrada");
+    await answer(mark(second.driver.cookie, second.routeId, markBody(second.transferId, "subio", { location: null, phoneTime: "2026-10-23T11:10:00.000Z" })), 201);
+
+    const routes = (await live(office)).routes;
+    const withoutMarcas = routes.find((r) => r.id === first.routeId);
+    const withUnlocatedMarca = routes.find((r) => r.id === second.routeId);
+
+    expect(withoutMarcas.currentPosition).toBeNull();
+    expect(withoutMarcas.nextStop.eta).toBeNull();
+    expect(withUnlocatedMarca.currentPosition).toBeNull();
+    expect(withUnlocatedMarca.lastMarca.latitude).toBeNull();
+    expect(withUnlocatedMarca.nextStop.eta).toBeNull();
+  });
+
+  it("Regla 4: Posiciones of another Recorrido of the same Chofer are not mixed in", async () => {
+    const { office, post, passenger, chofer, transfer, assign, publish } = await setup("issue-135-rule-4");
+    const driver = await chofer();
+    const morningTransfer = await transfer((await passenger()).passengerId, "entrada", "08:00");
+    const afternoonTransfer = await transfer((await passenger()).passengerId, "salida", "13:00");
+    const morning = (await post(`/daily-plans/${TODAY}/routes`, { driverId: driver.driverId, startTime: "06:00", endTime: "11:00" })).route.id as number;
+    const afternoon = (await post(`/daily-plans/${TODAY}/routes`, { driverId: driver.driverId, startTime: "12:00", endTime: "18:00" })).route.id as number;
+    await assign(morningTransfer, morning);
+    await assign(afternoonTransfer, afternoon);
+    await publish(morning);
+    await publish(afternoon);
+    // Synthetic Posiciones seeded directly: the morning one is older, the afternoon one is the latest of the Chofer.
+    await rows(
+      `INSERT INTO positions (route_id, driver_id, latitude, longitude, accuracy_meters, phone_time, server_time)
+       VALUES ($1, $3, -26.81, -65.19, 10, '2026-10-23T11:00:00Z', '2026-10-23T11:00:00Z'),
+              ($2, $3, -26.79, -65.17, 20, '2026-10-23T11:05:00Z', '2026-10-23T11:05:00Z')`,
+      [morning, afternoon, driver.driverId],
+    );
+
+    const routes = (await live(office)).routes;
+
+    expect(routes.find((r) => r.id === morning).currentPosition).toMatchObject({ source: "posicion", latitude: -26.81, longitude: -65.19, accuracyMeters: 10 });
+    expect(routes.find((r) => r.id === afternoon).currentPosition).toMatchObject({ source: "posicion", latitude: -26.79, longitude: -65.17, accuracyMeters: 20 });
+  });
+
+  it("Regla 7: a Chofer session cannot read the live response", async () => {
+    const { passenger, served } = await setup("issue-135-rule-7");
+    const { driver } = await served((await passenger()).passengerId, "entrada");
+    await answer(request(`/daily-plans/${TODAY}/live`, "GET", undefined, driver.cookie), 403);
+  });
+
+  it("Regla 8: lists by name only the Pasajeros who boarded and were not delivered", async () => {
+    const { office, post, passenger, chofer, route: newRoute, transfer, assign, school } = await setup("issue-135-rule-8");
+    const driver = await chofer();
+    const routeId = await newRoute(driver.driverId);
+    const transfers: number[] = [];
+    for (let i = 0; i < 4; i++) {
+      const transferId = await transfer((await passenger()).passengerId, "entrada", "08:00");
+      await assign(transferId, routeId);
+      transfers.push(transferId);
+    }
+    await post(`/routes/${routeId}/publish`, { overrideReason: "Orden sintético" });
+    for (const transferId of transfers.slice(0, 3)) {
+      await answer(mark(driver.cookie, routeId, markBody(transferId, "subio")), 201);
+    }
+    await answer(mark(driver.cookie, routeId, markBody(transfers[3], "ausente")), 201);
+    await answer(mark(driver.cookie, routeId, markBody(transfers[0], "entregado", { receiver: { kind: "destination", destinationId: school } })), 201);
+
+    const route = (await live(office)).routes.find((r) => r.id === routeId);
+
+    expect(route.childrenOnBoard).toBe(2);
+    expect(route.passengersOnBoard.map((p: any) => p.name).sort()).toEqual(["Pasajero Sintético 2", "Pasajero Sintético 3"]);
+  });
+});
+
+describe("Issue #135: ETA from the current Posición", () => {
+  it("Regla 5: ETA is not available when the router fails, even with a Posición", async () => {
+    const { get } = setupMockReview("subio", false, { routerFails: true, position: { lat: -26.15, lng: -65.15 } });
+    const route = await get();
+    expect(route.currentPosition).toMatchObject({ source: "posicion", latitude: -26.15, longitude: -65.15, accuracyMeters: 12 });
+    expect(route.nextStop.eta).toBeNull();
+    expect(route.stops.slice(1).map((s: any) => s.eta)).toEqual([null, null, null]);
+  });
+
+  it("Regla 6: a Posición outside the OSRM zone is shown but leaves the ETA unavailable", async () => {
+    // The stub router answers any point, like mock-osrm and OSRM snapping a far point to the extract's edge.
+    const { get, calls } = setupMockReview("subio", false, { position: { lat: -34.6, lng: -58.38 } });
+    const route = await get();
+    expect(route.currentPosition).toMatchObject({ source: "posicion", latitude: -34.6, longitude: -58.38 });
+    expect(calls).toEqual([]);
+    expect(route.nextStop.eta).toBeNull();
+    expect(route.stops.slice(1).map((s: any) => s.eta)).toEqual([null, null, null]);
+  });
+
+  it("computes ETAs from a Posición in the zone when the Recorrido has no Marcas", async () => {
+    const { get, calls } = setupMockReview("subio", false, { position: { lat: -26.15, lng: -65.15 } });
+    const route = await get();
+    expect(calls[0][0]).toEqual({ lat: -26.15, lng: -65.15 });
+    expect(route.stops.slice(1).map((s: any) => s.eta)).toEqual(["08:31", "08:39", "08:49"]);
+  });
+});
+

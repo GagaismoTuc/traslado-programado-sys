@@ -1,7 +1,7 @@
 import { useEffect, useState } from "react";
 import type { LiveDailyPlan } from "@traslado/api";
 import { redirectUnauthorized, send } from "./api";
-import { LiveMap } from "./LiveMap";
+import { currentPositionLabel, LiveMap } from "./LiveMap";
 import { OfficeNav } from "./OfficeNav";
 
 const PLAN_TIME_ZONE = "America/Argentina/Tucuman";
@@ -165,6 +165,13 @@ export function LiveMapPage({ initialData }: { initialData?: LiveDailyPlan } = {
                     <div>
                       <strong>Pasajeros a bordo:</strong>{" "}
                       <span data-testid={`route-boarded-${route.id}`}>{route.childrenOnBoard}</span>
+                      {route.passengersOnBoard.length > 0 && (
+                        <>
+                          {" "}(<span data-testid={`route-boarded-names-${route.id}`}>
+                            {route.passengersOnBoard.map((passenger) => passenger.name).join(", ")}
+                          </span>)
+                        </>
+                      )}
                     </div>
                     <div>
                       <strong>Próxima parada:</strong>{" "}
@@ -175,7 +182,7 @@ export function LiveMapPage({ initialData }: { initialData?: LiveDailyPlan } = {
                       </span>
                     </div>
                     <div>
-                      {route.lastMarca ? (
+                      {route.lastMarca || route.currentPosition ? (
                         <>
                           <strong>ETA:</strong>{" "}
                           <span
@@ -194,6 +201,12 @@ export function LiveMapPage({ initialData }: { initialData?: LiveDailyPlan } = {
                         </>
                       )}
                     </div>
+                    {route.currentPosition && (
+                      <div style={{ color: "#495057", fontSize: "13px", marginTop: "4px" }}>
+                        <strong>Posición:</strong>{" "}
+                        <span data-testid={`route-position-${route.id}`}>{currentPositionLabel(route.currentPosition)}</span>
+                      </div>
+                    )}
                     {route.lastMarca && (
                       <div style={{ color: "#495057", fontSize: "13px", marginTop: "4px" }}>
                         <em>
@@ -218,7 +231,7 @@ export function LiveMapPage({ initialData }: { initialData?: LiveDailyPlan } = {
                           <div style={{ color: "#6c757d", fontSize: "12px" }}>
                             Planificada: {stop.plannedTime}
                             {stop.eta && <> | ETA: <strong style={{ color: "#0d6efd" }}>{stop.eta}</strong></>}
-                            {stop.eta === null && route.lastMarca && !stop.completed && <> | ETA: <em>no disponible</em></>}
+                            {stop.eta === null && (route.lastMarca || route.currentPosition) && !stop.completed && <> | ETA: <em>no disponible</em></>}
                             {" "}| Estado: {stop.completed ? stop.status : "Pendiente"}
                           </div>
                         </li>
