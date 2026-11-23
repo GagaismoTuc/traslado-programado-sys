@@ -74,6 +74,7 @@ export function startTracking({
 
   let stopped = false;
   let watchId: number | null = null;
+  let watchToken = 0;
   let intervalId: ReturnType<typeof setInterval> | null = null;
   let lastSampledAt: number | null = null;
   let flushing = false;
@@ -94,12 +95,23 @@ export function startTracking({
     }
   }
 
-  function stopWatching() {
+  function stopWatch() {
+    watchToken += 1;
     if (watchId !== null) {
       const id = watchId;
       watchId = null;
       clearWatchSafe(id);
     }
+  }
+
+  function startFlushing() {
+    if (stopped || doc.visibilityState !== "visible" || intervalId !== null) return;
+    intervalId = setInterval(() => {
+      void flush();
+    }, FLUSH_INTERVAL_MS);
+  }
+
+  function stopFlushing() {
     if (intervalId !== null) {
       clearInterval(intervalId);
       intervalId = null;
@@ -153,38 +165,39 @@ export function startTracking({
   function onError(error: Pick<GeolocationPositionError, "code">) {
     if (stopped) return;
     if (error?.code === 1) {
-      stopWatching();
+      stopWatch();
       setState("permission_denied");
     } else {
       setState("gps_unavailable");
     }
   }
 
-  function startWatching() {
+  function startWatch() {
     if (stopped || doc.visibilityState !== "visible" || watchId !== null) return;
     if (!geolocation || typeof geolocation.watchPosition !== "function") {
       setState("permission_denied");
       return;
     }
+    const token = ++watchToken;
     let deniedSynchronously = false;
     setState("active");
     try {
       const id = geolocation.watchPosition(
-        onPosition,
+        (position) => {
+          if (token === watchToken) onPosition(position);
+        },
         (error) => {
+          if (token !== watchToken) return;
           if (error?.code === 1) deniedSynchronously = true;
           onError(error);
         },
         { enableHighAccuracy: true },
       );
-      if (stopped || deniedSynchronously) {
+      if (stopped || deniedSynchronously || token !== watchToken) {
         clearWatchSafe(id);
         return;
       }
       watchId = id;
-      intervalId = setInterval(() => {
-        void flush();
-      }, FLUSH_INTERVAL_MS);
     } catch {
       watchId = null;
       setState("permission_denied");
@@ -194,9 +207,11 @@ export function startTracking({
   function onVisibilityChange() {
     if (stopped) return;
     if (doc.visibilityState === "visible") {
-      startWatching();
+      startFlushing();
+      startWatch();
     } else {
-      stopWatching();
+      stopWatch();
+      stopFlushing();
       setState("idle");
     }
   }
@@ -205,13 +220,15 @@ export function startTracking({
     if (stopped) return;
     stopped = true;
     doc.removeEventListener("visibilitychange", onVisibilityChange);
-    stopWatching();
+    stopWatch();
+    stopFlushing();
     setState("idle");
   }
 
   doc.addEventListener("visibilitychange", onVisibilityChange);
   if (doc.visibilityState === "visible") {
-    startWatching();
+    startFlushing();
+    startWatch();
   } else {
     setState("idle", true);
   }
