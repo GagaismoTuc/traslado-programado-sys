@@ -931,6 +931,226 @@ async function loadDailyPlan(client: Queryable, date: string) {
   };
 }
 
+function addDays(dateStr: string, days: number): string {
+  const [year, month, day] = dateStr.split("-").map(Number);
+  const d = new Date(Date.UTC(year, month - 1, day));
+  d.setUTCDate(d.getUTCDate() + days);
+  return d.toISOString().slice(0, 10);
+}
+
+async function copyFromLastWeekday(client: Queryable, actorId: number, targetDate: string) {
+  const existingTarget = await client.query(
+    "SELECT id FROM daily_plans WHERE plan_date = $1",
+    [targetDate],
+  ) as QueryResult;
+  let targetPlanId: number;
+
+  if (existingTarget.rows[0]) {
+    targetPlanId = Number(existingTarget.rows[0].id);
+    const existingTransfers = await client.query(
+      "SELECT 1 FROM transfers WHERE daily_plan_id = $1 LIMIT 1",
+      [targetPlanId],
+    ) as QueryResult;
+    if (existingTransfers.rows[0]) {
+      throw new PlanningError(409, "Copying into a day that already has Traslados is refused");
+    }
+  } else {
+    const inserted = await client.query(
+      "INSERT INTO daily_plans (plan_date) VALUES ($1) RETURNING id",
+      [targetDate],
+    ) as QueryResult;
+    targetPlanId = Number(inserted.rows[0].id);
+    await appendChange(client, actorId, "daily_plan", String(targetPlanId), "created", null, { date: targetDate });
+  }
+
+  // Find the last same weekday with a plan (up to 4 weeks back)
+  const candidateDates = [-7, -14, -21, -28].map((days) => addDays(targetDate, days));
+  let sourcePlan: { id: number; date: string } | null = null;
+
+  for (const date of candidateDates) {
+    const res = await client.query(
+      `SELECT dp.id, to_char(dp.plan_date, 'YYYY-MM-DD') AS date
+         FROM daily_plans dp
+        WHERE dp.plan_date = $1`,
+      [date],
+    ) as QueryResult;
+    if (res.rows[0]) {
+      sourcePlan = { id: Number(res.rows[0].id), date: String(res.rows[0].date) };
+      break;
+    }
+  }
+
+  if (!sourcePlan) {
+    throw new PlanningError(404, "No plan found on the last same weekdays");
+  }
+
+  const sourcePlanId = sourcePlan.id;
+  const sourceDate = sourcePlan.date;
+
+  // Source transfers
+  const sourceTransfersRes = await client.query(
+    `SELECT t.id, t.passenger_id, t.direction, t.destination_id, t.origin_destination_id,
+            to_char(t.target_time, 'HH24:MI') AS target_time,
+            to_char(t.exit_time, 'HH24:MI') AS exit_time,
+            t.companions, t.chained_from_transfer_id, t.trasbordo_stop,
+            t.trasbordo_latitude, t.trasbordo_longitude,
+            to_char(t.trasbordo_time, 'HH24:MI') AS trasbordo_time,
+            p.name AS passenger_name, p.deactivated_at
+       FROM transfers t
+       JOIN passengers p ON p.id = t.passenger_id
+      WHERE t.daily_plan_id = $1
+      ORDER BY t.chained_from_transfer_id NULLS FIRST, t.id`,
+    [sourcePlanId],
+  ) as QueryResult;
+
+  const deactivatedPassengersMap = new Map<number, string>();
+  for (const row of sourceTransfersRes.rows) {
+    if (row.deactivated_at !== null) {
+      deactivatedPassengersMap.set(Number(row.passenger_id), String(row.passenger_name));
+    }
+  }
+  const skippedPassengers = Array.from(deactivatedPassengersMap.entries()).map(([id, name]) => ({ id, name }));
+
+  // Source routes
+  const sourceRoutesRes = await client.query(
+    `SELECT r.id, r.driver_id, r.vehicle_id,
+            to_char(r.start_time, 'HH24:MI') AS start_time,
+            to_char(r.end_time, 'HH24:MI') AS end_time,
+            r.start_kind, r.start_latitude, r.start_longitude, r.end_kind
+       FROM routes r
+      WHERE r.daily_plan_id = $1
+      ORDER BY r.id`,
+    [sourcePlanId],
+  ) as QueryResult;
+
+  // Source stops
+  const sourceStopsRes = await client.query(
+    `SELECT s.id, s.route_id, s.transfer_id, s.kind, s.position, s.leg_distance_meters,
+            to_char(s.planned_time, 'HH24:MI') AS planned_time
+       FROM stops s
+       JOIN routes r ON r.id = s.route_id
+      WHERE r.daily_plan_id = $1
+      ORDER BY s.route_id, s.position`,
+    [sourcePlanId],
+  ) as QueryResult;
+
+  // Copy routes (always Borrador, keeps driver and vehicle)
+  const oldRouteIdToNewRouteId = new Map<number, number>();
+  for (const route of sourceRoutesRes.rows) {
+    const inserted = await client.query(
+      `INSERT INTO routes (daily_plan_id, driver_id, vehicle_id, start_time, end_time, status, start_kind, start_latitude, start_longitude, end_kind)
+       VALUES ($1, $2, $3, $4, $5, 'borrador', $6, $7, $8, $9)
+       RETURNING id`,
+      [
+        targetPlanId,
+        route.driver_id,
+        route.vehicle_id,
+        route.start_time,
+        route.end_time,
+        route.start_kind,
+        route.start_latitude,
+        route.start_longitude,
+        route.end_kind,
+      ],
+    ) as QueryResult;
+    const newRouteId = Number(inserted.rows[0].id);
+    oldRouteIdToNewRouteId.set(Number(route.id), newRouteId);
+    await appendChange(client, actorId, "route", String(newRouteId), "created", null, {
+      dailyPlanId: targetPlanId,
+      driverId: Number(route.driver_id),
+      vehicleId: Number(route.vehicle_id),
+      startTime: String(route.start_time),
+      endTime: String(route.end_time),
+      status: "borrador",
+      startKind: route.start_kind,
+      startLatitude: route.start_latitude,
+      startLongitude: route.start_longitude,
+      endKind: route.end_kind,
+    });
+  }
+
+  // Copy active transfers (Ausencias are NOT copied -> status is 'planificado')
+  const oldTransferIdToNewTransferId = new Map<number, number>();
+  for (const transfer of sourceTransfersRes.rows) {
+    if (deactivatedPassengersMap.has(Number(transfer.passenger_id))) {
+      continue;
+    }
+    const chainedFrom = transfer.chained_from_transfer_id
+      ? oldTransferIdToNewTransferId.get(Number(transfer.chained_from_transfer_id)) ?? null
+      : null;
+
+    const inserted = await client.query(
+      `INSERT INTO transfers (
+        daily_plan_id, passenger_id, direction, destination_id, origin_destination_id,
+        target_time, exit_time, companions, status,
+        chained_from_transfer_id, trasbordo_stop, trasbordo_latitude, trasbordo_longitude, trasbordo_time
+      ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, 'planificado', $9, $10, $11, $12, $13)
+      RETURNING id`,
+      [
+        targetPlanId,
+        transfer.passenger_id,
+        transfer.direction,
+        transfer.destination_id,
+        transfer.origin_destination_id,
+        transfer.target_time,
+        transfer.exit_time,
+        transfer.companions,
+        chainedFrom,
+        transfer.trasbordo_stop,
+        transfer.trasbordo_latitude,
+        transfer.trasbordo_longitude,
+        transfer.trasbordo_time,
+      ],
+    ) as QueryResult;
+    const newTransferId = Number(inserted.rows[0].id);
+    oldTransferIdToNewTransferId.set(Number(transfer.id), newTransferId);
+    await appendChange(client, actorId, "transfer", String(newTransferId), "created", null, {
+      dailyPlanId: targetPlanId,
+      passengerId: Number(transfer.passenger_id),
+      direction: String(transfer.direction),
+      destinationId: Number(transfer.destination_id),
+      targetTime: String(transfer.target_time),
+      status: "planificado",
+    });
+  }
+
+  // Copy stops in order (skip stops of deactivated passengers)
+  for (const route of sourceRoutesRes.rows) {
+    const newRouteId = oldRouteIdToNewRouteId.get(Number(route.id))!;
+    const routeStops = sourceStopsRes.rows
+      .filter((s) => Number(s.route_id) === Number(route.id))
+      .filter((s) => oldTransferIdToNewTransferId.has(Number(s.transfer_id)));
+
+    for (let i = 0; i < routeStops.length; i++) {
+      const stop = routeStops[i];
+      const newTransferId = oldTransferIdToNewTransferId.get(Number(stop.transfer_id))!;
+      const newPosition = i + 1;
+
+      await client.query(
+        `INSERT INTO stops (route_id, transfer_id, kind, position, leg_distance_meters, planned_time)
+         VALUES ($1, $2, $3, $4, $5, $6)`,
+        [newRouteId, newTransferId, stop.kind, newPosition, stop.leg_distance_meters, stop.planned_time],
+      );
+
+      if (stop.kind === "pickup") {
+        await appendChange(client, actorId, "transfer", String(newTransferId), "assigned", { routeId: null }, { routeId: newRouteId });
+      }
+    }
+  }
+
+  // Log copy action on daily plan
+  await appendChange(client, actorId, "daily_plan", String(targetPlanId), "copied_from_weekday", null, {
+    fromDate: sourceDate,
+    skippedPassengers,
+  });
+
+  return {
+    copiedFromDate: sourceDate,
+    skippedPassengers,
+    day: await loadDailyPlan(client, targetDate),
+  };
+}
+
 async function loadDailyPlanPrint(client: Queryable, date: string) {
   const planResult = await client.query(
     "SELECT id, to_char(plan_date, 'YYYY-MM-DD') AS date, time_zone AS \"timeZone\" FROM daily_plans WHERE plan_date = $1",
@@ -4265,6 +4485,20 @@ export function createApp({ db, routing, router, geocoder, solver, travelTime, c
       if (!date) return context.json({ error: "Invalid request" }, 400);
       const live = await loadLiveDailyPlan(db, router, date);
       return live ? context.json(live) : context.json({ error: "Plan diario not found" }, 404);
+    })
+    .post("/daily-plans/:date/copy-last-weekday", async (context) => {
+      const actor = await requireOffice(context);
+      if (actor instanceof Response) return actor;
+      const date = parsePlanDate(context.req.param("date"));
+      if (!date) return context.json({ error: "Invalid request" }, 400);
+      try {
+        const result = await inTransaction(db, async (client) => {
+          return await copyFromLastWeekday(client, actor.id, date);
+        });
+        return context.json(result, 201);
+      } catch (error) {
+        return planningFailure(context, error);
+      }
     })
     .get("/daily-plans/:date/print", async (context) => {
       const actor = await requireOffice(context);
