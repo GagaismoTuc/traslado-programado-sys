@@ -365,10 +365,12 @@ get_state_var() {
 # Validation helpers under Ley 25.326 data transfer regulations.
 validate_vps_region() {
   local reg="$1" lower
-  lower=$(printf '%s' "$reg" | tr '[:upper:]' '[:lower:]' | sed -E 's/^[[:space:]]+//; s/[[:space:]]+$//')
-  # The country must come first (e.g. 'Alemania', 'Germany - Frankfurt'), so text
-  # that only mentions Germany, such as 'Not Germany', is refused.
-  local germany_re='^(alemania|germany|deutschland)([[:space:],(-].*)?$'
+  lower=$(printf '%s' "$reg" | tr '[:upper:]' '[:lower:]' | tr -s '[:space:]' ' ' | sed -E 's/^ //; s/ $//')
+  # Only the country alone, or the country plus a German qualifier ('Frankfurt',
+  # 'Frankfurt am Main', an optional zone number, or 'DE'), is accepted. Any
+  # other suffix ('Germany-US', 'Alemania no, Estados Unidos') is refused.
+  local qualifier='(frankfurt( am main)?([ -]?[0-9]+)?|de)'
+  local germany_re="^(alemania|germany|deutschland)(( ?[-,] ?| )$qualifier| ?\\($qualifier\\))?\$"
   if [[ "$lower" =~ $germany_re ]]; then
     return 0
   fi
@@ -378,27 +380,31 @@ validate_vps_region() {
 }
 
 # validate_firewall_rules "TCP 22, TCP 80, TCP 443" passes only when the inbound
-# rules the human read in hPanel are exactly TCP 22, 80 and 443. A bare port means
-# TCP; anything else (another port, a range, UDP, ICMP, 'Any') fails and is named.
+# rules the human read in hPanel are exactly TCP 22, 80 and 443. Each entry between
+# commas (or newlines) is exactly one rule: an optional protocol, a port, port range
+# or 'any', and an optional source column ('any', 0.0.0.0/0, ::/0) at its end. A
+# bare port means TCP. Any other rule fails and is named; an entry that is not a
+# rule (a lone 'Any', a lone 0.0.0.0/0) is never dropped: it fails and is named.
 validate_firewall_rules() {
-  local raw tok i=0 extra="" missing=""
-  local -a toks=()
+  local entry norm tok extra="" missing="" unread=""
+  local -a entries=()
   local seen_22=false seen_80=false seen_443=false
-  raw=$(printf '%s' "$1" | tr '[:upper:],' '[:lower:] ')
-  read -r -a toks <<< "$raw" || true
-  while (( i < ${#toks[@]} )); do
-    tok="${toks[i]}"
-    if [[ "$tok" =~ ^(tcp|udp|icmp|any)$ ]] && (( i + 1 < ${#toks[@]} )) && [[ "${toks[i+1]}" =~ ^([0-9]+(-[0-9]+)?|any)$ ]]; then
-      tok="$tok/${toks[i+1]}"
-      i=$((i + 1))
-    fi
-    i=$((i + 1))
-    if [[ "$tok" =~ ^[0-9]+(-[0-9]+)?$ ]]; then tok="tcp/$tok"; fi
-    # A source column copied from hPanel ('Any', 0.0.0.0/0, ::/0) after a rule.
-    # An 'Any' followed by a port is the protocol of the next rule, not a source.
-    if [[ "$tok" == */* ]] && (( i < ${#toks[@]} )) && [[ "${toks[i]}" =~ ^(any|0\.0\.0\.0/0|::/0)$ ]] \
-      && { (( i + 1 >= ${#toks[@]} )) || ! [[ "${toks[i+1]}" =~ ^([0-9]+(-[0-9]+)?|any)$ ]]; }; then
-      i=$((i + 1))
+  local port_re='[0-9]+(-[0-9]+)?'
+  local src_re='( (any|0\.0\.0\.0/0|::/0))?'
+  local bare_re="^($port_re)$src_re\$"
+  local proto_re="^(tcp|udp|icmp|any) ($port_re|any)$src_re\$"
+  IFS=$',\n' read -r -d '' -a entries <<< "$1" || true
+  for entry in "${entries[@]}"; do
+    entry=$(printf '%s' "$entry" | tr -s '[:space:]' ' ' | sed -E 's/^ //; s/ $//')
+    [[ -n "$entry" ]] || continue
+    norm=$(printf '%s' "$entry" | tr '[:upper:]' '[:lower:]')
+    if [[ "$norm" =~ $bare_re ]]; then
+      tok="tcp/${BASH_REMATCH[1]}"
+    elif [[ "$norm" =~ $proto_re ]]; then
+      tok="${BASH_REMATCH[1]}/${BASH_REMATCH[2]}"
+    else
+      unread+="${unread:+, }$entry"
+      continue
     fi
     case "$tok" in
       tcp/22) seen_22=true ;;
@@ -412,9 +418,24 @@ validate_firewall_rules() {
   if [[ "$seen_22" != "true" ]]; then missing+="${missing:+, }TCP 22"; fi
   if [[ "$seen_80" != "true" ]]; then missing+="${missing:+, }TCP 80"; fi
   if [[ "$seen_443" != "true" ]]; then missing+="${missing:+, }TCP 443"; fi
+  if [[ -n "$unread" ]]; then
+    warn "Could not read these inbound rules: $unread"
+    say "Write each rule as protocol and port (e.g. TCP 22), separate rules with commas, and remove any rule that is not TCP 22, 80 or 443."
+  fi
   if [[ -n "$extra" ]]; then warn "Remove these inbound rules: $extra"; fi
   if [[ -n "$missing" ]]; then warn "Add these inbound rules: $missing"; fi
-  [[ -z "$extra" && -z "$missing" ]]
+  [[ -z "$unread" && -z "$extra" && -z "$missing" ]]
+}
+
+# is_ipv4 ADDR succeeds only for a dotted-quad IPv4 address (four numbers 0-255).
+is_ipv4() {
+  local addr="$1" part
+  local -a parts=()
+  [[ "$addr" =~ ^[0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}$ ]] || return 1
+  IFS=. read -r -a parts <<< "$addr"
+  for part in "${parts[@]}"; do
+    (( 10#$part <= 255 )) || return 1
+  done
 }
 
 validate_bucket_region() {
@@ -656,9 +677,14 @@ run_wizard() {
   if [[ -z "$VPS_IPV4" ]]; then
     # State files written by the Hetzner version of this wizard used HETZNER_IPV4.
     VPS_IPV4=$(get_state_var HETZNER_IPV4 || true)
-    if [[ -n "$VPS_IPV4" ]]; then
+    if [[ -n "$VPS_IPV4" ]] && is_ipv4 "$VPS_IPV4"; then
       save_state_var "VPS_IPV4" "$VPS_IPV4"
     fi
+  fi
+  # A saved address that is not an IPv4 is not reused: stage 1 asks for it again.
+  if [[ -n "$VPS_IPV4" ]] && ! is_ipv4 "$VPS_IPV4"; then
+    warn "The saved server address '$VPS_IPV4' is not an IPv4 address, so stage 1 will ask for it again."
+    VPS_IPV4=""
   fi
   VPS_LOCATION=$(get_state_var VPS_LOCATION || get_state_var HETZNER_REGION || printf 'Alemania')
   DOMAIN_NAME=$(get_state_var DOMAIN_NAME || true)
@@ -703,6 +729,10 @@ run_wizard() {
         warn "IPv4 address is required."
         continue
       fi
+      if ! is_ipv4 "$VPS_IPV4"; then
+        warn "'$VPS_IPV4' is not an IPv4 address (for example 192.0.2.1): enter the public IPv4 shown in hPanel."
+        continue
+      fi
 
       say "Verifying network connectivity to port 22 on $VPS_IPV4..."
       if check_port_22 "$VPS_IPV4"; then
@@ -744,7 +774,7 @@ run_wizard() {
 
     local FIREWALL_RULES=""
     while true; do
-      ask FIREWALL_RULES "List every inbound rule of the active firewall, as shown in hPanel (e.g. TCP 22, TCP 80, TCP 443):"
+      ask FIREWALL_RULES "List every inbound rule of the active firewall as shown in hPanel, separating rules with commas (e.g. TCP 22, TCP 80, TCP 443):"
       if ! validate_firewall_rules "$FIREWALL_RULES"; then
         halt_verification 2 \
           "The firewall must allow inbound only TCP 22, 80 and 443." \

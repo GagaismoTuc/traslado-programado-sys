@@ -198,6 +198,19 @@ res_scw=$?
 [ $res_scw -ne 0 ] && printf '%s' "$out_scw" | grep -q 'Ley 25.326' || ok=1
 check "$t" $ok
 
+t="hosting.sh accepts Germany alone or with a German qualifier and refuses any other suffix citing Ley 25.326"
+ok=0
+for reg_bad in "Germany-US" "Alemania - Estados Unidos" "Alemania - Boston 2" "Alemania no, Estados Unidos" "Germany (United States)"; do
+  reg_out=$(bash "$wizard" --validate-vps-region "$reg_bad" 2>&1)
+  reg_rc=$?
+  [ $reg_rc -ne 0 ] && printf '%s' "$reg_out" | grep -Fq 'The VPS must be in Germany (Ley 25.326): choose Alemania' \
+    || { echo "  region '$reg_bad' was not refused" >&2; ok=1; }
+done
+for reg_good in "Deutschland" "Germany - Frankfurt" "Alemania (Frankfurt am Main)" "Germany, DE" "Alemania - Frankfurt 2"; do
+  bash "$wizard" --validate-vps-region "$reg_good" > /dev/null 2>&1 || { echo "  region '$reg_good' was refused" >&2; ok=1; }
+done
+check "$t" $ok
+
 t="hosting.sh maintains clean repository status and leaves no secrets on disk"
 ok=0
 test_home=$tmp/clean_home
@@ -512,6 +525,22 @@ if [ -f "$loc_dir/state" ] && grep -q '^STAGE_1_CONFIRMED=' "$loc_dir/state"; th
 if grep -q 'Stage 2/9' "$loc_dir/out"; then ok=1; fi
 check "$t" $ok
 
+t="hosting.sh stage 1 refuses an address that is not an IPv4 and does not mark the stage done"
+ok=0
+n_ip=0
+for ip_bad in "not-an-ip" "192.0.2.300" "192.0.2"; do
+  n_ip=$((n_ip + 1))
+  ip_dir=$tmp/ipv4_test_$n_ip
+  mkdir -p "$ip_dir/bin" "$ip_dir/home"
+  for c in wslview explorer.exe xdg-open open ssh; do printf '#!/bin/sh\nexit 0\n' > "$ip_dir/bin/$c"; done
+  chmod +x "$ip_dir/bin/"*
+  printf '\nAlemania\n%s\n' "$ip_bad" | \
+    PATH="$ip_dir/bin:$PATH" HOME="$ip_dir/home" WIZARD_STATE_FILE="$ip_dir/state" bash "$wizard" > "$ip_dir/out" 2>&1 || true
+  if [ -f "$ip_dir/state" ] && grep -q '^STAGE_1_CONFIRMED=' "$ip_dir/state"; then echo "  IPv4 '$ip_bad' confirmed stage 1" >&2; ok=1; fi
+  grep -Fq "'$ip_bad' is not an IPv4 address" "$ip_dir/out" || { echo "  IPv4 '$ip_bad': no refusal message" >&2; ok=1; }
+done
+check "$t" $ok
+
 t="hosting.sh stages 1 and 2 only open hPanel, never call a Hostinger API, and pass with exactly TCP 22, 80 and 443"
 ok=0
 hp_dir=$tmp/hpanel_test
@@ -562,6 +591,31 @@ for scenario in extra missing udp anyproto inactive; do
 done
 check "$t" $ok
 
+t="hosting.sh stage 2 reads each comma-separated entry as one rule and refuses an extra 'Any' or '0.0.0.0/0' entry"
+ok=0
+n_fwc=0
+for fwc_input in "TCP 22, TCP 80, TCP 443, Any" "TCP 22, Any, TCP 80, TCP 443" "TCP 22, TCP 80, TCP 443, 0.0.0.0/0"; do
+  n_fwc=$((n_fwc + 1))
+  fwc_dir=$tmp/fw_comma_$n_fwc
+  mkdir -p "$fwc_dir/bin" "$fwc_dir/home"
+  for c in wslview explorer.exe xdg-open open ssh; do printf '#!/bin/sh\nexit 0\n' > "$fwc_dir/bin/$c"; done
+  chmod +x "$fwc_dir/bin/"*
+  printf "STAGE_1_CONFIRMED=true\nVPS_IPV4='192.0.2.1'\n" > "$fwc_dir/state"
+  case "$n_fwc" in 3) fwc_entry='0.0.0.0/0' ;; *) fwc_entry='Any' ;; esac
+  printf '\ny\n%s\ny\nn\n' "$fwc_input" | PATH="$fwc_dir/bin:$PATH" HOME="$fwc_dir/home" WIZARD_STATE_FILE="$fwc_dir/state" bash "$wizard" > "$fwc_dir/out" 2>&1 || true
+  if grep -q '^STAGE_2_CONFIRMED=' "$fwc_dir/state" || grep -q 'Stage 3/9' "$fwc_dir/out"; then echo "  stage 2 '$fwc_input' was confirmed" >&2; ok=1; fi
+  grep -F 'Could not read these inbound rules: ' "$fwc_dir/out" | grep -Fq "$fwc_entry" \
+    || { echo "  stage 2 '$fwc_input': extra rule '$fwc_entry' not named" >&2; ok=1; }
+done
+fwc_dir=$tmp/fw_comma_sources
+mkdir -p "$fwc_dir/bin" "$fwc_dir/home"
+for c in wslview explorer.exe xdg-open open ssh; do printf '#!/bin/sh\nexit 0\n' > "$fwc_dir/bin/$c"; done
+chmod +x "$fwc_dir/bin/"*
+printf "STAGE_1_CONFIRMED=true\nVPS_IPV4='192.0.2.1'\n" > "$fwc_dir/state"
+printf '\ny\nTCP 22 0.0.0.0/0, 80 ::/0, tcp 443 Any\ny\n\n' | PATH="$fwc_dir/bin:$PATH" HOME="$fwc_dir/home" WIZARD_STATE_FILE="$fwc_dir/state" bash "$wizard" > "$fwc_dir/out" 2>&1 || true
+grep -q '^STAGE_2_CONFIRMED=true' "$fwc_dir/state" || { echo "  stage 2: source column variants were refused" >&2; ok=1; }
+check "$t" $ok
+
 t="hosting.sh reads a Hetzner-era state file and offers to skip stage 1 with the saved IPv4"
 ok=0
 legacy_dir=$tmp/legacy_state_test
@@ -573,6 +627,19 @@ printf '\ny\n' | PATH="$legacy_dir/bin:$PATH" HOME="$legacy_dir/home" WIZARD_STA
 grep -Fq 'Stage 1 already completed (IPv4: 192.0.2.1). Skip to next stage?' "$legacy_dir/out" || ok=1
 grep -q 'Stage 2/9' "$legacy_dir/out" || ok=1
 grep -qx "VPS_IPV4='192.0.2.1'" "$legacy_dir/state" || ok=1
+check "$t" $ok
+
+t="hosting.sh ignores a saved IPv4 that is not an IPv4 and does not offer to skip stage 1"
+ok=0
+legacy_bad_dir=$tmp/legacy_bad_state_test
+mkdir -p "$legacy_bad_dir/bin" "$legacy_bad_dir/home"
+for c in wslview explorer.exe xdg-open open ssh; do printf '#!/bin/sh\nexit 0\n' > "$legacy_bad_dir/bin/$c"; done
+chmod +x "$legacy_bad_dir/bin/"*
+printf 'STAGE_1_CONFIRMED=true\nHETZNER_IPV4=not-an-ip\n' > "$legacy_bad_dir/state"
+printf '\ny\n' | PATH="$legacy_bad_dir/bin:$PATH" HOME="$legacy_bad_dir/home" WIZARD_STATE_FILE="$legacy_bad_dir/state" bash "$wizard" > "$legacy_bad_dir/out" 2>&1 || true
+if grep -Fq 'Stage 1 already completed' "$legacy_bad_dir/out"; then ok=1; fi
+if grep -q '^VPS_IPV4=' "$legacy_bad_dir/state"; then ok=1; fi
+grep -Fq "'not-an-ip' is not an IPv4 address" "$legacy_bad_dir/out" || ok=1
 check "$t" $ok
 
 t="hosting.sh stage 3 halts if root login with ssh key is accepted"
