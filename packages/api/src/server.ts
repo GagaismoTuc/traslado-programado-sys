@@ -4,6 +4,7 @@ import { readConfig } from "./config.js";
 import { createPool } from "./db.js";
 import { createApiErrorTracker } from "./error-tracking.js";
 import { createNominatimGeocoder } from "./geocoding.js";
+import { startPositionPurge } from "./position-purge.js";
 import { createOsrmRouter, createRoutingHealth, createTravelTime, createVroomSolver } from "./routing.js";
 
 const config = readConfig();
@@ -27,9 +28,12 @@ const app = createApp({
   config,
 });
 const server = serve({ fetch: app.fetch, port: config.port, hostname: config.host });
+// Purges Posiciones older than 90 days now and every 24 h (ADR 0002); failures are logged and retried on the next run.
+const positionPurge = startPositionPurge({ pool, now: () => new Date() });
 
 async function shutdown() {
   server.close();
+  await positionPurge.stop();
   await Promise.all([pool.end(), errorTracker.close()]);
 }
 
