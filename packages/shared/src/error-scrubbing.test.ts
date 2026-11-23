@@ -179,4 +179,111 @@ describe("scrubErrorEvent", () => {
     expect(scrubBreadcrumb({ category: "navigation", data: { from: "/a?name=Synthetic", to: "/b#Synthetic" } })?.data)
       .toEqual({ from: "/a", to: "/b" });
   });
+
+  it("allows only exact safe messages and redacts prefixed, suffixed or mismatched logentry messages", () => {
+    const prefixed = scrubErrorEvent({
+      message: "OSRM Synthetic Person at Example Avenue 19",
+      exception: {
+        values: [
+          { type: "TypeError", value: "Failed to fetch Synthetic Person at Example Avenue 19" },
+          { type: "Error", value: "Synthetic Person at Example Avenue 19 is not a function" },
+          { type: "Error", value: "Nominatim answered 503 Synthetic Person" },
+        ],
+      },
+      logentry: {
+        message: "Failed to fetch",
+        formatted: "Failed to fetch Synthetic Person at Example Avenue 19",
+        params: ["Synthetic Person", "Example Avenue 19"],
+      },
+    });
+
+    const serialized = JSON.stringify(prefixed);
+    expect(serialized).not.toMatch(/Synthetic Person|Example Avenue 19/);
+    expect(prefixed.message).toBe("[REDACTED]");
+    expect(prefixed.exception?.values?.[0]?.value).toBe("[REDACTED]");
+    expect(prefixed.exception?.values?.[1]?.value).toBe("[REDACTED]");
+    expect(prefixed.exception?.values?.[2]?.value).toBe("[REDACTED]");
+    expect(prefixed.logentry).toEqual({ message: "Failed to fetch", formatted: "[REDACTED]" });
+
+    const exact = scrubErrorEvent({
+      message: "Nominatim answered 503",
+      exception: {
+        values: [
+          { type: "TypeError", value: "Failed to fetch" },
+          { type: "Error", value: "SERVER_EPOCH is required" },
+        ],
+      },
+    });
+    expect(exact.message).toBe("Nominatim answered 503");
+    expect(exact.exception?.values?.[0]?.value).toBe("Failed to fetch");
+    expect(exact.exception?.values?.[1]?.value).toBe("SERVER_EPOCH is required");
+  });
+
+  it("redacts untrusted free text across arbitrary extra, contexts, tags, frame vars, mechanism, headers, transaction and breadcrumbs", () => {
+    const event = scrubErrorEvent({
+      transaction: "GET /passengers/Synthetic Person at Example Avenue 19",
+      request: {
+        method: "POST",
+        url: "https://traslado.example/passengers/Synthetic%20Person",
+        headers: {
+          "Content-Type": "application/json",
+          "X-Custom": "Synthetic Person at Example Avenue 19",
+        },
+        env: { REMOTE_ADDR: "203.0.113.1", note: "Synthetic Person" },
+      },
+      exception: {
+        values: [{
+          type: "Error",
+          value: "Failed to fetch",
+          mechanism: { type: "generic", handled: true, data: { note: "Synthetic Person at Example Avenue 19" } },
+          stacktrace: {
+            frames: [{
+              filename: "packages/api/src/app.ts",
+              function: "savePassenger",
+              lineno: 10,
+              colno: 2,
+              vars: { note: "Synthetic Person at Example Avenue 19" },
+            }],
+          },
+        }],
+      },
+      extra: {
+        record: {
+          description: "Synthetic Person at Example Avenue 19",
+          doc: 40123456,
+          negDoc: -456789,
+          tel: 3815550199,
+          spot: [-65, -26],
+          coord: -26.8302,
+        },
+      },
+      contexts: {
+        runtime: { name: "node", version: "24.22.1" },
+        custom: { note: "Synthetic Person at Example Avenue 19" },
+      },
+      tags: {
+        app: "api",
+        server_epoch: "epoch-1",
+        note: "Synthetic Person at Example Avenue 19",
+      },
+      breadcrumbs: [{
+        category: "console",
+        message: "Synthetic Person at Example Avenue 19",
+        data: { note: "Synthetic Person at Example Avenue 19", method: "POST", status_code: 500 },
+      }],
+      fingerprint: ["{{ default }}", "Synthetic Person at Example Avenue 19"],
+    });
+
+    const serialized = JSON.stringify(event);
+    expect(serialized).not.toMatch(/Synthetic Person|Example Avenue 19|203\.0\.113\.1|40123456|-456789|3815550199|-65|-26/);
+    expect(event.tags?.app).toBe("api");
+    expect(event.tags?.server_epoch).toBe("epoch-1");
+    expect(event.tags?.note).toBe("[REDACTED]");
+    expect(event.contexts?.runtime).toEqual({ name: "node", version: "24.22.1" });
+    expect(event.request?.headers).toEqual({ "Content-Type": "application/json" });
+    expect(event.request?.env).toBeUndefined();
+    expect(event.exception?.values?.[0]?.mechanism).toMatchObject({ type: "generic", handled: true });
+    expect(event.breadcrumbs?.[0]?.data).toMatchObject({ method: "POST", status_code: 500, note: "[REDACTED]" });
+    expect(event.fingerprint).toEqual(["{{ default }}", "[REDACTED]"]);
+  });
 });

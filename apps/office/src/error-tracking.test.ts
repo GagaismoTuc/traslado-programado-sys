@@ -55,7 +55,7 @@ describe("office error tracking SDK", () => {
     await tracker.flush();
     expect(envelopes).toHaveLength(1);
     const envelopeText = envelopes[0]!;
-    expect(envelopeText).toContain("Office save failed");
+    expect(envelopeText).toContain('"[REDACTED]"');
     expect(envelopeText).toContain('"app":"office"');
     for (const forbidden of [
       "Pasajero Sintético Oficina", "41234567", "Pasaje de Prueba 202", "medicación de rescate",
@@ -77,10 +77,15 @@ describe("office error tracking SDK", () => {
     });
 
     tracker.captureError(new Error("Failed processing record: Synthetic Person, Example Avenue 19"));
+    tracker.captureError(new Error("Failed to fetch Synthetic Person at Example Avenue 19"), {
+      record: { description: "Synthetic Person at Example Avenue 19" },
+    });
     await tracker.flush();
 
-    expect(envelopes).toHaveLength(1);
-    expect(envelopes[0]).not.toContain("Synthetic Person");
-    expect(envelopes[0]).not.toContain("Example Avenue 19");
+    expect(envelopes).toHaveLength(2);
+    for (const envelope of envelopes) {
+      expect(envelope).not.toContain("Synthetic Person");
+      expect(envelope).not.toContain("Example Avenue 19");
+    }
   });
 });

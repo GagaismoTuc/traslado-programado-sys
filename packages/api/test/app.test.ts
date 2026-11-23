@@ -213,7 +213,8 @@ describe("API test seam", () => {
     await errorTracker.flush();
     expect(envelopes).toHaveLength(1);
     const envelopeText = envelopes[0]!;
-    expect(envelopeText).toContain("Unhandled failure saving");
+    expect(envelopeText).toContain('"[REDACTED]"');
+    expect(envelopeText).toContain("http://localhost/boom");
     expect(envelopeText).toContain('"app":"api"');
     expect(envelopeText).not.toContain("Pasajero Sintético API");
     expect(envelopeText).not.toContain("42.345.678");

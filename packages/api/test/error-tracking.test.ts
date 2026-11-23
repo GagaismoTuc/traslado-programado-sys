@@ -235,7 +235,8 @@ describe("error tracking and container log rotation", () => {
       );
       const storedDetailText = allDetails.join("\n");
 
-      expect(storedDetailText).toContain("Database crash while saving");
+      expect(storedDetailText).toContain("[REDACTED]");
+      expect(storedDetailText).toContain("/passengers-crash");
       expect(storedDetailText).toContain("Browser SDK smoke event");
       for (const forbidden of [
         "Pasajero Sintético GlitchTip", "Adulto Sintético Legal", "43.456.789", "43456789", "30.111.222", "30111222",
@@ -272,12 +273,19 @@ describe("error tracking and container log rotation", () => {
 
     const error = new Error("Failed processing record: Synthetic Person, Example Avenue 19");
     tracker.captureRequestError(error, { method: "GET", url: "http://localhost/example", headers: {} });
+    tracker.captureRequestError(new Error("Failed to fetch Synthetic Person at Example Avenue 19"), {
+      method: "GET",
+      url: "http://localhost/example",
+      headers: { "X-Custom": "Synthetic Person at Example Avenue 19" },
+    });
     expect(await tracker.flush()).toBe(true);
     await tracker.close();
 
-    expect(bodies).toHaveLength(1);
-    expect(bodies[0]).not.toContain("Synthetic Person");
-    expect(bodies[0]).not.toContain("Example Avenue 19");
+    expect(bodies).toHaveLength(2);
+    for (const body of bodies) {
+      expect(body).not.toContain("Synthetic Person");
+      expect(body).not.toContain("Example Avenue 19");
+    }
   });
 
   it("does not transmit integer coordinates in request.url", async () => {
