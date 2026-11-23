@@ -144,8 +144,46 @@ describe("POST /driver/routes/:id/positions", () => {
     const batch = [positionSample(0)];
     expect((await request(`/driver/routes/${draftRouteId}/positions`, "POST", { positions: batch }, draftDriver.cookie)).status).toBe(409);
     expect((await request(`/driver/routes/${published.routeId}/positions`, "POST", { positions: batch }, published.driver.cookie)).status).toBe(409);
-    expect((await request(`/driver/routes/${closed.routeId}/positions`, "POST", { positions: batch }, closed.driver.cookie)).status).toBe(409);
+    // #136: a cerrado Recorrido refuses a Posición taken after its close (at the clock's 12:00).
+    expect((await request(`/driver/routes/${closed.routeId}/positions`, "POST", { positions: [positionSample(1)] }, closed.driver.cookie)).status).toBe(409);
     expect(await storedPositions()).toEqual([]);
+  });
+
+  it("accepts late Posiciones of a cerrado Recorrido taken at or before its close and refuses with 409 a batch with a later one", async () => {
+    const { passenger, served } = await setup("late");
+    const { passengerId } = await passenger();
+    const closed = await served(passengerId, "salida");
+    await answer(request(`/driver/routes/${closed.routeId}/start`, "POST", {}, closed.driver.cookie), 200);
+    await answer(mark(closed.driver.cookie, closed.routeId, markBody(closed.transferId, "ausente")), 201);
+    // Closed at 12:00 by the server clock.
+    await answer(request(`/driver/routes/${closed.routeId}/close`, "POST", {}, closed.driver.cookie), 200);
+    const path = `/driver/routes/${closed.routeId}/positions`;
+
+    expect(await answer(request(path, "POST", { positions: [positionSample(-120), positionSample(60)] }, closed.driver.cookie), 409))
+      .toEqual({ error: "Positions taken after the Recorrido was closed are refused" });
+    expect(await storedPositions()).toEqual([]);
+
+    expect(await answer(request(path, "POST", { positions: [positionSample(-120), positionSample(0)] }, closed.driver.cookie), 201))
+      .toEqual({ saved: 2, ignored: 0 });
+    expect((await storedPositions()).map((row) => new Date(row.phone_time as string).toISOString()))
+      .toEqual(["2026-10-23T11:58:00.000Z", "2026-10-23T12:00:00.000Z"]);
+  });
+
+  it("closing a Recorrido still answers 200 and dates its closed change-log entry with the server clock", async () => {
+    const { passenger, served } = await setup("close-time");
+    const { passengerId } = await passenger();
+    const closed = await served(passengerId, "salida");
+    await answer(request(`/driver/routes/${closed.routeId}/start`, "POST", {}, closed.driver.cookie), 200);
+    await answer(mark(closed.driver.cookie, closed.routeId, markBody(closed.transferId, "ausente")), 201);
+
+    expect(await answer(request(`/driver/routes/${closed.routeId}/close`, "POST", {}, closed.driver.cookie), 200))
+      .toEqual({ route: { routeId: closed.routeId, status: "cerrado" } });
+    const log = await rows(
+      "SELECT action, after_data, occurred_at FROM change_log WHERE entity = 'route' AND entity_id = $1 AND action = 'closed'",
+      [String(closed.routeId)],
+    );
+    expect(log.map((row) => ({ ...row, occurred_at: new Date(row.occurred_at as string).toISOString() })))
+      .toEqual([{ action: "closed", after_data: { status: "cerrado" }, occurred_at: NOW }]);
   });
 
   it("returns 400 and stores nothing for invalid batches and accepts the 100-position boundary", async () => {

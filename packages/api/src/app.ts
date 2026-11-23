@@ -189,10 +189,12 @@ async function appendChange(
   action: string,
   before: unknown,
   after: unknown,
+  occurredAt?: Date,
 ) {
+  // Without `occurredAt`, the database's clock dates the change.
   await client.query(
-    "INSERT INTO change_log (actor_user_id, entity, entity_id, action, before_data, after_data) VALUES ($1, $2, $3, $4, $5, $6)",
-    [actorId, entity, entityId, action, before === null ? null : JSON.stringify(before), after === null ? null : JSON.stringify(after)],
+    "INSERT INTO change_log (actor_user_id, entity, entity_id, action, before_data, after_data, occurred_at) VALUES ($1, $2, $3, $4, $5, $6, COALESCE($7::timestamptz, now()))",
+    [actorId, entity, entityId, action, before === null ? null : JSON.stringify(before), after === null ? null : JSON.stringify(after), occurredAt ?? null],
   );
 }
 
@@ -5474,7 +5476,8 @@ export function createApp({ db, routing, router, geocoder, solver, travelTime, e
             };
           }
           await client.query("UPDATE routes SET status = 'cerrado' WHERE id = $1", [id]);
-          await appendChange(client, chofer.user.id, "route", String(id), "closed", { status }, { status: "cerrado" });
+          // Dated by the server clock, the one late Posiciones of this Recorrido are compared with.
+          await appendChange(client, chofer.user.id, "route", String(id), "closed", { status }, { status: "cerrado" }, now());
           return { status: 200 as const, body: { route: { routeId: id, status: "cerrado" } } };
         });
         return context.json(result.body, result.status);
@@ -5516,7 +5519,8 @@ export function createApp({ db, routing, router, geocoder, solver, travelTime, e
         return planningFailure(context, error);
       }
     })
-    // A batch of phone Posiciones during Seguimiento of an En curso Recorrido; resending the same phoneTime is ignored.
+    // A batch of phone Posiciones during Seguimiento of an En curso Recorrido, or sent late for a cerrado one when every
+    // Posición was taken at or before its close; resending the same phoneTime is ignored.
     .post("/driver/routes/:id/positions", async (context) => {
       const chofer = await requireDriver(context);
       if (chofer instanceof Response) return chofer;
@@ -5529,7 +5533,19 @@ export function createApp({ db, routing, router, geocoder, solver, travelTime, e
       try {
         const result = await inTransaction(db, async (client) => {
           const status = await lockOwnRoute(client, chofer.driverId, id);
-          if (status !== "en_curso") throw new PlanningError(409, "Positions can only be recorded while the Recorrido is en curso");
+          if (status === "cerrado") {
+            // The close time is the newest "closed" entry of the change log; a cerrado Recorrido without one takes nothing.
+            const closed = await client.query(
+              "SELECT max(occurred_at) AS closed_at FROM change_log WHERE entity = 'route' AND entity_id = $1 AND action = 'closed'",
+              [String(id)],
+            ) as QueryResult;
+            const closedAt = closed.rows[0]?.closed_at ? new Date(closed.rows[0].closed_at as string | Date).getTime() : null;
+            if (closedAt === null || batch.some((item) => Date.parse(item.phoneTime) > closedAt)) {
+              throw new PlanningError(409, "Positions taken after the Recorrido was closed are refused");
+            }
+          } else if (status !== "en_curso") {
+            throw new PlanningError(409, "Positions can only be recorded while the Recorrido is en curso");
+          }
           const inserted = await client.query(
             `INSERT INTO positions (route_id, driver_id, latitude, longitude, accuracy_meters, phone_time, server_time)
              SELECT $1, $2, lat, lng, accuracy_meters, phone_time, $7
