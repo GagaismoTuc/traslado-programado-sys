@@ -26,8 +26,11 @@ function withFakeStaging(check) {
     '    printf "%s" "${DEPLOY_PROJECT-}" > "$OFFICE_PROJECT_ENV"',
     '    if [ -f "$OFFICE_DB" ]; then echo "An Office account already exists" >&2; exit 1; fi',
     '    for arg do last=$arg; done',
-    '    printf "%s\n" "$last" >> "$OFFICE_DB"',
+    '    printf "%s:%s\n" "$last" "$BOOTSTRAP_OFFICE_PASSWORD" >> "$OFFICE_DB"',
     '    echo "Created initial Office account: $last"',
+    '    ;;',
+    '  *"db:break-glass-office"*)',
+    '    printf "break-glass:%s\n" "${BOOTSTRAP_OFFICE_PASSWORD-}" > "$OFFICE_DB"',
     '    ;;',
     '  *"exec -T db psql"*) cat > "$SQL";;',
     '  *"exec -T db sh -c"*) cat > "$SEED_SQL";;',
@@ -294,7 +297,7 @@ test('bootstraps synthetic office account demo-oficina via db:bootstrap-office a
     assert.ok(bootstrapOfficeIdx > migrateIdx && migrateIdx >= 0, 'db:bootstrap-office must run after migrate');
     assert.ok(bootstrapOfficeIdx < upAllIdx, 'db:bootstrap-office must run before starting the full stack');
     assert.equal(readFileSync(join(root, 'office-pw-env'), 'utf8'), password);
-    assert.equal(readFileSync(join(root, 'office-db'), 'utf8').trim(), 'demo-oficina');
+    assert.equal(readFileSync(join(root, 'office-db'), 'utf8'), `demo-oficina:${password}\n`);
     assert.equal(calls.join('\n').includes(password), false, 'password must never be passed on command line');
     if (process.platform !== 'win32') {
       assert.equal(statSync(officePasswordPath).mode & 0o777, 0o600);
@@ -307,6 +310,8 @@ test('bootstraps synthetic office account demo-oficina via db:bootstrap-office a
     assert.notEqual(result.status, 0);
     assert.match(result.stderr, /Database connection refused/);
     assert.equal(existsSync(join(root, 'staging', 'office-password')), false);
+    assert.equal(existsSync(join(root, 'staging', 'office-password.tmp')), false);
+    assert.equal(existsSync(join(root, 'office-db')), false);
   });
 });
 
@@ -316,16 +321,20 @@ test('second up is idempotent when office-password and office account already ex
     assert.equal(first.status, 0, first.stderr);
     const officePasswordPath = join(root, 'staging', 'office-password');
     const firstPassword = readFileSync(officePasswordPath, 'utf8');
+    const persistedOfficeBefore = readFileSync(join(root, 'office-db'), 'utf8');
+    assert.equal(persistedOfficeBefore, `demo-oficina:${firstPassword.trim()}\n`);
 
     const whileRunning = run('up');
     assert.equal(whileRunning.status, 0, whileRunning.stderr);
     assert.equal(readFileSync(officePasswordPath, 'utf8'), firstPassword);
+    assert.equal(readFileSync(join(root, 'office-db'), 'utf8'), persistedOfficeBefore);
 
     assert.equal(run('down').status, 0);
     const afterDown = run('up');
     assert.equal(afterDown.status, 0, afterDown.stderr);
     assert.equal(readFileSync(officePasswordPath, 'utf8'), firstPassword);
-    assert.deepEqual(readFileSync(join(root, 'office-db'), 'utf8').trim().split('\n'), ['demo-oficina']);
+    assert.equal(readFileSync(join(root, 'office-db'), 'utf8'), persistedOfficeBefore);
+    assert.deepEqual(readFileSync(join(root, 'office-db'), 'utf8').trim().split('\n'), [`demo-oficina:${firstPassword.trim()}`]);
   });
 });
 
@@ -339,6 +348,7 @@ test('generates office-password with openssl rand -hex 12 format and never print
     const password = raw.trim();
     const driverPassword = readFileSync(join(root, 'staging', 'driver-password'), 'utf8').trim();
     assert.notEqual(password, driverPassword);
+    assert.equal(readFileSync(join(root, 'office-db'), 'utf8'), `demo-oficina:${password}\n`);
     assert.equal(result.stdout.includes(password), false);
     assert.equal(result.stderr.includes(password), false);
   });
@@ -348,6 +358,11 @@ test('fails without overwriting when office-password is missing but office accou
   withFakeStaging(({ root, run }) => {
     assert.equal(run('up').status, 0);
     const officePasswordPath = join(root, 'staging', 'office-password');
+    const originalPassword = readFileSync(officePasswordPath, 'utf8').trim();
+    const persistedOfficeBefore = readFileSync(join(root, 'office-db'), 'utf8');
+    const driverPasswordBefore = readFileSync(join(root, 'staging', 'driver-password'), 'utf8');
+    assert.equal(persistedOfficeBefore, `demo-oficina:${originalPassword}\n`);
+
     rmSync(officePasswordPath);
     const whileRunning = run('up');
     assert.notEqual(whileRunning.status, 0);
@@ -355,6 +370,11 @@ test('fails without overwriting when office-password is missing but office accou
     assert.match(whileRunning.stderr, /db:break-glass-office/);
     assert.equal(existsSync(officePasswordPath), false);
     assert.equal(existsSync(`${officePasswordPath}.tmp`), false);
+    assert.notEqual(readFileSync(join(root, 'office-pw-env'), 'utf8'), originalPassword);
+    assert.equal(readFileSync(join(root, 'office-db'), 'utf8'), persistedOfficeBefore);
+    assert.equal(readFileSync(join(root, 'staging', 'driver-password'), 'utf8'), driverPasswordBefore);
+    assert.doesNotMatch(readFileSync(join(root, 'docker-log'), 'utf8'), /db:break-glass-office/);
+    assert.doesNotMatch(readFileSync(join(root, 'sql'), 'utf8'), /demo-oficina|'office'/i);
 
     const afterDown = run('up');
     assert.notEqual(afterDown.status, 0);
@@ -362,6 +382,11 @@ test('fails without overwriting when office-password is missing but office accou
     assert.match(afterDown.stderr, /db:break-glass-office/);
     assert.equal(existsSync(officePasswordPath), false);
     assert.equal(existsSync(`${officePasswordPath}.tmp`), false);
+    assert.notEqual(readFileSync(join(root, 'office-pw-env'), 'utf8'), originalPassword);
+    assert.equal(readFileSync(join(root, 'office-db'), 'utf8'), persistedOfficeBefore);
+    assert.equal(readFileSync(join(root, 'staging', 'driver-password'), 'utf8'), driverPasswordBefore);
+    assert.doesNotMatch(readFileSync(join(root, 'docker-log'), 'utf8'), /db:break-glass-office/);
+    assert.doesNotMatch(readFileSync(join(root, 'sql'), 'utf8'), /demo-oficina|'office'/i);
   });
 });
 
@@ -390,8 +415,10 @@ test('never creates office-password or bootstraps office outside DEPLOY_PROJECT=
   withFakeStaging(({ root: stagingRoot, run }) => {
     const result = run('up', { DEPLOY_PROJECT: 'production' });
     assert.equal(result.status, 0, result.stderr);
+    const officePassword = readFileSync(join(stagingRoot, 'staging', 'office-password'), 'utf8').trim();
     assert.match(readFileSync(join(stagingRoot, 'staging', '.env'), 'utf8'), /^DEPLOY_PROJECT=staging$/m);
     assert.equal(readFileSync(join(stagingRoot, 'office-project-env'), 'utf8'), 'staging');
+    assert.equal(readFileSync(join(stagingRoot, 'office-db'), 'utf8'), `demo-oficina:${officePassword}\n`);
   });
 });
 
@@ -400,11 +427,15 @@ test('down stops staging while keeping office-password, driver-password and env 
     assert.equal(run('up').status, 0);
     const officePasswordPath = join(root, 'staging', 'office-password');
     const original = readFileSync(officePasswordPath, 'utf8');
+    const driverPasswordBefore = readFileSync(join(root, 'staging', 'driver-password'), 'utf8');
+    const persistedOfficeBefore = readFileSync(join(root, 'office-db'), 'utf8');
+    assert.equal(persistedOfficeBefore, `demo-oficina:${original.trim()}\n`);
     const down = run('down');
     assert.equal(down.status, 0, down.stderr);
     assert.equal(existsSync(join(root, 'staging', 'local-staging-active')), false);
     assert.equal(existsSync(join(root, 'staging', '.env')), true);
-    assert.equal(existsSync(join(root, 'staging', 'driver-password')), true);
+    assert.equal(readFileSync(join(root, 'staging', 'driver-password'), 'utf8'), driverPasswordBefore);
     assert.equal(readFileSync(officePasswordPath, 'utf8'), original);
+    assert.equal(readFileSync(join(root, 'office-db'), 'utf8'), persistedOfficeBefore);
   });
 });
