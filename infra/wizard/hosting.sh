@@ -227,8 +227,8 @@ if (( ${#CONTRACT_SECRETS[@]} == 0 )); then
 fi
 
 STAGE_TITLES=(
-  "Hetzner Cloud: project, SSH key, CX33 in Germany (fsn1/nbg1), IPv4"
-  "Hetzner firewall: allow inbound only TCP 22, 80, 443; attach to server"
+  "Hostinger VPS: buy KVM 2 in hPanel, location Alemania, Ubuntu LTS, SSH key, IPv4"
+  "Hostinger firewall: allow inbound only TCP 22, 80, 443; activate on the VPS"
   "Server hardening over SSH: deploy user, disable password and root login, Docker and Compose"
   "GHCR access for the server: read:packages token for docker login"
   "Scaleway: Object Storage bucket in Paris (fr-par), Multi-AZ, scoped API key"
@@ -364,17 +364,78 @@ get_state_var() {
 
 # Validation helpers under Ley 25.326 data transfer regulations.
 validate_vps_region() {
-  local reg="$1"
-  case "$reg" in
-    fsn1|nbg1|[Ff]alkenstein|[Nn]uremberg)
-      return 0
-      ;;
-    *)
-      warn "Region '$reg' is refused under Ley 25.326 international data transfer regulations."
-      warn "The VPS must be located in Germany (accepted locations: fsn1, nbg1, Falkenstein, Nuremberg)."
-      return 1
-      ;;
-  esac
+  local reg="$1" lower
+  lower=$(printf '%s' "$reg" | tr '[:upper:]' '[:lower:]' | tr -s '[:space:]' ' ' | sed -E 's/^ //; s/ $//')
+  # Only the country alone, or the country plus a German qualifier ('Frankfurt',
+  # 'Frankfurt am Main', an optional zone number, or 'DE'), is accepted. Any
+  # other suffix ('Germany-US', 'Alemania no, Estados Unidos') is refused.
+  local qualifier='(frankfurt( am main)?([ -]?[0-9]+)?|de)'
+  local germany_re="^(alemania|germany|deutschland)(( ?[-,] ?| )$qualifier| ?\\($qualifier\\))?\$"
+  if [[ "$lower" =~ $germany_re ]]; then
+    return 0
+  fi
+  warn "Location '$reg' is refused under Ley 25.326 international data transfer regulations."
+  warn "The VPS must be in Germany (Ley 25.326): choose Alemania"
+  return 1
+}
+
+# validate_firewall_rules "TCP 22, TCP 80, TCP 443" passes only when the inbound
+# rules the human read in hPanel are exactly TCP 22, 80 and 443. Each entry between
+# commas (or newlines) is exactly one rule: an optional protocol, a port, port range
+# or 'any', and an optional source column ('any', 0.0.0.0/0, ::/0) at its end. A
+# bare port means TCP. Any other rule fails and is named; an entry that is not a
+# rule (a lone 'Any', a lone 0.0.0.0/0) is never dropped: it fails and is named.
+validate_firewall_rules() {
+  local entry norm tok extra="" missing="" unread=""
+  local -a entries=()
+  local seen_22=false seen_80=false seen_443=false
+  local port_re='[0-9]+(-[0-9]+)?'
+  local src_re='( (any|0\.0\.0\.0/0|::/0))?'
+  local bare_re="^($port_re)$src_re\$"
+  local proto_re="^(tcp|udp|icmp|any) ($port_re|any)$src_re\$"
+  IFS=$',\n' read -r -d '' -a entries <<< "$1" || true
+  for entry in "${entries[@]}"; do
+    entry=$(printf '%s' "$entry" | tr -s '[:space:]' ' ' | sed -E 's/^ //; s/ $//')
+    [[ -n "$entry" ]] || continue
+    norm=$(printf '%s' "$entry" | tr '[:upper:]' '[:lower:]')
+    if [[ "$norm" =~ $bare_re ]]; then
+      tok="tcp/${BASH_REMATCH[1]}"
+    elif [[ "$norm" =~ $proto_re ]]; then
+      tok="${BASH_REMATCH[1]}/${BASH_REMATCH[2]}"
+    else
+      unread+="${unread:+, }$entry"
+      continue
+    fi
+    case "$tok" in
+      tcp/22) seen_22=true ;;
+      tcp/80) seen_80=true ;;
+      tcp/443) seen_443=true ;;
+      tcp/*) extra+="${extra:+, }TCP ${tok#tcp/}" ;;
+      udp/*) extra+="${extra:+, }UDP ${tok#udp/}" ;;
+      *) extra+="${extra:+, }$tok" ;;
+    esac
+  done
+  if [[ "$seen_22" != "true" ]]; then missing+="${missing:+, }TCP 22"; fi
+  if [[ "$seen_80" != "true" ]]; then missing+="${missing:+, }TCP 80"; fi
+  if [[ "$seen_443" != "true" ]]; then missing+="${missing:+, }TCP 443"; fi
+  if [[ -n "$unread" ]]; then
+    warn "Could not read these inbound rules: $unread"
+    say "Write each rule as protocol and port (e.g. TCP 22), separate rules with commas, and remove any rule that is not TCP 22, 80 or 443."
+  fi
+  if [[ -n "$extra" ]]; then warn "Remove these inbound rules: $extra"; fi
+  if [[ -n "$missing" ]]; then warn "Add these inbound rules: $missing"; fi
+  [[ -z "$unread" && -z "$extra" && -z "$missing" ]]
+}
+
+# is_ipv4 ADDR succeeds only for a dotted-quad IPv4 address (four numbers 0-255).
+is_ipv4() {
+  local addr="$1" part
+  local -a parts=()
+  [[ "$addr" =~ ^[0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}$ ]] || return 1
+  IFS=. read -r -a parts <<< "$addr"
+  for part in "${parts[@]}"; do
+    (( 10#$part <= 255 )) || return 1
+  done
 }
 
 validate_bucket_region() {
@@ -457,200 +518,6 @@ resolve_host_ip() {
     ip=$(ping -c 1 -w 2 "$host" 2>/dev/null | grep -oE '([0-9]{1,3}\.){3}[0-9]{1,3}' | head -n1 || true)
   fi
   printf '%s' "$ip"
-}
-
-_get_hetzner_pages() {
-  local resource="$1" token="$2" page=1 response next pages=""
-  [[ "$resource" == "servers" || "$resource" == "firewalls" ]] || return 1
-  command -v curl >/dev/null 2>&1 || return 1
-  while (( page <= 10000 )); do
-    response=$(printf 'header = "Authorization: Bearer %s"\n' "$token" | curl -fs -K - \
-      --connect-timeout 5 --max-time 15 \
-      "https://api.hetzner.cloud/v1/${resource}?page=${page}&per_page=50") || return 1
-    if command -v node >/dev/null 2>&1; then
-      next=$(printf '%s' "$response" | RESOURCE="$resource" PAGE="$page" node -e '
-        try {
-          const data = JSON.parse(require("fs").readFileSync(0, "utf8"));
-          const p = data.meta?.pagination;
-          const current = Number(process.env.PAGE);
-          if (!Array.isArray(data[process.env.RESOURCE]) || !p || p.page !== current ||
-              !Object.prototype.hasOwnProperty.call(p, "next_page")) process.exit(1);
-          if (p.next_page === null) process.stdout.write("done");
-          else if (Number.isSafeInteger(p.next_page) && p.next_page === current + 1)
-            process.stdout.write(String(p.next_page));
-          else process.exit(1);
-        } catch (e) { process.exit(1); }
-      ' 2>/dev/null) || return 1
-    elif command -v jq >/dev/null 2>&1; then
-      next=$(printf '%s' "$response" | jq -er --arg resource "$resource" --argjson page "$page" '
-        if (.[$resource] | type != "array") or (.meta.pagination | type != "object") then error("invalid page")
-        elif (.meta.pagination | has("next_page") | not) or (.meta.pagination.page != $page) then error("invalid pagination")
-        elif .meta.pagination.next_page == null then "done"
-        elif ((.meta.pagination.next_page | type) == "number") and (.meta.pagination.next_page == ($page + 1)) then .meta.pagination.next_page
-        else error("invalid next page") end
-      ' 2>/dev/null) || return 1
-    else
-      return 1
-    fi
-    [[ -z "$pages" ]] || pages+=","
-    pages+="$response"
-    if [[ "$next" == "done" ]]; then
-      printf '{"pages":[%s]}' "$pages"
-      return 0
-    fi
-    page="$next"
-  done
-  return 1
-}
-
-_get_hetzner_server_id() {
-  local json="$1"
-  local target_ipv4="$2"
-  [[ -z "$json" || -z "$target_ipv4" ]] && return 1
-
-  if command -v node >/dev/null 2>&1; then
-    local node_code=0
-    local s_id=""
-    s_id=$(printf '%s' "$json" | TARGET_IP="$target_ipv4" node -e '
-      try {
-        const data = JSON.parse(require("fs").readFileSync(0, "utf8"));
-        const servers = Array.isArray(data.pages) ? data.pages.flatMap(p => p.servers) : data.servers;
-        if (!Array.isArray(servers)) process.exit(1);
-        const target = process.env.TARGET_IP || "";
-        const found = servers.find(s => {
-          if (!s) return false;
-          const ip = s.public_net?.ipv4?.ip || s.ipv4 || s.ip || (typeof s.public_net?.ipv4 === "string" ? s.public_net.ipv4 : "");
-          return ip === target;
-        });
-        if (found && (found.id !== undefined && found.id !== null)) {
-          process.stdout.write(String(found.id));
-          process.exit(0);
-        }
-        process.exit(1);
-      } catch (e) {
-        process.exit(2);
-      }
-    ' 2>/dev/null) || node_code=$?
-    if [[ $node_code -eq 0 && -n "$s_id" ]]; then
-      printf '%s' "$s_id"
-      return 0
-    fi
-    return 1
-  fi
-
-  if command -v jq >/dev/null 2>&1; then
-    local jq_code=0
-    local s_id=""
-    s_id=$(printf '%s' "$json" | jq -r --arg ip "$target_ipv4" '
-      (if (.pages | type == "array") then [.pages[].servers[]] else .servers end) |
-      if type != "array" then
-        empty
-      else
-        .[]? |
-        select(
-          ((.public_net?.ipv4?.ip == $ip) or (.ipv4 == $ip) or (.ip == $ip) or (.public_net?.ipv4 == $ip)) and
-          (.id != null)
-        ) |
-        .id
-      end
-    ' 2>/dev/null | head -n1) || jq_code=$?
-    if [[ $jq_code -eq 0 && -n "$s_id" && "$s_id" != "null" ]]; then
-      printf '%s' "$s_id"
-      return 0
-    fi
-    return 1
-  fi
-
-  return 1
-}
-
-_verify_hetzner_firewall_response() {
-  local json="$1"
-  local server_id="${2:-}"
-  [[ -z "$json" ]] && return 1
-
-  if command -v node >/dev/null 2>&1; then
-    local node_code=0
-    printf '%s' "$json" | SERVER_ID="$server_id" node -e '
-      try {
-        const data = JSON.parse(require("fs").readFileSync(0, "utf8"));
-        const firewalls = Array.isArray(data.pages) ? data.pages.flatMap(p => p.firewalls) : data.firewalls;
-        if (!Array.isArray(firewalls)) process.exit(1);
-        const sId = String(process.env.SERVER_ID || "").trim();
-        const allowedPorts = new Set(["22", "80", "443"]);
-        if (!sId || firewalls.some(fw => !fw || !Array.isArray(fw.applied_to) ||
-            fw.applied_to.some(a => !a || !((a.type === "server" && a.server &&
-              (a.server.id != null || typeof a.server === "number" || typeof a.server === "string")) || a.server_id != null)))) process.exit(1);
-        const attached = firewalls.filter(fw => fw.applied_to.some(a => {
-          if (!a) return false;
-          if (a.type === "server" && a.server && String(a.server.id) === sId) return true;
-          if (a.type === "server" && String(a.server) === sId) return true;
-          return String(a.server_id) === sId;
-        }));
-        if (!attached.length || attached.some(fw => !Array.isArray(fw.rules) ||
-            fw.rules.some(r => !r || !["in", "out"].includes(r.direction)))) process.exit(1);
-        const inbound = attached.flatMap(fw => fw.rules.filter(r => r.direction === "in"));
-        const ports = new Set();
-        const sources = {"80": new Set(), "443": new Set()};
-        for (const r of inbound) {
-          const p = String(r.port);
-          if (r.protocol !== "tcp" || !allowedPorts.has(p) ||
-              !Array.isArray(r.source_ips) || !r.source_ips.length ||
-              r.source_ips.some(ip => typeof ip !== "string" || !ip)) process.exit(1);
-          ports.add(p);
-          if (sources[p]) r.source_ips.forEach(ip => sources[p].add(ip));
-        }
-        const found = ports.size === 3 && ["80", "443"].every(p =>
-          sources[p].has("0.0.0.0/0") && sources[p].has("::/0"));
-        process.exit(found ? 0 : 1);
-      } catch (e) {
-        process.exit(2);
-      }
-    ' >/dev/null 2>&1 || node_code=$?
-    if [[ $node_code -eq 0 ]]; then
-      return 0
-    else
-      return 1
-    fi
-  fi
-
-  if command -v jq >/dev/null 2>&1; then
-    local jq_code=0
-    printf '%s' "$json" | jq -e --arg sid "$server_id" '
-      (if (.pages | type == "array") then {firewalls: [.pages[].firewalls[]]} else . end) |
-      if ($sid == "") or (.firewalls | type != "array") or
-         (any(.firewalls[]; (type != "object") or (.applied_to | type != "array") or
-           any(.applied_to[]; (type != "object") or
-             (((.type == "server") and ((.server.id? != null) or ((.server | type) == "number") or ((.server | type) == "string"))) or (.server_id != null) | not)))) then
-        false
-      else
-        [.firewalls[] | select(.applied_to | any(
-          ((.type == "server") and ((.server.id? | tostring) == $sid or (.server | tostring) == $sid)) or
-          ((.server_id | tostring) == $sid)
-        ))] as $attached |
-        if ($attached | length == 0) or (any($attached[]; (.rules | type != "array") or
-          any(.rules[]; (type != "object") or (.direction != "in" and .direction != "out")))) then
-          false
-        else
-          [$attached[].rules[] | select(.direction == "in")] as $in |
-          ($in | all(.protocol == "tcp" and ((.port | tostring) == "22" or (.port | tostring) == "80" or (.port | tostring) == "443") and
-            (.source_ips | type == "array") and (.source_ips | length > 0) and
-            (.source_ips | all(type == "string" and length > 0)))) and
-          ([$in[].port | tostring] | unique | sort == ["22", "443", "80"]) and
-          (all("80", "443"; . as $p |
-            [$in[] | select((.port | tostring) == $p) | .source_ips[]] as $sources |
-            ($sources | index("0.0.0.0/0") != null) and ($sources | index("::/0") != null)))
-        end
-      end
-    ' >/dev/null 2>&1 || jq_code=$?
-    if [[ $jq_code -eq 0 ]]; then
-      return 0
-    else
-      return 1
-    fi
-  fi
-
-  return 1
 }
 
 _verify_uptimerobot_response() {
@@ -793,8 +660,8 @@ run_wizard() {
   banner "Traslado Programado — Hosting & Infrastructure Wizard"
 
   # Variables retained across stages in memory
-  local HETZNER_REGION="fsn1"
-  local HETZNER_IPV4=""
+  local VPS_LOCATION="Alemania"
+  local VPS_IPV4=""
   local DEPLOY_USER="deploy"
   local DOMAIN_NAME=""
   local PRODUCTION_HOST=""
@@ -806,71 +673,85 @@ run_wizard() {
   local ALERT_EMAIL=""
 
   # Load any previously saved non-secret variables
-  HETZNER_IPV4=$(get_state_var HETZNER_IPV4 || true)
-  HETZNER_REGION=$(get_state_var HETZNER_REGION || printf 'fsn1')
+  VPS_IPV4=$(get_state_var VPS_IPV4 || true)
+  if [[ -z "$VPS_IPV4" ]]; then
+    # State files written by the Hetzner version of this wizard used HETZNER_IPV4.
+    VPS_IPV4=$(get_state_var HETZNER_IPV4 || true)
+    if [[ -n "$VPS_IPV4" ]] && is_ipv4 "$VPS_IPV4"; then
+      save_state_var "VPS_IPV4" "$VPS_IPV4"
+    fi
+  fi
+  # A saved address that is not an IPv4 is not reused: stage 1 asks for it again.
+  if [[ -n "$VPS_IPV4" ]] && ! is_ipv4 "$VPS_IPV4"; then
+    warn "The saved server address '$VPS_IPV4' is not an IPv4 address, so stage 1 will ask for it again."
+    VPS_IPV4=""
+  fi
+  VPS_LOCATION=$(get_state_var VPS_LOCATION || get_state_var HETZNER_REGION || printf 'Alemania')
   DOMAIN_NAME=$(get_state_var DOMAIN_NAME || true)
   PRODUCTION_HOST=$(get_state_var PRODUCTION_HOST || true)
   STAGING_HOST=$(get_state_var STAGING_HOST || true)
   SCW_BUCKET=$(get_state_var SCW_BUCKET || true)
 
-  # ── Stage 1: Hetzner Cloud VPS ─────────────────────────────────────────────
+  # ── Stage 1: Hostinger VPS ─────────────────────────────────────────────────
   stage "${STAGE_TITLES[0]}"
   local skip_stage_1=false
-  if is_stage_confirmed 1 && [[ -n "$HETZNER_IPV4" ]]; then
-    if confirm "Stage 1 already completed (IPv4: $HETZNER_IPV4). Skip to next stage?"; then
+  if is_stage_confirmed 1 && [[ -n "$VPS_IPV4" ]]; then
+    if confirm "Stage 1 already completed (IPv4: $VPS_IPV4). Skip to next stage?"; then
       skip_stage_1=true
     fi
   fi
 
   if [[ "$skip_stage_1" != "true" ]]; then
-    say "We will create a CX33 VPS in Germany and capture its public IPv4."
-    open_url "https://console.hetzner.cloud"
-    step "1. In Hetzner Cloud Console, create or select project 'traslado-programado'."
-    step "2. Go to Security ▸ SSH Keys ▸ 'Add SSH key'. Upload your personal public key."
-    step "3. Go to Servers ▸ 'Add Server'."
-    step "4. Choose Location: Germany (fsn1 Falkenstein or nbg1 Nuremberg)."
-    step "5. Image: Ubuntu 24.04 LTS."
-    step "6. Type: Standard CX33 (8 GB RAM, 2 vCPU)."
-    step "7. Select the SSH key uploaded in step 2."
-    step "8. Name the server 'traslado-prod' and click 'Create & Buy now'."
+    say "You will buy a Hostinger VPS KVM 2 in Germany and we will capture its public IPv4."
+    note "The wizard never buys or pays for anything: you do the purchase and the payment in the browser."
+    open_url "https://hpanel.hostinger.com"
+    step "1. Log in to hPanel (create your Hostinger account in the browser if needed)."
+    step "2. Buy VPS ▸ KVM 2 (2 vCPU, 8 GB RAM, 100 GB NVMe) and pay for it in the browser."
+    step "3. In the VPS setup, Location: choose Alemania. The checkout default (for example 'Estados Unidos - Boston 2') is not allowed."
+    step "4. Operating system: plain Ubuntu 24.04 LTS, without a control panel or app template."
+    step "5. Add your personal SSH public key (for example ~/.ssh/id_ed25519.pub) and name the server 'traslado-prod'."
+    step "6. Finish the setup and wait until hPanel shows the VPS as running."
+    step "7. In the VPS overview, read its Location and its public IPv4 address."
 
     while true; do
-      ask HETZNER_REGION "Enter chosen Hetzner location code [fsn1 or nbg1]:"
-      [[ -z "$HETZNER_REGION" ]] && HETZNER_REGION="fsn1"
-      if validate_vps_region "$HETZNER_REGION"; then
-        case "$HETZNER_REGION" in
-          [Ff]alkenstein) HETZNER_REGION="fsn1" ;;
-          [Nn]uremberg) HETZNER_REGION="nbg1" ;;
-        esac
+      ask VPS_LOCATION "Enter the VPS location shown in hPanel (e.g. Alemania):"
+      if validate_vps_region "$VPS_LOCATION"; then
         break
       fi
+      halt_verification 1 \
+        "VPS location '$VPS_LOCATION' is not Germany." \
+        "Set up the VPS again in hPanel with location Alemania, then enter the location it shows."
     done
 
     while true; do
-      ask HETZNER_IPV4 "Enter the server public IPv4 address:"
-      if [[ -z "$HETZNER_IPV4" ]]; then
+      ask VPS_IPV4 "Enter the server public IPv4 address:"
+      if [[ -z "$VPS_IPV4" ]]; then
         warn "IPv4 address is required."
         continue
       fi
+      if ! is_ipv4 "$VPS_IPV4"; then
+        warn "'$VPS_IPV4' is not an IPv4 address (for example 192.0.2.1): enter the public IPv4 shown in hPanel."
+        continue
+      fi
 
-      say "Verifying network connectivity to port 22 on $HETZNER_IPV4..."
-      if check_port_22 "$HETZNER_IPV4"; then
-        note "✓ Port 22 reachable on $HETZNER_IPV4"
+      say "Verifying network connectivity to port 22 on $VPS_IPV4..."
+      if check_port_22 "$VPS_IPV4"; then
+        note "✓ Port 22 reachable on $VPS_IPV4"
         break
       else
         halt_verification 1 \
-          "Cannot reach TCP port 22 on $HETZNER_IPV4." \
-          "Ensure the server has finished creating in Hetzner Cloud Console and the IP is correct."
+          "Cannot reach TCP port 22 on $VPS_IPV4." \
+          "Ensure hPanel shows the VPS as running and the IP is correct."
       fi
     done
 
-    save_state_var "HETZNER_IPV4" "$HETZNER_IPV4"
-    save_state_var "HETZNER_REGION" "$HETZNER_REGION"
+    save_state_var "VPS_IPV4" "$VPS_IPV4"
+    save_state_var "VPS_LOCATION" "$VPS_LOCATION"
     confirm_stage 1
     pause "Stage 1 verified. Press Enter to continue."
   fi
 
-  # ── Stage 2: Hetzner firewall ──────────────────────────────────────────────
+  # ── Stage 2: Hostinger firewall ────────────────────────────────────────────
   stage "${STAGE_TITLES[1]}"
   local skip_stage_2=false
   if is_stage_confirmed 2; then
@@ -880,75 +761,42 @@ run_wizard() {
   fi
 
   if [[ "$skip_stage_2" != "true" ]]; then
-    say "We will configure a firewall restricting inbound traffic to ports 22, 80, and 443."
-    open_url "https://console.hetzner.cloud"
-    step "1. In Hetzner Cloud Console, select project 'traslado-programado' ▸ Firewalls."
-    step "2. Click 'Create Firewall' and name it 'traslado-firewall'."
-    step "3. Under Inbound Rules, configure exactly:"
-    step "   • TCP 22 (SSH) from Any IPv4 / IPv6"
-    step "   • TCP 80 (HTTP) from Any IPv4 / IPv6"
-    step "   • TCP 443 (HTTPS) from Any IPv4 / IPv6"
-    step "4. Remove any other inbound rules."
-    step "5. Under 'Apply to', select the server 'traslado-prod' directly, not via a label selector, and click 'Create Firewall'."
-    step "6. In Hetzner Cloud Console, go to Security ▸ API Tokens."
-    step "   Generate or copy a Read-Only API token to verify the firewall."
-    note "The API token is read hidden and passed on stdin to curl; it is never saved to disk."
+    say "We will configure the hPanel firewall so inbound traffic reaches only ports 22, 80, and 443."
+    open_url "https://hpanel.hostinger.com"
+    step "1. In hPanel, open the VPS 'traslado-prod' ▸ Security ▸ Firewall."
+    step "2. Create a firewall named 'traslado-firewall'."
+    step "3. Add exactly these inbound rules, each with action Accept and source Any:"
+    step "   • TCP 22 (SSH)"
+    step "   • TCP 80 (HTTP)"
+    step "   • TCP 443 (HTTPS)"
+    step "4. Remove any other inbound rule (other ports, port ranges, UDP, ICMP or 'Any')."
+    step "5. Activate 'traslado-firewall' on the VPS and wait until hPanel shows it as synced."
 
-    local HETZNER_API_TOKEN=""
+    local FIREWALL_RULES=""
     while true; do
-      ask_secret HETZNER_API_TOKEN "Paste Hetzner Cloud Read-Only API Token:" || true
-      if [[ -z "$HETZNER_API_TOKEN" ]]; then
+      ask FIREWALL_RULES "List every inbound rule of the active firewall as shown in hPanel, separating rules with commas (e.g. TCP 22, TCP 80, TCP 443):"
+      if ! validate_firewall_rules "$FIREWALL_RULES"; then
         halt_verification 2 \
-          "Hetzner Cloud API Token is required to verify the firewall." \
-          "Generate a read-only API token in Hetzner Cloud Console under Security > API Tokens."
+          "The firewall must allow inbound only TCP 22, 80 and 443." \
+          "In hPanel ▸ Security ▸ Firewall, edit 'traslado-firewall' so its inbound rules are exactly TCP 22, 80 and 443."
         continue
       fi
 
-      if ! _has_json_parser; then
+      if ! confirm "Is 'traslado-firewall' activated on the VPS $VPS_IPV4 and shown as synced in hPanel?"; then
         halt_verification 2 \
-          "No JSON parser (node or jq) is available to verify the Hetzner firewall." \
-          "Install jq (e.g. apt-get install jq) to enable API verification."
-        continue
-      fi
-
-      say "Verifying firewall configuration via Hetzner Cloud API..."
-      local fw_check_ok=false
-      local fw_err=""
-      local servers_response=""
-      local firewalls_response=""
-
-      servers_response=$(_get_hetzner_pages "servers" "$HETZNER_API_TOKEN" || true)
-
-      local server_id=""
-      server_id=$(_get_hetzner_server_id "$servers_response" "$HETZNER_IPV4" || true)
-
-      if [[ -z "$server_id" ]]; then
-        fw_err="Server with IPv4 $HETZNER_IPV4 was not found, or the server list could not be verified."
-      else
-        firewalls_response=$(_get_hetzner_pages "firewalls" "$HETZNER_API_TOKEN" || true)
-
-        if [[ -n "$firewalls_response" ]] && _verify_hetzner_firewall_response "$firewalls_response" "$server_id"; then
-          fw_check_ok=true
-        else
-          fw_err="Firewall is not attached to server ID $server_id (IPv4: $HETZNER_IPV4), pages or attachments could not be verified, or inbound rules are invalid."
-        fi
-      fi
-
-      if [[ "$fw_check_ok" != "true" ]]; then
-        halt_verification 2 \
-          "Hetzner firewall verification failed: $fw_err" \
-          "Ensure a firewall is attached to the server ($HETZNER_IPV4) with inbound rules allowing only TCP 22, 80, and 443."
+          "The firewall is not activated on the VPS $VPS_IPV4." \
+          "In hPanel ▸ Security ▸ Firewall, activate 'traslado-firewall' on the VPS 'traslado-prod'."
         continue
       fi
 
       say "Verifying SSH port 22 is still reachable through the firewall..."
-      if check_port_22 "$HETZNER_IPV4"; then
-        note "✓ Hetzner firewall attached and inbound rules verified (TCP 22, 80, 443 only)"
+      if check_port_22 "$VPS_IPV4"; then
+        note "✓ Hostinger firewall activated with inbound rules TCP 22, 80, 443 only"
         break
       else
         halt_verification 2 \
-          "Cannot reach port 22 on $HETZNER_IPV4." \
-          "Ensure the firewall has an inbound rule for TCP 22 and is properly attached to traslado-prod."
+          "Cannot reach port 22 on $VPS_IPV4." \
+          "Ensure the firewall has an inbound rule for TCP 22 and is activated on the VPS 'traslado-prod'."
       fi
     done
 
@@ -967,7 +815,7 @@ run_wizard() {
 
   if [[ "$skip_stage_3" != "true" ]]; then
     say "We will harden sshd, configure the non-root deploy user, and install Docker."
-    step "1. SSH into the server as root: ssh root@$HETZNER_IPV4"
+    step "1. SSH into the server as root: ssh root@$VPS_IPV4"
     step "2. Create the deploy user and add to sudoers:"
     step "   adduser --disabled-password --gecos '' deploy"
     step "   usermod -aG sudo deploy"
@@ -985,56 +833,56 @@ run_wizard() {
     pause "Press Enter after completing hardening and Docker installation on the server."
 
     while true; do
-      say "Verifying password login is refused on deploy@$HETZNER_IPV4..."
+      say "Verifying password login is refused on deploy@$VPS_IPV4..."
       local ssh_auth_out=""
       if command -v ssh >/dev/null 2>&1; then
-        ssh_auth_out=$(ssh -o BatchMode=yes -o PubkeyAuthentication=no -o PreferredAuthentications=none -o ConnectTimeout=5 "deploy@$HETZNER_IPV4" true 2>&1 || true)
+        ssh_auth_out=$(ssh -o BatchMode=yes -o PubkeyAuthentication=no -o PreferredAuthentications=none -o ConnectTimeout=5 "deploy@$VPS_IPV4" true 2>&1 || true)
       fi
 
       if [[ "$ssh_auth_out" == *"password"* || "$ssh_auth_out" == *"keyboard-interactive"* ]]; then
         halt_verification 3 \
-          "Password login was accepted on deploy@$HETZNER_IPV4!" \
+          "Password login was accepted on deploy@$VPS_IPV4!" \
           "Set 'PasswordAuthentication no' and 'PermitRootLogin no' in sshd_config and restart sshd."
         continue
       fi
 
       if [[ "$ssh_auth_out" != *"Permission denied"* ]]; then
         halt_verification 3 \
-          "Could not verify SSH authentication methods on deploy@$HETZNER_IPV4 (SSH response: ${ssh_auth_out:-no response})." \
+          "Could not verify SSH authentication methods on deploy@$VPS_IPV4 (SSH response: ${ssh_auth_out:-no response})." \
           "Ensure sshd is running and reachable on port 22, and check network connectivity."
         continue
       fi
 
       local root_auth_out=""
       if command -v ssh >/dev/null 2>&1; then
-        root_auth_out=$(ssh -o BatchMode=yes -o PubkeyAuthentication=no -o PreferredAuthentications=none -o ConnectTimeout=5 "root@$HETZNER_IPV4" true 2>&1 || true)
+        root_auth_out=$(ssh -o BatchMode=yes -o PubkeyAuthentication=no -o PreferredAuthentications=none -o ConnectTimeout=5 "root@$VPS_IPV4" true 2>&1 || true)
       fi
       if [[ "$root_auth_out" == *"password"* || "$root_auth_out" == *"keyboard-interactive"* ]]; then
         halt_verification 3 \
-          "Root password login was accepted on root@$HETZNER_IPV4!" \
+          "Root password login was accepted on root@$VPS_IPV4!" \
           "Set 'PermitRootLogin no' in /etc/ssh/sshd_config.d/00-hardening.conf and restart sshd."
         continue
       fi
 
-      say "Verifying root login is refused on root@$HETZNER_IPV4..."
+      say "Verifying root login is refused on root@$VPS_IPV4..."
       local root_login_ok=false
       local root_login_out=""
       if command -v ssh >/dev/null 2>&1; then
-        if root_login_out=$(ssh -o BatchMode=yes -o ConnectTimeout=5 -o StrictHostKeyChecking=accept-new "root@$HETZNER_IPV4" true 2>&1); then
+        if root_login_out=$(ssh -o BatchMode=yes -o ConnectTimeout=5 -o StrictHostKeyChecking=accept-new "root@$VPS_IPV4" true 2>&1); then
           root_login_ok=true
         fi
       fi
 
       if [[ "$root_login_ok" == "true" ]]; then
         halt_verification 3 \
-          "Root login was accepted on root@$HETZNER_IPV4! Root login must be completely disabled." \
+          "Root login was accepted on root@$VPS_IPV4! Root login must be completely disabled." \
           "Set 'PermitRootLogin no' in /etc/ssh/sshd_config.d/00-hardening.conf and restart sshd."
         continue
       fi
 
       if [[ "$root_login_out" != *"Permission denied"* ]]; then
         halt_verification 3 \
-          "Could not verify that root login is refused on root@$HETZNER_IPV4 (SSH response: ${root_login_out:-no response})." \
+          "Could not verify that root login is refused on root@$VPS_IPV4 (SSH response: ${root_login_out:-no response})." \
           "Ensure sshd is running and reachable on port 22, and check network connectivity."
         continue
       fi
@@ -1044,7 +892,7 @@ run_wizard() {
       say "Verifying SSH key login works for deploy user..."
       local key_login_ok=false
       if command -v ssh >/dev/null 2>&1; then
-        if ssh -o BatchMode=yes -o ConnectTimeout=5 -o StrictHostKeyChecking=accept-new "deploy@$HETZNER_IPV4" "docker --version && docker compose version" >/dev/null 2>&1; then
+        if ssh -o BatchMode=yes -o ConnectTimeout=5 -o StrictHostKeyChecking=accept-new "deploy@$VPS_IPV4" "docker --version && docker compose version" >/dev/null 2>&1; then
           key_login_ok=true
         fi
       fi
@@ -1054,7 +902,7 @@ run_wizard() {
         break
       else
         halt_verification 3 \
-          "SSH key login or Docker verification failed on deploy@$HETZNER_IPV4." \
+          "SSH key login or Docker verification failed on deploy@$VPS_IPV4." \
           "Verify /home/deploy/.ssh/authorized_keys and check that docker is running."
       fi
     done
@@ -1110,7 +958,7 @@ run_wizard() {
 
       if command -v ssh >/dev/null 2>&1; then
         local ssh_rc=0
-        ghcr_out=$(ssh -o BatchMode=yes -o ConnectTimeout=10 -o StrictHostKeyChecking=accept-new "deploy@$HETZNER_IPV4" \
+        ghcr_out=$(ssh -o BatchMode=yes -o ConnectTimeout=10 -o StrictHostKeyChecking=accept-new "deploy@$VPS_IPV4" \
           "docker manifest inspect '$test_image' 2>&1 || docker pull '$test_image' 2>&1" 2>&1) || ssh_rc=$?
 
         if [[ $ssh_rc -eq 0 ]] && echo "$ghcr_out" | grep -qE '"schemaVersion"|"mediaType"|Digest:|Status:|sha256:'; then
@@ -1241,7 +1089,7 @@ run_wizard() {
   fi
 
   if [[ "$skip_stage_6" != "true" ]]; then
-    say "We will configure DNS A records for production and staging pointing to $HETZNER_IPV4."
+    say "We will configure DNS A records for production and staging pointing to $VPS_IPV4."
     ask DOMAIN_NAME "Enter primary domain (e.g. traslado.example.com or example.com):"
     
     ask PRODUCTION_HOST "Enter production hostname [$DOMAIN_NAME]:"
@@ -1252,9 +1100,9 @@ run_wizard() {
     [[ -z "$STAGING_HOST" ]] && STAGING_HOST="$default_staging"
 
     step "1. At your DNS provider/registrar, create an A record:"
-    step "   Name/Host: $PRODUCTION_HOST ➔ Points to: $HETZNER_IPV4"
+    step "   Name/Host: $PRODUCTION_HOST ➔ Points to: $VPS_IPV4"
     step "2. Create an A record for staging:"
-    step "   Name/Host: $STAGING_HOST ➔ Points to: $HETZNER_IPV4"
+    step "   Name/Host: $STAGING_HOST ➔ Points to: $VPS_IPV4"
 
     pause "Press Enter after creating DNS A records."
 
@@ -1267,12 +1115,12 @@ run_wizard() {
       say "  $PRODUCTION_HOST -> ${prod_ip:-not resolved}"
       say "  $STAGING_HOST -> ${staging_ip:-not resolved}"
 
-      if [[ -n "$prod_ip" && "$prod_ip" == "$HETZNER_IPV4" && -n "$staging_ip" && "$staging_ip" == "$HETZNER_IPV4" ]]; then
+      if [[ -n "$prod_ip" && "$prod_ip" == "$VPS_IPV4" && -n "$staging_ip" && "$staging_ip" == "$VPS_IPV4" ]]; then
         note "✓ DNS resolution verified for both hosts"
         break
       else
         halt_verification 6 \
-          "DNS did not resolve to $HETZNER_IPV4 (production resolved to '${prod_ip:-none}', staging resolved to '${staging_ip:-none}')." \
+          "DNS did not resolve to $VPS_IPV4 (production resolved to '${prod_ip:-none}', staging resolved to '${staging_ip:-none}')." \
           "Check DNS provider records and wait for TTL propagation."
       fi
     done
@@ -1407,11 +1255,11 @@ run_wizard() {
     pause "Press Enter once the public key has been added to the server's authorized_keys."
 
     while true; do
-      say "Verifying dedicated deploy SSH key authentication on deploy@$HETZNER_IPV4..."
+      say "Verifying dedicated deploy SSH key authentication on deploy@$VPS_IPV4..."
       local key_auth_ok=false
       local key_auth_out=""
       if command -v ssh >/dev/null 2>&1; then
-        if key_auth_out=$(ssh -i "$deploy_key_file" -o IdentitiesOnly=yes -o BatchMode=yes -o ConnectTimeout=5 -o StrictHostKeyChecking=accept-new "deploy@$HETZNER_IPV4" true 2>&1); then
+        if key_auth_out=$(ssh -i "$deploy_key_file" -o IdentitiesOnly=yes -o BatchMode=yes -o ConnectTimeout=5 -o StrictHostKeyChecking=accept-new "deploy@$VPS_IPV4" true 2>&1); then
           key_auth_ok=true
         fi
       fi
@@ -1429,7 +1277,7 @@ run_wizard() {
     say "Gathering SSH host keys for DEPLOY_KNOWN_HOSTS via ssh-keyscan..."
     local deploy_known_hosts=""
     if command -v ssh-keyscan >/dev/null 2>&1; then
-      deploy_known_hosts=$(ssh-keyscan -H "$HETZNER_IPV4" 2>/dev/null || true)
+      deploy_known_hosts=$(ssh-keyscan -H "$VPS_IPV4" 2>/dev/null || true)
     fi
     if [[ -z "$deploy_known_hosts" ]]; then
       warn "ssh-keyscan could not fetch keys automatically."
@@ -1445,7 +1293,7 @@ run_wizard() {
     while true; do
       say "Writing contract secrets to GitHub repository via 'gh secret set'..."
       local failed_writes=()
-      set_secret "DEPLOY_HOST" "$HETZNER_IPV4" || failed_writes+=("DEPLOY_HOST")
+      set_secret "DEPLOY_HOST" "$VPS_IPV4" || failed_writes+=("DEPLOY_HOST")
       set_secret "DEPLOY_USER" "$DEPLOY_USER" || failed_writes+=("DEPLOY_USER")
       set_secret "DEPLOY_SSH_KEY" "$deploy_private_key" || failed_writes+=("DEPLOY_SSH_KEY")
       set_secret "DEPLOY_KNOWN_HOSTS" "$deploy_known_hosts" || failed_writes+=("DEPLOY_KNOWN_HOSTS")
@@ -1491,12 +1339,12 @@ run_wizard() {
   stage "${STAGE_TITLES[8]}"
   say "Infrastructure and account provisioning is complete!"
   printf '\n%sResources Created:%s\n' "$BOLD" "$RESET"
-  say "• Hetzner CX33 VPS: $HETZNER_IPV4 in Germany ($HETZNER_REGION)"
-  say "• Hetzner Firewall: TCP 22, 80, 443 inbound attached to server"
+  say "• Hostinger KVM 2 VPS: $VPS_IPV4 in Germany ($VPS_LOCATION)"
+  say "• Hostinger firewall: TCP 22, 80, 443 inbound, activated on the VPS"
   say "• Server Hardening: non-root user '$DEPLOY_USER', password login disabled, Docker + Compose installed"
   say "• GHCR Authentication: ghcr.io configured for private package access"
   say "• Scaleway Object Storage: bucket '$SCW_BUCKET' in Paris (fr-par)"
-  say "• DNS: A records for '$PRODUCTION_HOST' and '$STAGING_HOST' -> $HETZNER_IPV4"
+  say "• DNS: A records for '$PRODUCTION_HOST' and '$STAGING_HOST' -> $VPS_IPV4"
   say "• UptimeRobot: 5-minute health monitor for https://$PRODUCTION_HOST/health"
 
   printf '\n%sGitHub Secrets Set (Contract #36/#37):%s\n' "$BOLD" "$RESET"
