@@ -8,7 +8,7 @@ import { createPublicKey, verify } from 'node:crypto';
 import { dirname, join, relative, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import test from 'node:test';
-import { httpSender, markQueue, newMark, startFlushing } from './queue.mjs';
+import { httpSender, indexedDbStore, markQueue, newMark, startFlushing } from './queue.mjs';
 import { createPrototypeServer } from './server.mjs';
 
 const here = dirname(fileURLToPath(import.meta.url));
@@ -209,4 +209,164 @@ test('a mark added while a flush runs is sent by that flush', async () => {
   release();
   assert.deepEqual(await running, { sent: 2, pending: 0, error: null });
   assert.deepEqual(sent, ['mark-1', 'mark-2']);
+});
+
+test('indexedDbStore reopens when WebKit closes an idle DB connection (db.onclose)', async () => {
+  let openCount = 0;
+  const rows = new Map();
+  let lastDb = null;
+  const fakeFactory = {
+    open() {
+      openCount += 1;
+      let closed = false;
+      const db = {
+        createObjectStore() {},
+        close() { closed = true; db.onclose?.(); },
+        transaction() {
+          if (closed) throw new DOMException('The database connection is closing', 'InvalidStateError');
+          const tx = {
+            objectStore() {
+              return {
+                getAll() { const r = { result: [...rows.values()] }; queueMicrotask(() => tx.oncomplete?.()); return r; },
+                put(v) { rows.set(v.id, v); const r = { result: v.id }; queueMicrotask(() => tx.oncomplete?.()); return r; },
+                delete(id) { rows.delete(id); const r = { result: undefined }; queueMicrotask(() => tx.oncomplete?.()); return r; },
+              };
+            },
+          };
+          return tx;
+        },
+      };
+      lastDb = db;
+      const req = { result: db };
+      queueMicrotask(() => { req.onupgradeneeded?.(); req.onsuccess?.(); });
+      return req;
+    },
+  };
+  const store = indexedDbStore(fakeFactory);
+  await store.put(newMark('iPhone 1', new Date('2026-11-23T10:00:00Z'), 'm1'));
+  lastDb.close();
+  await store.put(newMark('iPhone 1', new Date('2026-11-23T10:01:00Z'), 'm2'));
+  assert.equal(openCount, 2);
+  assert.equal((await store.all()).length, 2);
+});
+
+test('indexedDbStore retries opening on the next call after a failed open (request.onerror)', async () => {
+  let openCount = 0;
+  const rows = new Map();
+  const fakeFactory = {
+    open() {
+      openCount += 1;
+      const failing = openCount === 1;
+      const db = {
+        createObjectStore() {},
+        transaction() {
+          const tx = {
+            objectStore() {
+              return {
+                getAll() { const r = { result: [...rows.values()] }; queueMicrotask(() => tx.oncomplete?.()); return r; },
+                put(v) { rows.set(v.id, v); const r = { result: v.id }; queueMicrotask(() => tx.oncomplete?.()); return r; },
+              };
+            },
+          };
+          return tx;
+        },
+      };
+      const req = failing ? { result: undefined, error: new DOMException('Open blocked', 'UnknownError') } : { result: db };
+      queueMicrotask(() => { if (failing) req.onerror?.(); else { req.onupgradeneeded?.(); req.onsuccess?.(); } });
+      return req;
+    },
+  };
+  const store = indexedDbStore(fakeFactory);
+  await assert.rejects(store.put(newMark('iPhone 1', new Date('2026-11-23T10:00:00Z'), 'm1')), { name: 'UnknownError' });
+  await store.put(newMark('iPhone 1', new Date('2026-11-23T10:01:00Z'), 'm2'));
+  assert.equal(openCount, 2);
+  assert.deepEqual((await store.all()).map((mark) => mark.id), ['m2']);
+});
+
+test('online flush triggered while an offline send is still in flight retries once it settles', async () => {
+  const rows = new Map();
+  const store = {
+    all: async () => [...rows.values()].sort((a, b) => a.createdAt.localeCompare(b.createdAt)),
+    put: async (m) => { rows.set(m.id, m); },
+    remove: async (id) => { rows.delete(id); },
+  };
+  let online = false;
+  let releaseOfflineFetch;
+  let inFlight;
+  const started = new Promise((r) => { inFlight = r; });
+  const offlineGate = new Promise((r) => { releaseOfflineFetch = r; });
+  const sent = [];
+  const queue = markQueue(store, async (m) => {
+    if (!online) {
+      inFlight();
+      await offlineGate;
+      throw new TypeError('Failed to fetch');
+    }
+    sent.push(m.id);
+  });
+  await queue.add(newMark('iPhone 1', new Date('2026-11-23T10:00:00Z'), 'm1'));
+  const first = queue.flush();
+  await started;
+  online = true;
+  const second = queue.flush();
+  releaseOfflineFetch();
+  await Promise.all([first, second]);
+  assert.deepEqual(sent, ['m1']);
+  assert.deepEqual(await store.all(), []);
+});
+
+test('triggers arriving while a failing flush runs coalesce into one extra pass, and a failing pass alone does not loop', async () => {
+  const store = memoryStore();
+  let attempts = 0;
+  let release;
+  const gate = new Promise((done) => { release = done; });
+  const queue = markQueue(store, async () => {
+    attempts += 1;
+    if (attempts === 1) await gate;
+    throw new TypeError('Failed to fetch');
+  });
+  await queue.add(newMark('Phone F', new Date('2026-11-23T11:00:00.000Z'), 'mark-1'));
+  const first = queue.flush();
+  const second = queue.flush();
+  const third = queue.flush();
+  release();
+  const results = await Promise.all([first, second, third]);
+  assert.equal(attempts, 2, 'one pass plus one extra pass for the coalesced triggers');
+  for (const result of results) assert.deepEqual(result, { sent: 0, pending: 1, error: 'Failed to fetch' });
+
+  assert.deepEqual(await queue.flush(), { sent: 0, pending: 1, error: 'Failed to fetch' });
+  assert.equal(attempts, 3, 'a failing flush with no new trigger makes a single pass');
+});
+
+test('a flush triggered in any microtask right after the last pass ends is never dropped', async () => {
+  for (let tick = 0; tick < 30; tick += 1) {
+    const rows = new Map();
+    let armed = false;
+    let late = null;
+    const store = {
+      all: async () => {
+        const marks = [...rows.values()].sort((a, b) => a.createdAt.localeCompare(b.createdAt));
+        if (armed && marks.length === 0) {
+          armed = false;
+          const step = (n) => {
+            if (n < tick) { queueMicrotask(() => step(n + 1)); return; }
+            const mark = newMark('Phone G', new Date('2026-11-23T12:01:00.000Z'), 'mark-late');
+            rows.set(mark.id, mark);
+            late = queue.flush();
+          };
+          queueMicrotask(() => step(0));
+        }
+        return marks;
+      },
+      put: async (mark) => { rows.set(mark.id, mark); },
+      remove: async (id) => { rows.delete(id); },
+    };
+    let fired = false;
+    const queue = markQueue(store, async () => { if (!fired) { fired = true; armed = true; } });
+    await queue.add(newMark('Phone G', new Date('2026-11-23T12:00:00.000Z'), 'mark-1'));
+    await queue.flush();
+    while (late === null) await new Promise((done) => setImmediate(done));
+    await late;
+    assert.deepEqual([...rows.keys()], [], `flush triggered ${tick} microtasks after the last read was dropped`);
+  }
 });
