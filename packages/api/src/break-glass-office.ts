@@ -32,6 +32,7 @@ export async function runBreakGlassOffice(pool: BreakGlassPool, args: string[], 
       [user.id],
     );
     await client.query("DELETE FROM remembered_devices WHERE user_id = $1", [user.id]);
+    await client.query("DELETE FROM push_subscriptions WHERE session_id IN (SELECT id FROM sessions WHERE user_id = $1)", [user.id]);
     await client.query(
       "INSERT INTO change_log (actor_user_id, actor_label, entity, entity_id, action, before_data, after_data) VALUES (NULL, 'break-glass', 'user', $1, 'break_glass', NULL, $2)",
       [String(user.id), JSON.stringify({ username, totpReset: true })],
