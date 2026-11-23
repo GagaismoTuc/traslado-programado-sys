@@ -345,6 +345,35 @@ describe("Issue #135: each Recorrido at its latest Posición, with the Pasajeros
     });
   });
 
+  it("Regla 2: a more recent Marca without location does not replace the last Posición", async () => {
+    const { office, passenger, served } = await setup("issue-135-rule-2-unlocated");
+    const { driver, routeId, transferId } = await served((await passenger()).passengerId, "entrada");
+    await answer(request(`/driver/routes/${routeId}/start`, "POST", {}, driver.cookie), 200);
+    await sendPositions(driver.cookie, routeId, [{ ...B, accuracyMeters: 15, phoneTime: "2026-10-23T11:12:00.000Z" }]);
+    await answer(mark(driver.cookie, routeId, markBody(transferId, "subio", { location: null, phoneTime: "2026-10-23T11:14:00.000Z" })), 201);
+
+    const route = (await live(office)).routes.find((r) => r.id === routeId);
+
+    expect(route.currentPosition).toMatchObject({ source: "posicion", latitude: B.lat, longitude: B.lng, phoneTimeHhmi: "08:12" });
+  });
+
+  it("Regla 2: without Posiciones, a last Marca without GPS falls back to the latest located Marca", async () => {
+    const { office, passenger, served, school } = await setup("issue-135-rule-2-fallback");
+    const { driver, routeId, transferId } = await served((await passenger()).passengerId, "entrada");
+    await answer(mark(driver.cookie, routeId, markBody(transferId, "subio", { location: HOME, phoneTime: "2026-10-23T11:10:00.000Z" })), 201);
+    await answer(mark(driver.cookie, routeId, markBody(transferId, "entregado", {
+      location: null, phoneTime: "2026-10-23T11:14:00.000Z", receiver: { kind: "destination", destinationId: school },
+    })), 201);
+
+    const route = (await live(office)).routes.find((r) => r.id === routeId);
+
+    expect(route.lastMarca.latitude).toBeNull();
+    expect(route.currentPosition).toEqual({
+      source: "marca", latitude: HOME.lat, longitude: HOME.lng,
+      phoneTime: "2026-10-23T11:10:00.000Z", phoneTimeHhmi: "08:10", accuracyMeters: null,
+    });
+  });
+
   it("Regla 3: without Posiciones and without located Marcas the position is null and no ETA is invented", async () => {
     const { office, passenger, served } = await setup("issue-135-rule-3");
     const first = await served((await passenger()).passengerId, "entrada");
