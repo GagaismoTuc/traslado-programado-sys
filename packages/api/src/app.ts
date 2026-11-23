@@ -1079,7 +1079,7 @@ async function loadDailyPlanPrint(client: Queryable, date: string) {
     return {
       routeId: Number(row.routeId),
       version: Number(row.version),
-      publishedAt: new Date(row.publishedAt as string | Date).toISOString(),
+      publishedAt: new Date(String(row.publishedAt)).toISOString(),
       startTime: String(row.startTime),
       endTime: String(row.endTime),
       driver: {

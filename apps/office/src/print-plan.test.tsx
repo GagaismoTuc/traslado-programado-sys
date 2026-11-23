@@ -129,7 +129,12 @@ describe("Print / export Plan diario", () => {
     expect(markup).toContain("Pasajero Sintético 1");
     expect(markup).toContain("Pasajero Sintético 2");
     expect(markup).toContain("07:35");
+    expect(markup).toContain("07:50");
     expect(markup).toContain("08:15");
+    expect(markup).toContain("08:20");
+    expect(markup.indexOf("07:35")).toBeLessThan(markup.indexOf("07:50"));
+    expect(markup.indexOf("07:50")).toBeLessThan(markup.indexOf("08:15"));
+    expect(markup.indexOf("08:15")).toBeLessThan(markup.indexOf("08:20"));
     expect(markup).toContain("Epilepsia");
     expect(markup).toContain("Timbre blanco");
     expect(markup).toContain("Escuela Especial Sintética");

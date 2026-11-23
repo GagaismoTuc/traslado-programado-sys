@@ -530,7 +530,9 @@ describe("Publication and Versiones del plan", () => {
     expect(body1.unpublishedTransfers.map((t) => t.id)).toEqual([served, inDraft]);
 
     // Publish publishedRoute; inDraft remains unpublished
-    const pub1 = await ok(publish(publishedRoute)) as { version: { publishedAt: string; version: number } };
+    const pub1 = await ok(publish(publishedRoute)) as {
+      version: { publishedAt: string; version: number; legs: { position: number; kind: string; plannedTime: string }[] };
+    };
     expect(pub1.version.version).toBe(1);
     const refused2 = await request(`/daily-plans/${DAY}/print`, "GET", undefined, office);
     expect(refused2.status).toBe(409);
@@ -547,8 +549,8 @@ describe("Publication and Versiones del plan", () => {
         routeId: number;
         version: number;
         publishedAt: string;
-        driver: { name: string };
-        vehicle: { plate: string };
+        driver: { id: number; name: string };
+        vehicle: { id: number; plate: string; model: string };
         stops: {
           position: number;
           kind: string;
@@ -573,37 +575,40 @@ describe("Publication and Versiones del plan", () => {
     expect(r1.version).toBe(1);
     expect(r1.publishedAt).toBe(pub1.version.publishedAt);
     expect(Number.isNaN(Date.parse(r1.publishedAt))).toBe(false);
-    expect(r1.driver.name).toContain("chofer-print");
-    expect(r1.vehicle.plate).toBeDefined();
+    expect(r1.driver).toEqual({ id: driverId, name: "Chofer chofer-print-1" });
+    expect(r1.vehicle).toEqual({ id: vehicleId, plate: "PRI001", model: "Furgón Sintético" });
     expect(r1.stops).toHaveLength(2); // pickup + dropoff
 
     const pickup = r1.stops[0];
     expect(pickup.position).toBe(1);
     expect(pickup.kind).toBe("pickup");
-    expect(pickup.plannedTime).toBeDefined();
+    expect(pickup.plannedTime).toBe(pub1.version.legs[0].plannedTime);
     expect(pickup.passengerName).toBe("Pasajero Con Alerta");
     expect(pickup.companions).toBe(1);
     expect(pickup.wheelchair).toBe(true);
     expect(pickup.medicalAlert).toBe("Alerta sintética");
-    expect(pickup.accessNotes).toContain("Timbre blanco");
-    expect(pickup.destinationName).toContain("Escuela print");
+    expect(pickup.accessNotes).toBe("Timbre blanco");
+    expect(pickup.destinationName).toBe("Escuela print");
 
     // Publish a second, distinct version of publishedRoute with an additional transfer
     const secondPassenger = await passenger({ name: "Segundo Pasajero" });
     await transfer(secondPassenger, "08:30", publishedRoute);
     const pub2 = await ok(publish(publishedRoute)) as { version: { publishedAt: string; version: number } };
     expect(pub2.version.version).toBe(2);
-    expect(pub2.version.publishedAt).toBeDefined();
+    expect(Number.isNaN(Date.parse(pub2.version.publishedAt))).toBe(false);
 
     // Modify the draft route afterward (change driver and vehicle in Borrador)
     const newVehicle = await vehicle();
     const newDriver = await driver(newVehicle);
+    expect(newDriver).not.toBe(driverId);
+    expect(newVehicle).not.toBe(vehicleId);
     await ok(request(`/routes/${publishedRoute}`, "PATCH", { driverId: newDriver, vehicleId: newVehicle }, office), 200);
 
-    // Verify draft now has newDriver in the daily plan draft
+    // Verify draft now has newDriver and newVehicle in the daily plan draft
     const dayData = await day();
     const draftRouteState = dayData.routes.find((r: { id: number }) => r.id === publishedRoute);
     expect(draftRouteState.driverId).toBe(newDriver);
+    expect(draftRouteState.vehicleId).toBe(newVehicle);
 
     // Regla 1: Print must contain EXCLUSIVELY the latest published version (version 2),
     // ignoring both version 1 and subsequent Borrador modifications
@@ -613,7 +618,12 @@ describe("Publication and Versiones del plan", () => {
     const r1V2 = resultV2.routes.find((r) => r.routeId === publishedRoute)!;
     expect(r1V2.version).toBe(2);
     expect(r1V2.publishedAt).toBe(pub2.version.publishedAt);
-    expect(r1V2.driver.name).toContain("chofer-print"); // From v2, not newDriver from Borrador
+    expect(r1V2.driver).toEqual({ id: driverId, name: "Chofer chofer-print-1" });
+    expect(r1V2.driver.id).not.toBe(newDriver);
+    expect(r1V2.driver.name).not.toBe("Chofer chofer-print-2");
+    expect(r1V2.vehicle).toEqual({ id: vehicleId, plate: "PRI001", model: "Furgón Sintético" });
+    expect(r1V2.vehicle.id).not.toBe(newVehicle);
+    expect(r1V2.vehicle.plate).not.toBe("PRI002");
     expect(r1V2.stops).toHaveLength(4); // 2 pickups, 2 dropoffs from v2 (not the 2 from v1)
     expect(new Set(r1V2.stops.map((s) => s.passengerName))).toEqual(new Set(["Pasajero Con Alerta", "Segundo Pasajero"]));
   });
