@@ -155,3 +155,38 @@ export function HandoverView({ handover, blocked, searching, actions }: {
     </button>
   </section>;
 }
+
+
+export type IncidentKind = "delay" | "vehicle_fault" | "accident" | "health_crisis" | "other";
+export type Incident = {
+  id: string;
+  kind: IncidentKind;
+  note: string;
+  phoneTime: string;
+  location: Location;
+};
+
+export const INCIDENT_KINDS: { kind: IncidentKind; label: string }[] = [
+  { kind: "delay", label: "Delay" },
+  { kind: "vehicle_fault", label: "Vehicle fault" },
+  { kind: "accident", label: "Accident" },
+  { kind: "health_crisis", label: "Pasajero health crisis" },
+  { kind: "other", label: "Other" },
+];
+
+export function newIncident(
+  fields: Omit<Incident, "id" | "phoneTime">,
+  now = new Date(),
+  id: string = crypto.randomUUID(),
+): Incident {
+  return { id, phoneTime: now.toISOString(), ...fields };
+}
+
+export async function sendIncident(apiUrl: string, routeId: number, incident: Incident) {
+  return await fetch(`${apiUrl}/driver/routes/${routeId}/incidents`, {
+    method: "POST",
+    credentials: "include",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(incident),
+  });
+}

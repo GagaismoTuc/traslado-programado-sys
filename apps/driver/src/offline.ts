@@ -2,7 +2,7 @@
 // IndexedDB, so they survive a reload, a closed tab and a phone without signal.
 import { markOrder } from "@traslado/shared";
 import type { DriverDay } from "./Days";
-import type { Handover, Mark } from "./Marks";
+import type { Handover, Incident, Mark } from "./Marks";
 
 /**
  * A Marca on the phone: pending until the server confirms it, then kept as confirmed until the end-of-day wipe; a server
@@ -18,13 +18,27 @@ export type QueuedMark = {
   note: string | null;
   // False until the queue first tries to send it; a Marca saved before this field existed counts as tried.
   sent?: boolean;
+  // True after a definitive 4xx server refusal (other than 401/408/429), so it does not deadlock later route items.
+  refused?: boolean;
 };
+export type QueuedIncident = {
+  kind: "incident";
+  id: string;
+  routeId: number;
+  incident: Incident;
+  state: "pending" | "confirmed";
+  confirmedAt: string | null;
+  note: string | null;
+  sent?: boolean;
+  refused?: boolean;
+};
+export type QueuedItem = QueuedMark | QueuedIncident;
 /** Today's and tomorrow's plan as last downloaded by the Chofer `userId`, with the handover data of every home drop-off. */
 export type CachedPlan = { userId: number; days: DriverDay[]; handovers: Record<number, Handover>; fetchedAt: string };
 
 export type LocalStore = {
-  marks(): Promise<QueuedMark[]>;
-  putMark(item: QueuedMark): Promise<void>;
+  marks(): Promise<QueuedItem[]>;
+  putMark(item: QueuedItem): Promise<void>;
   deleteMark(id: string): Promise<void>;
   plan(): Promise<CachedPlan | null>;
   putPlan(plan: CachedPlan): Promise<void>;
@@ -138,10 +152,10 @@ export function planDay(time: Date) {
  * What the end-of-day wipe removes on `today`: the Marcas made on an earlier day, and the saved plan once none of its days
  * is today or later. Null, so nothing is wiped, while any Marca on the phone is not confirmed by the server.
  */
-export function endedData(items: QueuedMark[], plan: CachedPlan | null, today: string) {
+export function endedData(items: QueuedItem[], plan: CachedPlan | null, today: string) {
   if (items.some((item) => item.state === "pending")) return null;
   return {
-    markIds: items.filter((item) => planDay(new Date(item.mark.phoneTime)) < today).map((item) => item.id),
+    markIds: items.filter((item) => planDay(new Date("incident" in item ? item.incident.phoneTime : item.mark.phoneTime)) < today).map((item) => item.id),
     plan: plan !== null && plan.days.every((day) => day.date < today),
   };
 }
@@ -155,13 +169,13 @@ const EPOCH_HEADER = "X-Server-Epoch";
  * pending again, keeping its place in `queueOrder`, and is sent again. The epoch is saved last: an interrupted round
  * compares again next time, and the server's upsert by UUID takes a Marca sent twice once. Says whether it re-queued.
  */
-async function requeueOnNewEpoch(store: LocalStore, items: QueuedMark[], response: Response) {
+async function requeueOnNewEpoch(store: LocalStore, items: QueuedItem[], response: Response) {
   const epoch = response.headers.get(EPOCH_HEADER)?.trim();
   if (!epoch) return false;
   const known = await store.epoch();
   if (known === epoch) return false;
   const confirmed = known === null ? [] : items.filter((item) => item.state === "confirmed");
-  for (const item of confirmed) await store.putMark({ ...item, state: "pending", note: null, sent: true });
+  for (const item of confirmed) await store.putMark({ ...item, state: "pending", note: null, sent: true, refused: false });
   await store.putEpoch(epoch);
   return confirmed.length > 0;
 }
@@ -174,6 +188,7 @@ export function savedPlanFor(saved: CachedPlan | null, userId: number) {
 export type FlushResult = "done" | "offline" | "signed_out" | "revoked";
 export type FlushOutcome = { result: FlushResult; confirmed: number };
 type Send = (routeId: number, mark: Mark) => Promise<Response>;
+type SendIncident = (routeId: number, incident: Incident) => Promise<Response>;
 // Asks the server about this phone's session (`GET /auth/me`) without sending any Marca.
 type SessionCheck = () => Promise<Response>;
 
@@ -189,7 +204,12 @@ type SessionCheck = () => Promise<Response>;
  * lands between the check and the first send lets that one Marca go out, and the server refuses it. A round that ends
  * with every Marca confirmed runs the end-of-day wipe.
  */
-async function flushOnce(store: LocalStore, send: Send, check?: SessionCheck): Promise<FlushOutcome> {
+/** True when the server definitively rejected the item with a non-retryable 4xx (not 401/408/429). */
+function isPermanentRefusal(response: Response) {
+  return response.status >= 400 && response.status < 500 && response.status !== 401 && response.status !== 408 && response.status !== 429;
+}
+
+async function flushOnce(store: LocalStore, send: Send, check?: SessionCheck, sendIncident?: SendIncident): Promise<FlushOutcome> {
   let items = await store.marks();
   if (items.length && check) {
     const response = await check().catch(() => null);
@@ -203,27 +223,54 @@ async function flushOnce(store: LocalStore, send: Send, check?: SessionCheck): P
   // At least 1 ms after the last confirmation, even within one millisecond or after the phone's clock went back.
   let lastConfirmed = Math.max(0, ...items.map((item) => item.confirmedAt ? Date.parse(item.confirmedAt) : 0));
   const pending = items.filter((item) => item.state === "pending").sort(queueOrder);
-  const unconfirmed = new Set(items.filter((item) => item.state === "pending").map((item) => item.id));
+  const unconfirmed = new Set(pending.map((item) => item.id));
+  // Unanswered or transiently failed items preserve Marca/Incidente order on the same Recorrido; 4xx refusals do not deadlock it.
+  const blocking = new Set(pending.filter((item) => !item.refused).map((item) => item.id));
   let confirmed = 0;
   for (const pendingItem of pending) {
-    if (pendingItem.mark.corrects && unconfirmed.has(pendingItem.mark.corrects)) continue;
+    if ("mark" in pendingItem && pendingItem.mark.corrects && unconfirmed.has(pendingItem.mark.corrects)) {
+      if (!blocking.has(pendingItem.mark.corrects)) blocking.delete(pendingItem.id);
+      continue;
+    }
+    const isIncident = "incident" in pendingItem;
+    const hasEarlierBlockingCounterpart = pending.some(
+      (other) => other.routeId === pendingItem.routeId
+        && ("incident" in other) !== isIncident
+        && blocking.has(other.id)
+        && queueOrder(other, pendingItem) < 0,
+    );
+    if (hasEarlierBlockingCounterpart) continue;
     const item = { ...pendingItem, sent: true };
     if (pendingItem.sent !== true) await store.putMark(item);
     let response: Response;
     try {
-      response = await send(item.routeId, item.mark);
+      if ("incident" in item) {
+        if (!sendIncident) throw new Error("No sender for incidents");
+        response = await sendIncident(item.routeId, item.incident);
+      } else {
+        response = await send(item.routeId, item.mark);
+      }
     } catch {
       return { result: "offline", confirmed };
     }
     if (response.status === 401) return { result: await wipeIfRevoked(response, store) ? "revoked" : "signed_out", confirmed };
-    const body = await response.json().catch(() => null) as { mark?: { id?: string }; conflict?: boolean; error?: string } | null;
-    if (response.ok && body?.mark?.id === item.id) {
+    const body = await response.json().catch(() => null) as { mark?: { id?: string }; incident?: { id?: string }; conflict?: boolean; error?: string } | null;
+    const okId = "incident" in item ? body?.incident?.id : body?.mark?.id;
+    if (response.ok && okId === item.id) {
       lastConfirmed = Math.max(Date.now(), lastConfirmed + 1);
-      await store.putMark({ ...item, state: "confirmed", confirmedAt: new Date(lastConfirmed).toISOString(), note: body.conflict ? CONFLICT_NOTE : null });
+      await store.putMark({ ...item, state: "confirmed", confirmedAt: new Date(lastConfirmed).toISOString(), note: body?.conflict ? CONFLICT_NOTE : null, refused: false });
       unconfirmed.delete(item.id);
+      blocking.delete(item.id);
       confirmed++;
     } else {
-      await store.putMark({ ...item, note: body?.error ?? "The server did not take the Marca yet; it stays on the phone" });
+      const refused = isPermanentRefusal(response);
+      await store.putMark({
+        ...item,
+        note: body?.error ?? ("incident" in item ? "The server did not take the Incidente yet; it stays on the phone" : "The server did not take the Marca yet; it stays on the phone"),
+        refused,
+      });
+      if (refused) blocking.delete(item.id);
+      else blocking.add(item.id);
     }
   }
   // A failed wipe is tried again by the next round.
@@ -236,7 +283,7 @@ async function flushOnce(store: LocalStore, send: Send, check?: SessionCheck): P
  * asked for while one runs makes it go round again, so a Marca is never sent twice at once from this tab. A flush round
  * and a Deshacer never touch the queue at the same time.
  */
-export function markQueue(store: LocalStore, send: Send, check?: SessionCheck) {
+export function markQueue(store: LocalStore, send: Send, check?: SessionCheck, sendIncident?: SendIncident) {
   let running: Promise<FlushOutcome> | null = null;
   let again = false;
   let last: Promise<unknown> = Promise.resolve();
@@ -248,13 +295,16 @@ export function markQueue(store: LocalStore, send: Send, check?: SessionCheck) {
   async function add(routeId: number, mark: Mark) {
     await store.putMark({ id: mark.id, routeId, mark, state: "pending", confirmedAt: null, note: null, sent: false });
   }
+  async function addIncident(routeId: number, incident: Incident) {
+    await store.putMark({ kind: "incident", id: incident.id, routeId, incident, state: "pending", confirmedAt: null, note: null, sent: false });
+  }
   async function loop() {
     let confirmed = 0;
     let outcome: FlushOutcome;
     try {
       do {
         again = false;
-        outcome = await exclusive(() => flushOnce(store, send, check));
+        outcome = await exclusive(() => flushOnce(store, send, check, sendIncident));
         confirmed += outcome.confirmed;
       } while (again && outcome.result === "done");
     } finally {
@@ -265,6 +315,7 @@ export function markQueue(store: LocalStore, send: Send, check?: SessionCheck) {
   }
   return {
     add,
+    addIncident,
     /**
      * "Deshacer" of the Marca `undo` corrects. One the queue never tried to send is cancelled: neither it nor `undo` is
      * sent. Any other gets `undo` queued. A Marca no longer on the phone was already cancelled, so a second tap queues nothing.
@@ -294,18 +345,20 @@ export function markQueue(store: LocalStore, send: Send, check?: SessionCheck) {
  * confirmed, so with the same phone time the confirmed ones come first, in the order they were confirmed, and the pending
  * ones follow in the order the queue sends them, which is this same order (the UUID only breaks ties among those).
  */
-export const queueOrder = markOrder<QueuedMark>((item) => item.mark.phoneTime, (a, b) =>
+export const queueOrder = markOrder<QueuedItem>((item) => "incident" in item ? item.incident.phoneTime : item.mark.phoneTime, (a, b) =>
   Number(a.state === "pending") - Number(b.state === "pending") || (a.confirmedAt ?? "").localeCompare(b.confirmedAt ?? "")
   || a.id.localeCompare(b.id));
 
-/** A pending Marca the server answered without taking it; its `note` is the server's reason. */
-function isRefused(item: QueuedMark) {
+/** A pending Marca or Incidente the server answered without taking it; its `note` is the server's reason. */
+function isRefused(item: QueuedItem) {
   return item.state === "pending" && item.note !== null;
 }
 
-function lastPerTransfer(items: QueuedMark[]) {
+function lastPerTransfer(items: QueuedItem[]) {
   const latest: Record<number, QueuedMark> = {};
-  for (const item of [...items].sort(queueOrder)) latest[item.mark.transferId] = item;
+  for (const item of [...items].sort(queueOrder)) {
+    if (!("incident" in item)) latest[item.mark.transferId] = item;
+  }
   return latest;
 }
 
@@ -313,12 +366,12 @@ function lastPerTransfer(items: QueuedMark[]) {
  * The Marca in force for each Traslado: the last one in `queueOrder` among the Marcas the server confirmed and the ones
  * it has not answered yet. A Marca the server refused is never in force, since the server did not store it.
  */
-export function latestMarks(items: QueuedMark[]) {
+export function latestMarks(items: QueuedItem[]) {
   return lastPerTransfer(items.filter((item) => !isRefused(item)));
 }
 
 /** The newest Marca the server refused for each Traslado, still on the phone with the server's reason. */
-export function refusedMarks(items: QueuedMark[]) {
+export function refusedMarks(items: QueuedItem[]) {
   return lastPerTransfer(items.filter(isRefused));
 }
 

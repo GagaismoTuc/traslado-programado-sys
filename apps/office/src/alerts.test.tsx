@@ -115,6 +115,25 @@ describe("Oficina alert inbox", () => {
     expect(renderToStaticMarkup(<AlertList alerts={[alert("mark_flagged", { reasons: ["route_closed"] })]} />))
       .toContain("Marca accepted with a warning for Pasajero Sintético (Chofer Sintético): the Recorrido was already closed");
   });
+
+  it("shows an Incidente alert with the Recorrido, kind, note and children on board", () => {
+    const markupWithChildren = renderToStaticMarkup(<AlertList alerts={[alert("incident", {
+      kind: "delay",
+      note: "Corte de calle en ruta",
+      onBoard: [
+        { transferId: 10, passengerName: "Pasajero Uno" },
+        { transferId: 11, passengerName: "Pasajera Dos" },
+      ],
+    }, { transferId: null, markId: null, passengerName: null })]} />);
+    expect(markupWithChildren).toContain('Chofer Sintético reported an Incidente (delay) on Recorrido 9: Corte de calle en ruta. Children on board:<ul><li>Pasajero Uno</li><li>Pasajera Dos</li></ul>');
+
+    const markupEmpty = renderToStaticMarkup(<AlertList alerts={[alert("incident", {
+      kind: "health_crisis",
+      note: "Descompensación",
+      onBoard: [],
+    }, { transferId: null, markId: null, passengerName: null })]} />);
+    expect(markupEmpty).toContain('Chofer Sintético reported an Incidente (health crisis) on Recorrido 9: Descompensación. No children on board.');
+  });
 });
 
 describe("Autorización puntual in the Plan diario", () => {

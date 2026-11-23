@@ -247,16 +247,25 @@ class FakeDomElement extends FakeDomNode {
   attrs = new Map<string, string>();
   disabled = false;
   type = "";
+  value = "";
+  defaultValue = "";
+  selected = false;
+  defaultSelected = false;
 
   constructor(tag: string, ownerDocument: FakeDocument) {
     super(1, tag.toUpperCase(), ownerDocument);
     this.tagName = tag.toUpperCase();
   }
 
+  get options(): FakeDomElement[] {
+    return this.findAll((el) => el.tagName === "OPTION");
+  }
+
   setAttribute(name: string, value: string) {
     this.attrs.set(name, String(value));
     if (name === "disabled") this.disabled = true;
     if (name === "type") this.type = String(value);
+    if (name === "value") this.value = String(value);
   }
   removeAttribute(name: string) {
     this.attrs.delete(name);
