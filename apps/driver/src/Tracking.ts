@@ -2,7 +2,7 @@
 // document is visible, samples at most once every 15 s (<= 100 m accuracy), and posts batches every 30 s from the
 // phone's queue of pending Posiciones, which keeps them through a lost signal or a reload.
 import type { DriverDay } from "./Days";
-import { overflowPositionIds, positionOrder, type PendingPosition, type PositionStore } from "./offline";
+import { endedPositionIds, overflowPositionIds, planDay, positionOrder, type PendingPosition, type PositionStore } from "./offline";
 
 export const SAMPLE_INTERVAL_MS = 15_000;
 export const FLUSH_INTERVAL_MS = 30_000;
@@ -72,12 +72,16 @@ export function memoryPositionStore(): PositionStore {
  * one Recorrido per batch. A 200 or 201 deletes the batch from the phone; a 400 or 409 also deletes it, since the server
  * will never take it, and logs the refusal without coordinates. No signal stops the round and keeps everything; a 5xx or
  * any other answer keeps that batch and skips the rest of its Recorrido until the next round. A 401 stops the round and
- * keeps everything, for the caller to end the session (a revoked device wipes the store). One round runs at a time.
+ * keeps everything, for the caller to end the session (a revoked device wipes the store). Each round first drops the
+ * Posiciones of an earlier day, unsent, even without signal or with Marcas pending. One round runs at a time.
  */
 export function positionQueue(store: PositionStore, send: SendPositions): PositionQueue {
   let running: Promise<PositionFlushOutcome> | null = null;
   async function round(): Promise<PositionFlushOutcome> {
-    const pending = await store.positions();
+    const all = await store.positions();
+    const ended = new Set(endedPositionIds(all, planDay(new Date())));
+    if (ended.size) await store.deletePositions([...ended]);
+    const pending = all.filter((item) => !ended.has(item.id));
     const blocked = new Set<number>();
     const sentIds = new Set<string>();
     for (const first of pending) {

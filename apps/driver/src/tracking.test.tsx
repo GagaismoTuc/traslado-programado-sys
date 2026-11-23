@@ -970,6 +970,36 @@ describe("pending Posiciones on the phone (#136)", () => {
     expect(await reloaded.marks()).toEqual([mark]);
   });
 
+  it("upgrades a version-1 driver-app base by adding only the positions store, keeping its Marcas", async () => {
+    const idb = fakeIndexedDb();
+    const created: string[] = [];
+    const factory = {
+      open(name: string, version: number) {
+        const request = idb.factory.open(name, version) as unknown as Record<string, unknown> & { result: Record<string, unknown> };
+        const db = request.result as { createObjectStore(name: string): void; transaction(names: string[]): unknown };
+        request.result = { transaction: db.transaction.bind(db), createObjectStore: (store: string) => {
+          created.push(store);
+          db.createObjectStore(store);
+        } };
+        let upgrade: ((event: { oldVersion: number }) => void) | null = null;
+        Object.defineProperty(request, "onupgradeneeded", {
+          get: () => upgrade && (() => upgrade!({ oldVersion: 1 })),
+          set: (handler) => { upgrade = handler; },
+        });
+        return request;
+      },
+    } as unknown as IDBFactory;
+    const mark: QueuedMark = {
+      id: "mark-v1", routeId: 9, state: "pending", confirmedAt: null, note: null, sent: false,
+      mark: { id: "mark-v1", transferId: 3, kind: "subio", phoneTime: minute(0), location: null, version: 1 },
+    };
+    idb.stores.set("marks", new Map([["mark-v1", mark]]));
+
+    const store = indexedDbStore(factory);
+    expect(await store.marks()).toEqual([mark]);
+    expect(created).toEqual(["positions"]);
+  });
+
   it("keeps at most 240 pending Posiciones and drops the oldest ones past the maximum", async () => {
     const store = indexedDbStore(fakeIndexedDb().factory);
     const queue = positionQueue(store, offline);
@@ -1049,6 +1079,19 @@ describe("pending Posiciones on the phone (#136)", () => {
     expect(outcome).toEqual({ result: "signed_out" });
     expect(await store.positions()).toEqual([]);
 
+    // Signing out of an expired session (the Marca queue or the session check answers a plain 401) wipes them too.
+    const expired = async () => new Response(JSON.stringify({ code: "session_expired" }), { status: 401 });
+    await queue.add(9, at(minute(-1)));
+    expect(await signOut(store, { flush: async () => ({ result: "signed_out", confirmed: 0 }) }, {
+      session: expired, logout: async () => new Response(null, { status: 204 }),
+    }, store)).toEqual({ result: "expired" });
+    expect(await store.positions()).toEqual([]);
+    await queue.add(9, at(minute(-1)));
+    expect(await signOut(store, { flush: async () => ({ result: "done", confirmed: 0 }) }, {
+      session: expired, logout: async () => new Response(null, { status: 204 }),
+    }, store)).toEqual({ result: "expired" });
+    expect(await store.positions()).toEqual([]);
+
     await queue.add(9, at(minute(-1)));
     expect(await wipeIfRevoked(new Response(JSON.stringify({ code: REVOKED_CODE }), { status: 401 }), store)).toBe(true);
     expect(await store.positions()).toEqual([]);
@@ -1063,6 +1106,15 @@ describe("pending Posiciones on the phone (#136)", () => {
     await store.wipeEnded("2026-10-23");
     expect((await store.positions()).map((position) => position.phoneTime)).toEqual([minute(0)]);
     expect((await store.marks()).map((item) => item.id)).toEqual(["mark-2"]);
+
+    // Without signal the Marca round never reaches the wipe: the Posiciones round drops yesterday's ones unsent.
+    await queue.add(8, at("2026-10-22T20:00:00.000Z"));
+    const send = vi.fn(async (_routeId: number, _batch: PositionSample[]): Promise<Response> => {
+      throw new TypeError("Failed to fetch");
+    });
+    expect(await positionQueue(store, send).flush()).toEqual({ result: "offline" });
+    expect(send.mock.calls.map(([routeId]) => routeId)).toEqual([9]);
+    expect((await store.positions()).map((position) => position.phoneTime)).toEqual([minute(0)]);
   });
 
   it("sends the pending Posiciones in phone-time order in batches of at most 100 of one Recorrido", async () => {

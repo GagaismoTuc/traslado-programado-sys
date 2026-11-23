@@ -459,7 +459,8 @@ export type SignOutOutcome =
  * "Cerrar sesión": sends the queue first and ends the session only when no Marca is left unconfirmed on the phone. Without
  * signal, or with a Marca the server did not take, it refuses and keeps everything. An expired session keeps the queue for
  * the next sign-in; a revoked device is wiped, also when the queue was already empty and the flush asked nothing. Once the
- * session ends, the pending Posiciones in `positions` are wiped too: they never wait on the phone for the next sign-in.
+ * session ends, signed out or expired, the pending Posiciones in `positions` are wiped too: they never wait on the phone
+ * for the next sign-in.
  */
 export async function signOut(
   store: LocalStore,
@@ -469,17 +470,26 @@ export async function signOut(
 ): Promise<SignOutOutcome> {
   const outcome = await queue.flush();
   if (outcome.result === "revoked") return { result: "revoked" };
-  if (outcome.result === "signed_out") return { result: "expired" };
+  // An expired session ends here too, so its Posiciones go: another Chofer may sign in next.
+  const wipePositions = async () => await positions?.clearPositions().catch(() => undefined);
+  if (outcome.result === "signed_out") {
+    await wipePositions();
+    return { result: "expired" };
+  }
   const pending = (await store.marks()).filter((item) => item.state === "pending").length;
   if (pending) return { result: "refused", pending, offline: outcome.result === "offline" };
   try {
     // The logout answers 204 even to a revoked session: only the session itself says whether to wipe.
     const session = await server.session();
-    if (session.status === 401) return { result: await wipeIfRevoked(session, store) ? "revoked" : "expired" };
+    if (session.status === 401) {
+      if (await wipeIfRevoked(session, store)) return { result: "revoked" };
+      await wipePositions();
+      return { result: "expired" };
+    }
     if (!session.ok) return { result: "unreachable" };
     if (!(await server.logout()).ok) return { result: "unreachable" };
     // A failed wipe leaves them for the end-of-day wipe; the session is already over.
-    await positions?.clearPositions().catch(() => undefined);
+    await wipePositions();
     return { result: "signed_out" };
   } catch {
     return { result: "unreachable" };
