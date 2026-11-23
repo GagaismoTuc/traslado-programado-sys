@@ -21,6 +21,9 @@
 				header_up -X-Forwarded-For
 				header_up -X-Real-IP
 				header_up -Forwarded
+				header_up -True-Client-IP
+				header_up -X-Client-IP
+				header_up -CF-Connecting-IP
 			}
 		}
 

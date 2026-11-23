@@ -117,4 +117,85 @@ describe("disk usage alert", () => {
       await new Promise<void>((resolveClose) => server.close(() => resolveClose()));
     }
   });
+
+  it("never transmits a non-allowlisted DISK_MOUNT path to webhook, GlitchTip or stderr (substituted df and curl)", async () => {
+    const dir = await mkdtemp(join(tmpdir(), "traslado-disk-pii-"));
+    const dfPath = join(dir, "df");
+    const curlPath = join(dir, "curl");
+    const outPath = join(dir, "result");
+
+    await writeFile(
+      dfPath,
+      "#!/bin/sh\necho 'Filesystem 1024-blocks Used Available Capacity Mounted-on'\necho 'x 100 95 5 95% /'\n",
+      { encoding: "utf8" },
+    );
+    await writeFile(
+      curlPath,
+      "#!/bin/sh\nprintf '%s\\n' \"$@\" >> \"$OUT\"\ncat >> \"$OUT\"\n",
+      { encoding: "utf8" },
+    );
+    await chmod(dfPath, 0o755);
+    await chmod(curlPath, 0o755);
+
+    const basePath = process.env.PATH ?? process.env.Path ?? "";
+    const gitBins = process.platform === "win32" ? `${delimiter}C:\\Program Files\\Git\\mingw64\\bin${delimiter}C:\\Program Files\\Git\\usr\\bin` : "";
+    const runWithSubstitutedTools = async (extraEnv: Record<string, string>) =>
+      await runFile(resolveSh(), ["-c", 'exec sh "$1" < /dev/null', "sh", checkDiskScript], {
+        env: {
+          PATH: `${dir}${delimiter}${basePath}${gitBins}`,
+          ...(process.env.SystemRoot ? { SystemRoot: process.env.SystemRoot } : {}),
+          MSYS_NO_PATHCONV: "1",
+          MSYS2_ENV_CONV_EXCL: "DISK_MOUNT",
+          TEMP: tmpdir(),
+          TMP: tmpdir(),
+          OUT: outPath.replace(/\\/g, "/"),
+          ...extraEnv,
+        },
+      });
+
+    try {
+      await runWithSubstitutedTools({
+        DISK_MOUNT: "/home/Juana-Perez",
+        DISK_ALERT_THRESHOLD_PERCENT: "90",
+        DISK_ALERT_WEBHOOK_URL: "http://example.invalid",
+        GLITCHTIP_DSN: "http://abc@example.invalid/1",
+      });
+
+      const captured = await readFile(outPath, "utf8");
+      expect(captured).not.toContain("Juana-Perez");
+      expect(captured).toContain('{"alert":"disk_usage_high","mount":"[REDACTED]","usedPercent":95,"thresholdPercent":90}');
+      expect(captured).toContain("Disk usage high: 95% on [REDACTED] (threshold 90%)");
+
+      await writeFile(outPath, "", { encoding: "utf8" });
+      await runWithSubstitutedTools({
+        DISK_MOUNT: "/var/lib/docker",
+        DISK_ALERT_THRESHOLD_PERCENT: "90",
+        DISK_ALERT_WEBHOOK_URL: "http://example.invalid",
+        GLITCHTIP_DSN: "http://abc@example.invalid/1",
+      });
+
+      const safeCaptured = await readFile(outPath, "utf8");
+      expect(safeCaptured).toContain('{"alert":"disk_usage_high","mount":"/var/lib/docker","usedPercent":95,"thresholdPercent":90}');
+      expect(safeCaptured).toContain("Disk usage high: 95% on /var/lib/docker (threshold 90%)");
+
+      // Also verify stderr never echoes an unallowlisted mount when df fails.
+      await writeFile(dfPath, "#!/bin/sh\necho \"df: $2: No such file or directory\" >&2\nexit 1\n", { encoding: "utf8" });
+      await chmod(dfPath, 0o755);
+
+      let stderr = "";
+      try {
+        await runWithSubstitutedTools({
+          DISK_MOUNT: "/home/Juana-Perez",
+          DISK_ALERT_THRESHOLD_PERCENT: "90",
+          DISK_ALERT_WEBHOOK_URL: "http://example.invalid",
+        });
+      } catch (error) {
+        stderr = String((error as { stderr?: string }).stderr ?? "");
+      }
+      expect(stderr).toContain("[REDACTED]");
+      expect(stderr).not.toContain("Juana-Perez");
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
+  });
 });

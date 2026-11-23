@@ -24,10 +24,19 @@ if [ -z "$DISK_ALERT_WEBHOOK_URL" ]; then
   exit 2
 fi
 
-used_percent=$(df -Pk "$DISK_MOUNT" | awk 'END { for (i = 1; i <= NF; i++) if ($i ~ /^[0-9]+%$/) { sub(/%/, "", $i); print $i; exit } }')
+case "$DISK_MOUNT" in
+  /|/var|/var/lib|/var/lib/docker|/var/lib/postgresql|/var/log|/data|/srv|/opt|/tmp)
+    safe_mount="$DISK_MOUNT"
+    ;;
+  *)
+    safe_mount="[REDACTED]"
+    ;;
+esac
+
+used_percent=$(df -Pk "$DISK_MOUNT" 2>/dev/null | awk 'END { for (i = 1; i <= NF; i++) if ($i ~ /^[0-9]+%$/) { sub(/%/, "", $i); print $i; exit } }')
 case "$used_percent" in
-  ''|*[!0-9]*)
-    echo "check-disk: failed to read numeric capacity from df for $DISK_MOUNT" >&2
+  ''|*[!0-9]*|????*)
+    echo "check-disk: failed to read numeric capacity from df for $safe_mount" >&2
     exit 1
     ;;
 esac
@@ -36,10 +45,8 @@ if [ "$used_percent" -lt "$DISK_ALERT_THRESHOLD_PERCENT" ]; then
   exit 0
 fi
 
-escaped_mount=$(printf '%s' "$DISK_MOUNT" | sed 's/\\/\\\\/g; s/"/\\"/g')
-
 webhook_payload=$(printf '{"alert":"disk_usage_high","mount":"%s","usedPercent":%s,"thresholdPercent":%s}' \
-  "$escaped_mount" "$used_percent" "$DISK_ALERT_THRESHOLD_PERCENT")
+  "$safe_mount" "$used_percent" "$DISK_ALERT_THRESHOLD_PERCENT")
 curl -fsS -m 10 -X POST \
   -H "Content-Type: application/json" \
   --data "$webhook_payload" \
@@ -60,7 +67,7 @@ if [ -n "$GLITCHTIP_DSN" ]; then
   header_line=$(printf '{"event_id":"%s","sent_at":"%s"}' "$event_id" "$sent_at")
   item_line='{"type":"event"}'
   event_line=$(printf '{"event_id":"%s","timestamp":"%s","level":"warning","platform":"other","message":"Disk usage high: %s%% on %s (threshold %s%%)","tags":{"alert":"disk_usage"}}' \
-    "$event_id" "$sent_at" "$used_percent" "$escaped_mount" "$DISK_ALERT_THRESHOLD_PERCENT")
+    "$event_id" "$sent_at" "$used_percent" "$safe_mount" "$DISK_ALERT_THRESHOLD_PERCENT")
 
   printf '%s\n%s\n%s\n' "$header_line" "$item_line" "$event_line" | curl -fsS -m 10 -X POST \
     -H "Content-Type: application/x-sentry-envelope" \

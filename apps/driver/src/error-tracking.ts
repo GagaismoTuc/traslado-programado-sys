@@ -21,6 +21,7 @@ export function createDriverErrorTracker(options: DriverErrorTrackerOptions = {}
     dsn,
     environment: options.environment ?? "production",
     tracesSampleRate: 0,
+    sendClientReports: false,
     stackParser: defaultStackParser,
     integrations: [
       eventFiltersIntegration(),
