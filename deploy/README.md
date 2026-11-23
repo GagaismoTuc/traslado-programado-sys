@@ -84,6 +84,41 @@ change after a restart. On iOS, reinstall the driver PWA from the new URL after
 each restart. To check on a phone, turn off Wi-Fi, open both printed URLs, and
 sign in to the driver app with the synthetic account above.
 
+### Demo seed
+
+With local staging up, load the synthetic demo data and publish the Plan diario of
+one date (today or later, `AAAA-MM-DD`) with:
+
+```sh
+sh deploy/seed-demo.sh 2026-12-05
+```
+
+It needs Node (the version in `package.json`) on the PC. It calls the API's public
+routes through the office tunnel URL in `$DEPLOY_ROOT/staging/urls`, with that URL
+as `Origin` (already in `AUTH_ALLOWED_ORIGINS`), signed in as `demo-oficina`, so
+every validation, the routing engine, the route validator and the publication run
+as for a real Oficina; it never writes SQL and never forces a publication. It
+creates, when missing, 4 Destinos, 3 Vehículos, 3 Choferes with accounts and usual
+Vehículo, and 12 Pasajeros with an Adulto autorizado and Consentimiento, all with
+synthetic names ("Pasajero Demo 01", "Chofer Demo 1") and places of San Miguel de
+Tucumán as points; then 3 morning entrada Recorridos of 4 Pasajeros for that date,
+ordered by the routing engine and published. Masters are looked up by name before
+creating them, so a rerun or another date reuses them; a date whose Plan diario
+already has a published Recorrido is left untouched. If the engine leaves a
+Traslado out or the validator rejects a Recorrido, the command fails with the
+API's error.
+
+The first run enrols the office account's TOTP: it saves the secret in
+`$DEPLOY_ROOT/staging/office-totp-secret` and prints an `otpauth://` URI to add
+to any free authenticator app; later runs compute the code from that file. If the
+account is enrolled and the file is missing, the command stops and tells you to
+recover the account with `db:break-glass-office`. Chofer passwords are generated
+into `$DEPLOY_ROOT/staging/demo-driver-passwords` (operator-only); the command
+ends by printing the usernames and the password file paths, never the passwords.
+
+`DEPLOY_PROJECT=prueba-de-campo` runs the same seed against the Prueba de campo
+environment (`$DEPLOY_ROOT/prueba-de-campo`); any other project is refused.
+
 The throwaway offline prototype of issue #40 is served at `<office URL>/offline-prototype/`.
 It queues fake marks in IndexedDB, keeps what it receives in memory until the
 container restarts, and never touches the real apps or the database. The phone
