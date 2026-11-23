@@ -18,6 +18,8 @@ export type QueuedMark = {
   note: string | null;
   // False until the queue first tries to send it; a Marca saved before this field existed counts as tried.
   sent?: boolean;
+  // True after a definitive 4xx server refusal (other than 401/408/429), so it does not deadlock later route items.
+  refused?: boolean;
 };
 export type QueuedIncident = {
   kind: "incident";
@@ -28,6 +30,7 @@ export type QueuedIncident = {
   confirmedAt: string | null;
   note: string | null;
   sent?: boolean;
+  refused?: boolean;
 };
 export type QueuedItem = QueuedMark | QueuedIncident;
 /** Today's and tomorrow's plan as last downloaded by the Chofer `userId`, with the handover data of every home drop-off. */
@@ -172,7 +175,7 @@ async function requeueOnNewEpoch(store: LocalStore, items: QueuedItem[], respons
   const known = await store.epoch();
   if (known === epoch) return false;
   const confirmed = known === null ? [] : items.filter((item) => item.state === "confirmed");
-  for (const item of confirmed) await store.putMark({ ...item, state: "pending", note: null, sent: true });
+  for (const item of confirmed) await store.putMark({ ...item, state: "pending", note: null, sent: true, refused: false });
   await store.putEpoch(epoch);
   return confirmed.length > 0;
 }
@@ -201,6 +204,11 @@ type SessionCheck = () => Promise<Response>;
  * lands between the check and the first send lets that one Marca go out, and the server refuses it. A round that ends
  * with every Marca confirmed runs the end-of-day wipe.
  */
+/** True when the server definitively rejected the item with a non-retryable 4xx (not 401/408/429). */
+function isPermanentRefusal(response: Response) {
+  return response.status >= 400 && response.status < 500 && response.status !== 401 && response.status !== 408 && response.status !== 429;
+}
+
 async function flushOnce(store: LocalStore, send: Send, check?: SessionCheck, sendIncident?: SendIncident): Promise<FlushOutcome> {
   let items = await store.marks();
   if (items.length && check) {
@@ -215,16 +223,23 @@ async function flushOnce(store: LocalStore, send: Send, check?: SessionCheck, se
   // At least 1 ms after the last confirmation, even within one millisecond or after the phone's clock went back.
   let lastConfirmed = Math.max(0, ...items.map((item) => item.confirmedAt ? Date.parse(item.confirmedAt) : 0));
   const pending = items.filter((item) => item.state === "pending").sort(queueOrder);
-  const unconfirmed = new Set(items.filter((item) => item.state === "pending").map((item) => item.id));
+  const unconfirmed = new Set(pending.map((item) => item.id));
+  // Unanswered or transiently failed items preserve Marca/Incidente order on the same Recorrido; 4xx refusals do not deadlock it.
+  const blocking = new Set(pending.filter((item) => !item.refused).map((item) => item.id));
   let confirmed = 0;
   for (const pendingItem of pending) {
-    if ("mark" in pendingItem && pendingItem.mark.corrects && unconfirmed.has(pendingItem.mark.corrects)) continue;
-    if ("incident" in pendingItem) {
-      const hasEarlierUnconfirmedMark = items.some(
-        (i) => "mark" in i && i.routeId === pendingItem.routeId && unconfirmed.has(i.id) && queueOrder(i, pendingItem) < 0,
-      );
-      if (hasEarlierUnconfirmedMark) continue;
+    if ("mark" in pendingItem && pendingItem.mark.corrects && unconfirmed.has(pendingItem.mark.corrects)) {
+      if (!blocking.has(pendingItem.mark.corrects)) blocking.delete(pendingItem.id);
+      continue;
     }
+    const isIncident = "incident" in pendingItem;
+    const hasEarlierBlockingCounterpart = pending.some(
+      (other) => other.routeId === pendingItem.routeId
+        && ("incident" in other) !== isIncident
+        && blocking.has(other.id)
+        && queueOrder(other, pendingItem) < 0,
+    );
+    if (hasEarlierBlockingCounterpart) continue;
     const item = { ...pendingItem, sent: true };
     if (pendingItem.sent !== true) await store.putMark(item);
     let response: Response;
@@ -243,11 +258,19 @@ async function flushOnce(store: LocalStore, send: Send, check?: SessionCheck, se
     const okId = "incident" in item ? body?.incident?.id : body?.mark?.id;
     if (response.ok && okId === item.id) {
       lastConfirmed = Math.max(Date.now(), lastConfirmed + 1);
-      await store.putMark({ ...item, state: "confirmed", confirmedAt: new Date(lastConfirmed).toISOString(), note: body?.conflict ? CONFLICT_NOTE : null });
+      await store.putMark({ ...item, state: "confirmed", confirmedAt: new Date(lastConfirmed).toISOString(), note: body?.conflict ? CONFLICT_NOTE : null, refused: false });
       unconfirmed.delete(item.id);
+      blocking.delete(item.id);
       confirmed++;
     } else {
-      await store.putMark({ ...item, note: body?.error ?? ("incident" in item ? "The server did not take the Incidente yet; it stays on the phone" : "The server did not take the Marca yet; it stays on the phone") });
+      const refused = isPermanentRefusal(response);
+      await store.putMark({
+        ...item,
+        note: body?.error ?? ("incident" in item ? "The server did not take the Incidente yet; it stays on the phone" : "The server did not take the Marca yet; it stays on the phone"),
+        refused,
+      });
+      if (refused) blocking.delete(item.id);
+      else blocking.add(item.id);
     }
   }
   // A failed wipe is tried again by the next round.

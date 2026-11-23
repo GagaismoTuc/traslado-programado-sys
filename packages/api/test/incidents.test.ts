@@ -24,7 +24,7 @@ async function startedRouteWithTransfers(name: string, count: number) {
   const transfers: { transferId: number; passengerId: number; passengerName: string; adultId: number }[] = [];
   for (let i = 0; i < count; i++) {
     const { passengerId, guardian } = await harness.passenger();
-    const transferId = await harness.transfer(passengerId, "entrada", `08:0${i * 5}`);
+    const transferId = await harness.transfer(passengerId, "entrada", `08:${String(i * 5).padStart(2, "0")}`);
     await harness.assign(transferId, routeId);
     transfers.push({ transferId, passengerId, passengerName: `Pasajero Sintético ${i + 1}`, adultId: guardian });
   }
@@ -35,7 +35,7 @@ async function startedRouteWithTransfers(name: string, count: number) {
     return await request(`/driver/routes/${routeId}/incidents`, "POST", payload, cookie);
   };
 
-  const sendMark = async (transferId: number, kind: "subio" | "ausente" | "entregado", fields: Record<string, unknown> = {}) => {
+  const sendMark = async (transferId: number, kind: "subio" | "ausente" | "entregado" | "undo", fields: Record<string, unknown> = {}) => {
     return await answer(mark(driver.cookie, routeId, markBody(transferId, kind, fields)), 201);
   };
 
@@ -224,5 +224,40 @@ describe("Incidente reporting", () => {
     const body2 = await postIncident2.json();
     expect(body2.error).toBe("This Incidente belongs to another Chofer");
     expect(body2.incident).toBeUndefined();
+  });
+
+  it("lists children on board at the Incidente phoneTime even if a later Entregado arrived first", async () => {
+    const { routeId, transfers, postIncident, sendMark } = await startedRouteWithTransfers("on-board-at-time", 3);
+    // Passenger 0 boarded at 12:00 and was delivered at 12:05 (after the 12:02 incident).
+    await sendMark(transfers[0].transferId, "subio", { phoneTime: "2026-11-02T12:00:00.000Z" });
+    await sendMark(transfers[0].transferId, "entregado", {
+      phoneTime: "2026-11-02T12:05:00.000Z",
+      receiver: { kind: "authorized_adult", adultId: transfers[0].adultId },
+    });
+    // Passenger 1 boarded at 12:00 and had Subió undone at 12:01 (before the incident).
+    const subio1 = await sendMark(transfers[1].transferId, "subio", { phoneTime: "2026-11-02T12:00:00.000Z" });
+    await sendMark(transfers[1].transferId, "undo", {
+      phoneTime: "2026-11-02T12:01:00.000Z",
+      corrects: subio1.mark.id,
+    });
+    // Passenger 2 boarded at 12:06 (after the incident).
+    await sendMark(transfers[2].transferId, "subio", { phoneTime: "2026-11-02T12:06:00.000Z" });
+
+    const incidentId = "00000000-0000-4000-8000-000000000077";
+    const response = await postIncident({
+      id: incidentId,
+      kind: "accident",
+      note: "Incidente reportado tras reintento",
+      phoneTime: "2026-11-02T12:02:00.000Z",
+      location: null,
+    });
+    expect(response.status).toBe(201);
+
+    const alerts = await alertsForRoute(routeId);
+    expect(alerts).toHaveLength(1);
+    const details = alerts[0].details as { onBoard: { transferId: number; passengerName: string }[] };
+    expect(details.onBoard).toEqual([
+      { transferId: transfers[0].transferId, passengerName: transfers[0].passengerName },
+    ]);
   });
 });

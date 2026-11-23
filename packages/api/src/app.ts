@@ -2723,11 +2723,18 @@ export function createApp({ db, routing, router, geocoder, solver, travelTime, c
       if (Number(existing.driver_id) !== chofer.driverId) throw new PlanningError(403, "This Incidente belongs to another Chofer");
       return { status: 200 as const, incident: formatIncident(existing) };
     }
+    // Evaluate who was on board as of the Incidente's phoneTime using marks in force up to that moment, so a later
+    // Entregado or Subió arriving before a retried Incidente does not distort the alert's on-board list.
     const onBoardQuery = await client.query(
       `SELECT t.id, p.name FROM transfers t JOIN passengers p ON p.id = t.passenger_id
-        WHERE t.id IN (SELECT transfer_id FROM stops WHERE route_id = $1) AND t.status = 'subio'
+        WHERE t.id IN (SELECT transfer_id FROM stops WHERE route_id = $1)
+          AND (
+            SELECT e.kind FROM marks e
+             WHERE e.transfer_id = t.id AND e.phone_time <= $2 AND ${MARK_IN_FORCE_SQL}
+             ${LATEST_MARK_FIRST_SQL} LIMIT 1
+          ) = 'subio'
         ORDER BY t.target_time, t.id`,
-      [routeId],
+      [routeId, fields.phoneTime],
     ) as QueryResult;
     const onBoard = onBoardQuery.rows.map((row) => ({
       transferId: Number(row.id),

@@ -648,5 +648,120 @@ describe("Server epoch and the end-of-day wipe", () => {
       expect(incidentSends).toBe(0);
       expect(records.get(sampleIncident.id)?.state).toBe("pending");
     });
+
+    it("does not send a later delivery before an unconfirmed incident", async () => {
+      const { store, records } = makeStore();
+      const sent: string[] = [];
+      let incidentStatus = 500;
+      const queue = markQueue(
+        store,
+        async (_, m) => { sent.push(m.id); return accepted("mark", m.id); },
+        undefined,
+        async (_, i) => {
+          if (incidentStatus >= 500) return new Response(null, { status: incidentStatus });
+          sent.push(i.id);
+          return accepted("incident", i.id);
+        },
+      );
+      const incident = { id: "i", kind: "accident", note: "test", phoneTime: "2026-10-23T10:00:00Z", location: null } as Incident;
+      const delivery = { id: "m", transferId: 1, kind: "entregado", phoneTime: "2026-10-23T10:01:00Z", location: null, version: 1 } as Mark;
+      await queue.addIncident(1, incident);
+      await queue.add(1, delivery);
+      await queue.flush();
+      expect(sent).toEqual([]);
+      expect(records.get("m")?.state).toBe("pending");
+
+      // Once the incident is confirmed on retry, the later delivery flushes right after it.
+      incidentStatus = 201;
+      await queue.flush();
+      expect(sent).toEqual(["i", "m"]);
+      expect(records.get("i")?.state).toBe("confirmed");
+      expect(records.get("m")?.state).toBe("confirmed");
+    });
+
+    it("sends a later delivery when an earlier incident was permanently refused (4xx)", async () => {
+      const { store, records } = makeStore();
+      const sentMarks: string[] = [];
+      const queue = markQueue(
+        store,
+        async (_, m) => { sentMarks.push(m.id); return accepted("mark", m.id); },
+        undefined,
+        async () => json({ error: "Invalid request" }, 400),
+      );
+      await queue.addIncident(1, { id: "i-refused", kind: "accident", note: "bad", phoneTime: "2026-10-23T10:00:00Z", location: null });
+      await queue.add(1, { id: "m-after", transferId: 1, kind: "entregado", phoneTime: "2026-10-23T10:01:00Z", location: null, version: 1 });
+      await queue.flush();
+      expect(sentMarks).toEqual(["m-after"]);
+      expect(records.get("m-after")?.state).toBe("confirmed");
+      expect(records.get("i-refused")?.state).toBe("pending");
+    });
+
+    it("sends an Incidente even when an earlier Deshacer of the same Recorrido was refused for good (409)", async () => {
+      const { store, records } = makeStore();
+      const sentIncidents: string[] = [];
+      const sendMark = vi.fn(async (_r: number, m: Mark) => m.kind === "undo"
+        ? json({ error: "Call the Oficina to correct this Marca" }, 409)
+        : accepted("mark", m.id));
+      const sendIncident = vi.fn(async (_r: number, i: Incident) => {
+        sentIncidents.push(i.id);
+        return accepted("incident", i.id);
+      });
+      const queue = markQueue(store, sendMark, undefined, sendIncident);
+      const subio = newMark({ transferId: 7, kind: "subio", location: null, version: 1 }, new Date("2026-11-02T12:00:00Z"));
+      await queue.add(3, subio);
+      await queue.flush();
+      await queue.add(3, undoMark(subio, 1, null, new Date("2026-11-02T12:30:00Z")));
+      const accident = newIncident({ kind: "accident", note: "Choque", location: null }, new Date("2026-11-02T12:31:00Z"));
+      await queue.addIncident(3, accident);
+      for (let i = 0; i < 3; i++) await queue.flush();
+      expect(sentIncidents).toEqual([accident.id]);
+      expect(records.get(accident.id)?.state).toBe("confirmed");
+    });
+
+    it("sends an Incidente when an earlier Mark was permanently refused (409) and its queued Deshacer waits on it", async () => {
+      const { store, records } = makeStore();
+      const sentIncidents: string[] = [];
+      const queue = markQueue(
+        store,
+        async () => json({ error: "This Recorrido is closed" }, 409),
+        undefined,
+        async (_, i) => { sentIncidents.push(i.id); return accepted("incident", i.id); },
+      );
+      const subio = newMark({ transferId: 7, kind: "subio", location: null, version: 1 }, new Date("2026-11-02T12:00:00Z"));
+      const undo = undoMark(subio, 1, null, new Date("2026-11-02T12:01:00Z"));
+      const accident = newIncident({ kind: "accident", note: "Choque", location: null }, new Date("2026-11-02T12:02:00Z"));
+      await queue.add(3, subio);
+      await queue.flush();
+      await queue.add(3, undo);
+      await queue.addIncident(3, accident);
+      await queue.flush();
+      expect(sentIncidents).toEqual([accident.id]);
+      expect(records.get(accident.id)?.state).toBe("confirmed");
+      expect(records.get(undo.id)?.state).toBe("pending");
+    });
+
+    it("holds an Incidente on transient 429 or captive-portal 200 without blocking another Recorrido", async () => {
+      const { store, records } = makeStore();
+      const sentIncidents: string[] = [];
+      let markAnswer = async () => new Response("Too many requests", { status: 429 });
+      const queue = markQueue(
+        store,
+        async () => await markAnswer(),
+        undefined,
+        async (_, i) => { sentIncidents.push(i.id); return accepted("incident", i.id); },
+      );
+      const otherIncident = newIncident({ kind: "delay", note: "Otra ruta", location: null }, new Date("2026-11-02T10:02:00Z"), "inc-other");
+      await queue.add(42, sampleMark);
+      await queue.addIncident(42, sampleIncident);
+      await queue.addIncident(99, otherIncident);
+      await queue.flush();
+      expect(sentIncidents).toEqual([otherIncident.id]);
+      expect(records.get(sampleIncident.id)?.state).toBe("pending");
+
+      markAnswer = async () => new Response("<html>Wi-Fi login</html>", { status: 200 });
+      await queue.flush();
+      expect(sentIncidents).toEqual([otherIncident.id]);
+      expect(records.get(sampleIncident.id)?.state).toBe("pending");
+    });
   });
 });
