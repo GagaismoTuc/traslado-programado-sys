@@ -7,6 +7,9 @@ import {
   indexedDbStore, latestMarks, markQueue, refusedMarks, requestPersistentStorage, savedPlanFor, signOut, startFlushing, wipeIfRevoked, type CachedPlan,
   type QueuedMark, type SignOutOutcome,
 } from "./offline";
+import {
+  activeTrackingRouteId, GPS_UNAVAILABLE_NOTICE, LOCATION_PERMISSION_NOTICE, sendPositions, startTracking, TRACKING_ACTIVE_TEXT, type TrackingState,
+} from "./Tracking";
 
 export type DriverStop = {
   position: number;
@@ -314,8 +317,15 @@ export function CloseRefusal({ transfers }: { transfers: OpenTransfer[] }) {
   </div>;
 }
 
-export function RouteView({ route, sending, onAcknowledge, marking }: {
-  route: DriverRoute; sending: boolean; onAcknowledge: Acknowledge; marking?: Marking;
+function TrackingStatus({ state }: { state: TrackingState | undefined }) {
+  if (state === "active") return <p role="status">{TRACKING_ACTIVE_TEXT}</p>;
+  if (state === "permission_denied") return <p role="alert">{LOCATION_PERMISSION_NOTICE}</p>;
+  if (state === "gps_unavailable") return <p role="alert">{GPS_UNAVAILABLE_NOTICE}</p>;
+  return null;
+}
+
+export function RouteView({ route, sending, onAcknowledge, marking, tracking }: {
+  route: DriverRoute; sending: boolean; onAcknowledge: Acknowledge; marking?: Marking; tracking?: TrackingState;
 }) {
   return <section id={`route-${route.routeId}`} data-testid={`route-${route.routeId}`}>
     <h3>{`${route.startTime}-${route.endTime}, ${route.vehiclePlate}, version ${route.version}`}</h3>
@@ -331,6 +341,7 @@ export function RouteView({ route, sending, onAcknowledge, marking }: {
     {marking && route.status === "publicado" && <button type="button" disabled={marking.sending} onClick={() => marking.onStart(route)}>Start Recorrido</button>}
     {marking && route.status === "en_curso" && <>
       <p>Recorrido en curso.</p>
+      <TrackingStatus state={tracking} />
       <button type="button" disabled={marking.sending} onClick={() => marking.onClose(route)}>Close Recorrido</button>
       {marking.refusedClose?.routeId === route.routeId && <CloseRefusal transfers={stillOpen(route, marking.refusedClose.transfers, marking)} />}
     </>}
@@ -342,13 +353,21 @@ export function RouteView({ route, sending, onAcknowledge, marking }: {
   </section>;
 }
 
-export function DayView({ title, day, sending, onAcknowledge, marking }: {
+export function DayView({ title, day, sending, onAcknowledge, marking, tracking }: {
   title: string; day: DriverDay; sending: boolean; onAcknowledge: Acknowledge; marking?: Marking;
+  tracking?: { routeId: number; state: TrackingState } | null;
 }) {
   return <section>
     <h2>{`${title} (${day.date})`}</h2>
     {day.routes.length
-      ? day.routes.map((route) => <RouteView key={route.routeId} route={route} sending={sending} onAcknowledge={onAcknowledge} marking={marking} />)
+      ? day.routes.map((route) => <RouteView
+        key={route.routeId}
+        route={route}
+        sending={sending}
+        onAcknowledge={onAcknowledge}
+        marking={marking}
+        tracking={tracking?.routeId === route.routeId ? tracking.state : undefined}
+      />)
       : <p>No published Recorridos.</p>}
   </section>;
 }
@@ -393,6 +412,7 @@ export function DriverHome({ apiUrl, userId, onSignedOut }: { apiUrl: string; us
   const [local, setLocal] = useState<QueuedMark[]>([]);
   const [handover, setHandover] = useState<Marking["handover"]>(null);
   const [refusedClose, setRefusedClose] = useState<Marking["refusedClose"]>(null);
+  const [trackingState, setTrackingState] = useState<TrackingState>("idle");
   const [store] = useState(() => indexedDbStore());
   const [session] = useState(() => () => fetch(`${apiUrl}/auth/me`, { credentials: "include" }));
   const [queue] = useState(() => markQueue(store, (routeId, mark) => sendMark(apiUrl, routeId, mark), session));
@@ -470,10 +490,22 @@ export function DriverHome({ apiUrl, userId, onSignedOut }: { apiUrl: string; us
     void requestPersistentStorage(navigator.storage);
     void registerPushSubscription(apiUrl);
   }, [store, userId, refreshLocal, apiUrl]);
+  const [today] = driverDays();
+  const days = plan ? visibleDays(plan.days) : null;
+  const activeRouteId = activeTrackingRouteId(days);
+
   useEffect(() => startRefetching(window, document, () => void load()), [load]);
   useEffect(() => startFlushing(window, document, () => void flush()), [flush]);
+  useEffect(() => startTracking({
+    routeId: activeRouteId,
+    doc: document,
+    geolocation: navigator.geolocation,
+    send: (routeId, positions) => sendPositions(apiUrl, routeId, positions),
+    onStateChange: setTrackingState,
+    onUnauthorized: (response) => void endSession(response),
+  }), [activeRouteId, apiUrl, endSession]);
   useEffect(() => {
-    if (typeof window === "undefined") return;
+    if (typeof window === "undefined" || !window.location || typeof document === "undefined" || typeof document.getElementById !== "function") return;
     const params = new URLSearchParams(window.location.search);
     const targetRouteId = params.get("routeId");
     if (!targetRouteId) return;
@@ -617,9 +649,8 @@ export function DriverHome({ apiUrl, userId, onSignedOut }: { apiUrl: string; us
     onSearch: (route, stop) => void downloadHandover(route, stop, true),
   };
 
-  const [today] = driverDays();
-  const days = plan ? visibleDays(plan.days) : null;
   const showIosInstructions = isIosDevice() && !isStandalonePwa();
+  const tracking = activeRouteId !== null ? { routeId: activeRouteId, state: trackingState } : null;
   return <>
     {showIosInstructions && (
       <div data-testid="ios-install-instructions" role="region" aria-label="Instrucciones para iPhone">
@@ -638,6 +669,7 @@ export function DriverHome({ apiUrl, userId, onSignedOut }: { apiUrl: string; us
           sending={sending}
           onAcknowledge={(routeId, version) => void acknowledge(routeId, version)}
           marking={marking}
+          tracking={tracking}
         />)
         : <p>No plan saved on the phone for today.</p>
       : <p>Loading your Recorridos...</p>}

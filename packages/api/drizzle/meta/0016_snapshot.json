@@ -1,5 +1,5 @@
 {
-  "id": "0bc7a979-e161-469d-8272-a5f7142e459d",
+  "id": "067cc1af-4fbf-4a4b-8b6e-456887082e5a",
   "prevId": "b8d2d4e7-5834-4d60-8fdb-328e5886cf20",
   "version": "7",
   "dialect": "postgresql",
@@ -2072,8 +2072,8 @@
       },
       "isRLSEnabled": false
     },
-    "public.push_subscriptions": {
-      "name": "push_subscriptions",
+    "public.positions": {
+      "name": "positions",
       "schema": "",
       "columns": {
         "id": {
@@ -2083,7 +2083,7 @@
           "notNull": true,
           "identity": {
             "type": "always",
-            "name": "push_subscriptions_id_seq",
+            "name": "positions_id_seq",
             "schema": "public",
             "increment": "1",
             "startWith": "1",
@@ -2093,32 +2093,44 @@
             "cycle": false
           }
         },
-        "session_id": {
-          "name": "session_id",
+        "route_id": {
+          "name": "route_id",
           "type": "integer",
           "primaryKey": false,
           "notNull": true
         },
-        "endpoint": {
-          "name": "endpoint",
-          "type": "text",
+        "driver_id": {
+          "name": "driver_id",
+          "type": "integer",
           "primaryKey": false,
           "notNull": true
         },
-        "p256dh": {
-          "name": "p256dh",
-          "type": "text",
+        "latitude": {
+          "name": "latitude",
+          "type": "double precision",
           "primaryKey": false,
           "notNull": true
         },
-        "auth": {
-          "name": "auth",
-          "type": "text",
+        "longitude": {
+          "name": "longitude",
+          "type": "double precision",
           "primaryKey": false,
           "notNull": true
         },
-        "created_at": {
-          "name": "created_at",
+        "accuracy_meters": {
+          "name": "accuracy_meters",
+          "type": "double precision",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "phone_time": {
+          "name": "phone_time",
+          "type": "timestamp with time zone",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "server_time": {
+          "name": "server_time",
           "type": "timestamp with time zone",
           "primaryKey": false,
           "notNull": true,
@@ -2126,11 +2138,17 @@
         }
       },
       "indexes": {
-        "push_subscriptions_endpoint_unique": {
-          "name": "push_subscriptions_endpoint_unique",
+        "positions_route_phone_time_unique": {
+          "name": "positions_route_phone_time_unique",
           "columns": [
             {
-              "expression": "endpoint",
+              "expression": "route_id",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            },
+            {
+              "expression": "phone_time",
               "isExpression": false,
               "asc": true,
               "nulls": "last"
@@ -2141,11 +2159,11 @@
           "method": "btree",
           "with": {}
         },
-        "push_subscriptions_session_id_idx": {
-          "name": "push_subscriptions_session_id_idx",
+        "positions_server_time_index": {
+          "name": "positions_server_time_index",
           "columns": [
             {
-              "expression": "session_id",
+              "expression": "server_time",
               "isExpression": false,
               "asc": true,
               "nulls": "last"
@@ -2158,24 +2176,50 @@
         }
       },
       "foreignKeys": {
-        "push_subscriptions_session_id_sessions_id_fk": {
-          "name": "push_subscriptions_session_id_sessions_id_fk",
-          "tableFrom": "push_subscriptions",
-          "tableTo": "sessions",
+        "positions_route_id_routes_id_fk": {
+          "name": "positions_route_id_routes_id_fk",
+          "tableFrom": "positions",
+          "tableTo": "routes",
           "columnsFrom": [
-            "session_id"
+            "route_id"
           ],
           "columnsTo": [
             "id"
           ],
-          "onDelete": "cascade",
+          "onDelete": "restrict",
+          "onUpdate": "no action"
+        },
+        "positions_driver_id_drivers_id_fk": {
+          "name": "positions_driver_id_drivers_id_fk",
+          "tableFrom": "positions",
+          "tableTo": "drivers",
+          "columnsFrom": [
+            "driver_id"
+          ],
+          "columnsTo": [
+            "id"
+          ],
+          "onDelete": "restrict",
           "onUpdate": "no action"
         }
       },
       "compositePrimaryKeys": {},
       "uniqueConstraints": {},
       "policies": {},
-      "checkConstraints": {},
+      "checkConstraints": {
+        "positions_latitude_check": {
+          "name": "positions_latitude_check",
+          "value": "\"positions\".\"latitude\" BETWEEN -90 AND 90"
+        },
+        "positions_longitude_check": {
+          "name": "positions_longitude_check",
+          "value": "\"positions\".\"longitude\" BETWEEN -180 AND 180"
+        },
+        "positions_accuracy_check": {
+          "name": "positions_accuracy_check",
+          "value": "\"positions\".\"accuracy_meters\" >= 0 AND \"positions\".\"accuracy_meters\" < 'Infinity'::double precision"
+        }
+      },
       "isRLSEnabled": false
     },
     "public.remembered_devices": {

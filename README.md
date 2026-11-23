@@ -47,7 +47,7 @@ During the day the Oficina can change a Recorrido En curso and publish it again 
 
 ## Hosting and infrastructure setup
 
-To set up the production and staging accounts and infrastructure (Hetzner VPS in Germany, firewall rules, server hardening over SSH, Docker and Compose, GHCR access, Scaleway backup bucket in Paris, DNS records, UptimeRobot monitoring, and GitHub deploy secrets), run the committed bash wizard:
+To set up the production and staging accounts and infrastructure (Hostinger VPS KVM 2 in Germany, firewall rules, server hardening over SSH, Docker and Compose, GHCR access, Scaleway backup bucket in Paris, DNS records, UptimeRobot monitoring, and GitHub deploy secrets), run the committed bash wizard:
 
 ```sh
 bash infra/wizard/hosting.sh
