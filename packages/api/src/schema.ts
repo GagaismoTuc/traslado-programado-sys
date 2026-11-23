@@ -42,6 +42,18 @@ export const rememberedDevices = pgTable("remembered_devices", {
   expiresAt: timestamp("expires_at", { withTimezone: true, mode: "string" }).notNull(),
 });
 
+export const pushSubscriptions = pgTable("push_subscriptions", {
+  id: integer().generatedAlwaysAsIdentity().primaryKey(),
+  sessionId: integer("session_id").notNull().references(() => sessions.id, { onDelete: "cascade" }),
+  endpoint: text().notNull(),
+  p256dh: text().notNull(),
+  auth: text().notNull(),
+  createdAt: timestamp("created_at", { withTimezone: true, mode: "string" }).defaultNow().notNull(),
+}, (table) => [
+  uniqueIndex("push_subscriptions_endpoint_unique").on(table.endpoint),
+  index("push_subscriptions_session_id_idx").on(table.sessionId),
+]);
+
 export const changeLog = pgTable("change_log", {
   id: integer().generatedAlwaysAsIdentity().primaryKey(),
   actorUserId: integer("actor_user_id").references(() => users.id, { onDelete: "restrict" }),
@@ -461,4 +473,24 @@ export const absences = pgTable("absences", {
   createdAt: timestamp("created_at", { withTimezone: true, mode: "string" }).defaultNow().notNull(),
 }, (table) => [
   uniqueIndex("absences_transfer_unique").on(table.transferId),
+]);
+
+// A Posición reported by the Chofer's phone during Seguimiento of a Recorrido en curso.
+// Stored separately from Marcas (never purged) and never references Pasajeros; purged after 90 days.
+// The app role can SELECT, INSERT and DELETE (for the 90-day purge), never UPDATE.
+export const positions = pgTable("positions", {
+  id: integer().generatedAlwaysAsIdentity().primaryKey(),
+  routeId: integer("route_id").notNull().references(() => routes.id, { onDelete: "restrict" }),
+  driverId: integer("driver_id").notNull().references(() => drivers.id, { onDelete: "restrict" }),
+  latitude: doublePrecision().notNull(),
+  longitude: doublePrecision().notNull(),
+  accuracyMeters: doublePrecision("accuracy_meters").notNull(),
+  phoneTime: timestamp("phone_time", { withTimezone: true, mode: "string" }).notNull(),
+  serverTime: timestamp("server_time", { withTimezone: true, mode: "string" }).defaultNow().notNull(),
+}, (table) => [
+  uniqueIndex("positions_route_phone_time_unique").on(table.routeId, table.phoneTime),
+  index("positions_server_time_index").on(table.serverTime),
+  check("positions_latitude_check", sql`${table.latitude} BETWEEN -90 AND 90`),
+  check("positions_longitude_check", sql`${table.longitude} BETWEEN -180 AND 180`),
+  check("positions_accuracy_check", sql`${table.accuracyMeters} >= 0 AND ${table.accuracyMeters} < 'Infinity'::double precision`),
 ]);

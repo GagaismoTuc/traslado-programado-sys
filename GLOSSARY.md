@@ -139,3 +139,24 @@ _Avoid_: traspaso, transbordo, cambio de vehículo
 **Incidente** (Incident):
 A problem reported by a Chofer during a Recorrido, such as a delay, a vehicle fault or an accident.
 _Avoid_: emergencia, novedad
+
+## Following the day
+
+**Seguimiento** (Tracking):
+The Chofer's phone reporting where it is, from the moment a Recorrido is started until it is closed, while the driver app is open on screen. Only the Chofer's phone is followed; a Pasajero never is.
+_Avoid_: rastreo, monitoreo, GPS
+
+**Posición** (Position):
+Where the Chofer's phone was at one moment of the Seguimiento of a Recorrido, with the accuracy the phone reported. It is not a Marca and proves nothing about a Pasajero.
+_Avoid_: ubicación (the place recorded on a Marca), punto GPS
+
+**Rastro** (Trail):
+The Posiciones of one Recorrido in the order the phone took them.
+_Avoid_: recorrido hecho, historial, track
+
+**Posición desactualizada** (Stale position):
+The latest Posición of a Recorrido en curso when the phone has stopped reporting for longer than the Oficina should trust it, for example because the app went to the background or lost signal.
+_Avoid_: sin señal (that is one possible cause, not the state)
+
+On the map, the Oficina follows a Recorrido, and a Pasajero through the Recorrido that carries them; "persona" on the map means one of those two, never a Pasajero's own device.
+

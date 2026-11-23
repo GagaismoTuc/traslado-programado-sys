@@ -113,6 +113,20 @@
       "when": 1793579170563,
       "tag": "0015_wet_vanisher",
       "breakpoints": true
+    },
+    {
+      "idx": 16,
+      "version": "7",
+      "when": 1795433652329,
+      "tag": "0016_clear_captain_britain",
+      "breakpoints": true
+    },
+    {
+      "idx": 17,
+      "version": "7",
+      "when": 1795468957435,
+      "tag": "0017_puzzling_sage",
+      "breakpoints": true
     }
   ]
 }

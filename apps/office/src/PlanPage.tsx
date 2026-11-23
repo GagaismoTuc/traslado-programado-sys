@@ -98,6 +98,12 @@ export function todayInPlanZone(now = new Date()) {
   return new Intl.DateTimeFormat("en-CA", { timeZone: PLAN_TIME_ZONE }).format(now);
 }
 
+export function weekdayName(dateStr: string, locale = "en-US"): string {
+  const [year, month, day] = dateStr.split("-").map(Number);
+  const d = new Date(Date.UTC(year, month - 1, day, 12, 0, 0));
+  return new Intl.DateTimeFormat(locale, { weekday: "long", timeZone: "UTC" }).format(d);
+}
+
 function kmLabel(km: number | null) {
   return km === null ? "km not computed yet" : `${km.toFixed(1)} km`;
 }
@@ -237,10 +243,22 @@ export function MissingAcknowledgements({ missing }: { missing: MissingAcknowled
   </section>;
 }
 
-export function PlanPage() {
-  const [date, setDate] = useState(todayInPlanZone);
+export function PlanPage({ initialDate, initialView }: {
+  initialDate?: string;
+  initialView?: { date: string; day: Day | null; missing: boolean; unacknowledged?: MissingAcknowledgement[] };
+} = {}) {
+  const [date, setDate] = useState(() => {
+    if (initialDate) return initialDate;
+    if (typeof window !== "undefined") {
+      const q = new URLSearchParams(window.location.search).get("date");
+      if (q && /^\d{4}-\d{2}-\d{2}$/.test(q)) return q;
+    }
+    return todayInPlanZone();
+  });
   // The loaded view remembers its date, so a day is shown and mutable only while that date is selected.
-  const [view, setView] = useState<{ date: string; day: Day | null; missing: boolean; unacknowledged: MissingAcknowledgement[] } | null>(null);
+  const [view, setView] = useState<{ date: string; day: Day | null; missing: boolean; unacknowledged: MissingAcknowledgement[] } | null>(() => (
+    initialView ? { unacknowledged: [], ...initialView } : null
+  ));
   const [passengers, setPassengers] = useState<PassengerOption[]>([]);
   const [destinations, setDestinations] = useState<Option[]>([]);
   const [drivers, setDrivers] = useState<DriverOption[]>([]);
@@ -253,11 +271,13 @@ export function PlanPage() {
   // The last "Order" answer per Recorrido, so what the engine could not place stays on screen.
   const [orders, setOrders] = useState<Record<number, OrderResult>>({});
   const [refusal, setRefusal] = useState<Refusal | null>(null);
+  const [printRefusal, setPrintRefusal] = useState<{ message: string; transfers: Transfer[] } | null>(null);
   const [cascade, setCascade] = useState<CascadeWarning[]>([]);
   const [warnings, setWarnings] = useState<DocumentWarning[]>([]);
   const [warningsUnavailable, setWarningsUnavailable] = useState(false);
   const [summary, setSummary] = useState<DaySummary | null>(null);
   const [publishing, setPublishing] = useState(false);
+  const [copying, setCopying] = useState(false);
   // The salida whose Autorización puntual panel is open.
   const [authorizing, setAuthorizing] = useState<number | null>(null);
   const selectedDate = useRef(date);
@@ -306,6 +326,7 @@ export function PlanPage() {
   useEffect(() => {
     // Publication results belong to the day they were made for.
     setRefusal(null);
+    setPrintRefusal(null);
     setCascade([]);
     setWarnings([]);
     setWarningsUnavailable(false);
@@ -390,6 +411,44 @@ export function PlanPage() {
     } finally {
       setPublishing(false);
     }
+  }
+
+  async function copyLastWeekday() {
+    setCopying(true);
+    try {
+      const response = await send(`/daily-plans/${date}/copy-last-weekday`, "POST");
+      if (await redirectUnauthorized(response)) return;
+      if (!response.ok) {
+        setMessage(await readError(response, "Unable to copy plan"));
+        return;
+      }
+      const result = await response.json() as {
+        copiedFromDate: string;
+        skippedPassengers: { id: number; name: string }[];
+        day: Day;
+      };
+      const skippedMsg = result.skippedPassengers.length > 0
+        ? ` Skipped deactivated passengers: ${result.skippedPassengers.map((p) => p.name).join(", ")}.`
+        : "";
+      setMessage(`Copied from ${result.copiedFromDate}.${skippedMsg}`);
+      await load(selectedDate.current);
+    } catch {
+      setMessage("Unable to reach the server");
+    } finally {
+      setCopying(false);
+    }
+  }
+
+  function handlePrintExport() {
+    if (view?.day && view.day.unpublishedTransferIds.length > 0) {
+      const unpublished = view.day.transfers.filter((t) => view.day!.unpublishedTransferIds.includes(t.id));
+      setPrintRefusal({
+        message: "The Plan diario cannot be printed: some Traslados have no published Recorrido",
+        transfers: unpublished,
+      });
+      return;
+    }
+    window.location.assign(`/plan/print?date=${date}`);
   }
 
   function submit(handler: (values: FormData) => Promise<boolean>) {
@@ -487,6 +546,11 @@ export function PlanPage() {
     <CascadeWarnings cascade={cascade} routes={view?.day?.routes ?? []} />
     <DocumentWarnings warnings={warnings} unavailable={warningsUnavailable} routes={view?.day?.routes ?? []} />
     {missing && <button type="button" onClick={() => void write("/daily-plans", "POST", { date }, "Plan diario created")}>Create plan</button>}
+    {(missing || (day && day.transfers.length === 0)) && (
+      <button type="button" disabled={copying} onClick={() => void copyLastWeekday()}>
+        {`Copy from last ${weekdayName(date)}`}
+      </button>
+    )}
     {day && <>
       <p>Times are local to {day.plan.timeZone}. Day total: {kmLabel(day.km)}</p>
       <UnpublishedTransfers day={day} />
@@ -642,7 +706,14 @@ export function PlanPage() {
           </form>}
         </div>}
       </li>)}</ul>
-      <button type="button" disabled={publishing} onClick={() => void publishDay()}>Publish the whole plan</button>
+      <div className="plan-actions">
+        <button type="button" disabled={publishing} onClick={() => void publishDay()}>Publish the whole plan</button>
+        <button type="button" onClick={handlePrintExport}>Print or export Plan diario</button>
+      </div>
+      {printRefusal && <div role="alert" data-testid="print-refusal">
+        <p>{printRefusal.message}</p>
+        <ul>{printRefusal.transfers.map((t) => <li key={t.id}>{transferLabel(t)}</li>)}</ul>
+      </div>}
       {summary && <DaySummaryView summary={summary} routes={routes} />}
 
       <form onSubmit={addRoute}>

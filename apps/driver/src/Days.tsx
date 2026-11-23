@@ -7,6 +7,9 @@ import {
   indexedDbStore, latestMarks, markQueue, refusedMarks, requestPersistentStorage, savedPlanFor, signOut, startFlushing, wipeIfRevoked, type CachedPlan,
   type QueuedMark, type SignOutOutcome,
 } from "./offline";
+import {
+  activeTrackingRouteId, GPS_UNAVAILABLE_NOTICE, LOCATION_PERMISSION_NOTICE, sendPositions, startTracking, TRACKING_ACTIVE_TEXT, type TrackingState,
+} from "./Tracking";
 
 export type DriverStop = {
   position: number;
@@ -36,6 +39,81 @@ export type DriverRoute = {
   // From version 2 on: what changed since the version the Chofer acknowledged, or since the previous one.
   changes?: { sinceVersion: number; items: VersionChange[] };
 };
+export function isIosDevice(nav: Partial<Navigator> = typeof navigator !== "undefined" ? navigator : {}): boolean {
+  const ua = nav.userAgent || "";
+  const platform = (nav as any).platform || "";
+  const maxTouchPoints = (nav as any).maxTouchPoints || 0;
+  return /iPad|iPhone|iPod/.test(ua) || (platform === "MacIntel" && maxTouchPoints > 1);
+}
+
+export function isStandalonePwa(win: Partial<Window> = typeof window !== "undefined" ? window : {}): boolean {
+  if (win.matchMedia?.("(display-mode: standalone)").matches === true) return true;
+  if ((win.navigator as unknown as { standalone?: boolean })?.standalone === true) return true;
+  return false;
+}
+
+export function urlBase64ToUint8Array(base64String: string): Uint8Array {
+  const padding = "=".repeat((4 - (base64String.length % 4)) % 4);
+  const base64 = (base64String + padding).replace(/-/g, "+").replace(/_/g, "/");
+  const rawData = atob(base64);
+  const outputArray = new Uint8Array(rawData.length);
+  for (let i = 0; i < rawData.length; ++i) {
+    outputArray[i] = rawData.charCodeAt(i);
+  }
+  return outputArray;
+}
+
+export async function registerPushSubscription(apiUrl: string, nav: any = typeof navigator !== "undefined" ? navigator : {}): Promise<boolean> {
+  if (!nav || !("serviceWorker" in nav) || typeof PushManager === "undefined") {
+    return false;
+  }
+  try {
+    const keyRes = await fetch(`${apiUrl}/push/public-key`, { credentials: "include" });
+    if (!keyRes.ok) return false;
+    const { publicKey } = await keyRes.json() as { publicKey?: string | null };
+    if (!publicKey) return false;
+
+    if (typeof Notification !== "undefined") {
+      if (Notification.permission === "default" && typeof Notification.requestPermission === "function") {
+        const permission = await Notification.requestPermission();
+        if (permission !== "granted") return false;
+      } else if (Notification.permission !== "granted") {
+        return false;
+      }
+    }
+
+    const registration = await nav.serviceWorker.ready;
+    let subscription = await registration.pushManager.getSubscription();
+    if (!subscription) {
+      const convertedKey = urlBase64ToUint8Array(publicKey);
+      subscription = await registration.pushManager.subscribe({
+        userVisibleOnly: true,
+        applicationServerKey: convertedKey,
+      });
+    }
+
+    const subJson = subscription.toJSON ? subscription.toJSON() : subscription;
+    if (subJson.endpoint && subJson.keys?.p256dh && subJson.keys?.auth) {
+      const res = await fetch(`${apiUrl}/push/subscriptions`, {
+        method: "POST",
+        credentials: "include",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          endpoint: subJson.endpoint,
+          keys: {
+            p256dh: subJson.keys.p256dh,
+            auth: subJson.keys.auth,
+          },
+        }),
+      });
+      return res.ok;
+    }
+  } catch {
+    // Non-blocking
+  }
+  return false;
+}
+
 export type VersionChange =
   | { kind: "vehicle"; from: string; to: string }
   | { kind: "added" | "removed"; transferId: number; passengerName: string }
@@ -239,10 +317,17 @@ export function CloseRefusal({ transfers }: { transfers: OpenTransfer[] }) {
   </div>;
 }
 
-export function RouteView({ route, sending, onAcknowledge, marking }: {
-  route: DriverRoute; sending: boolean; onAcknowledge: Acknowledge; marking?: Marking;
+function TrackingStatus({ state }: { state: TrackingState | undefined }) {
+  if (state === "active") return <p role="status">{TRACKING_ACTIVE_TEXT}</p>;
+  if (state === "permission_denied") return <p role="alert">{LOCATION_PERMISSION_NOTICE}</p>;
+  if (state === "gps_unavailable") return <p role="alert">{GPS_UNAVAILABLE_NOTICE}</p>;
+  return null;
+}
+
+export function RouteView({ route, sending, onAcknowledge, marking, tracking }: {
+  route: DriverRoute; sending: boolean; onAcknowledge: Acknowledge; marking?: Marking; tracking?: TrackingState;
 }) {
-  return <section>
+  return <section id={`route-${route.routeId}`} data-testid={`route-${route.routeId}`}>
     <h3>{`${route.startTime}-${route.endTime}, ${route.vehiclePlate}, version ${route.version}`}</h3>
     {route.acknowledgedVersion === route.version
       ? <p>{`You acknowledged version ${route.version}.`}</p>
@@ -256,6 +341,7 @@ export function RouteView({ route, sending, onAcknowledge, marking }: {
     {marking && route.status === "publicado" && <button type="button" disabled={marking.sending} onClick={() => marking.onStart(route)}>Start Recorrido</button>}
     {marking && route.status === "en_curso" && <>
       <p>Recorrido en curso.</p>
+      <TrackingStatus state={tracking} />
       <button type="button" disabled={marking.sending} onClick={() => marking.onClose(route)}>Close Recorrido</button>
       {marking.refusedClose?.routeId === route.routeId && <CloseRefusal transfers={stillOpen(route, marking.refusedClose.transfers, marking)} />}
     </>}
@@ -267,13 +353,21 @@ export function RouteView({ route, sending, onAcknowledge, marking }: {
   </section>;
 }
 
-export function DayView({ title, day, sending, onAcknowledge, marking }: {
+export function DayView({ title, day, sending, onAcknowledge, marking, tracking }: {
   title: string; day: DriverDay; sending: boolean; onAcknowledge: Acknowledge; marking?: Marking;
+  tracking?: { routeId: number; state: TrackingState } | null;
 }) {
   return <section>
     <h2>{`${title} (${day.date})`}</h2>
     {day.routes.length
-      ? day.routes.map((route) => <RouteView key={route.routeId} route={route} sending={sending} onAcknowledge={onAcknowledge} marking={marking} />)
+      ? day.routes.map((route) => <RouteView
+        key={route.routeId}
+        route={route}
+        sending={sending}
+        onAcknowledge={onAcknowledge}
+        marking={marking}
+        tracking={tracking?.routeId === route.routeId ? tracking.state : undefined}
+      />)
       : <p>No published Recorridos.</p>}
   </section>;
 }
@@ -318,6 +412,7 @@ export function DriverHome({ apiUrl, userId, onSignedOut }: { apiUrl: string; us
   const [local, setLocal] = useState<QueuedMark[]>([]);
   const [handover, setHandover] = useState<Marking["handover"]>(null);
   const [refusedClose, setRefusedClose] = useState<Marking["refusedClose"]>(null);
+  const [trackingState, setTrackingState] = useState<TrackingState>("idle");
   const [store] = useState(() => indexedDbStore());
   const [session] = useState(() => () => fetch(`${apiUrl}/auth/me`, { credentials: "include" }));
   const [queue] = useState(() => markQueue(store, (routeId, mark) => sendMark(apiUrl, routeId, mark), session));
@@ -393,9 +488,32 @@ export function DriverHome({ apiUrl, userId, onSignedOut }: { apiUrl: string; us
     }).catch(() => undefined);
     void refreshLocal();
     void requestPersistentStorage(navigator.storage);
-  }, [store, userId, refreshLocal]);
+    void registerPushSubscription(apiUrl);
+  }, [store, userId, refreshLocal, apiUrl]);
+  const [today] = driverDays();
+  const days = plan ? visibleDays(plan.days) : null;
+  const activeRouteId = activeTrackingRouteId(days);
+
   useEffect(() => startRefetching(window, document, () => void load()), [load]);
   useEffect(() => startFlushing(window, document, () => void flush()), [flush]);
+  useEffect(() => startTracking({
+    routeId: activeRouteId,
+    doc: document,
+    geolocation: navigator.geolocation,
+    send: (routeId, positions) => sendPositions(apiUrl, routeId, positions),
+    onStateChange: setTrackingState,
+    onUnauthorized: (response) => void endSession(response),
+  }), [activeRouteId, apiUrl, endSession]);
+  useEffect(() => {
+    if (typeof window === "undefined" || !window.location || typeof document === "undefined" || typeof document.getElementById !== "function") return;
+    const params = new URLSearchParams(window.location.search);
+    const targetRouteId = params.get("routeId");
+    if (!targetRouteId) return;
+    const el = document.getElementById(`route-${targetRouteId}`);
+    if (el && typeof el.scrollIntoView === "function") {
+      el.scrollIntoView({ behavior: "smooth" });
+    }
+  }, [plan]);
 
   async function closeSession() {
     setSending(true);
@@ -531,9 +649,14 @@ export function DriverHome({ apiUrl, userId, onSignedOut }: { apiUrl: string; us
     onSearch: (route, stop) => void downloadHandover(route, stop, true),
   };
 
-  const [today] = driverDays();
-  const days = plan ? visibleDays(plan.days) : null;
+  const showIosInstructions = isIosDevice() && !isStandalonePwa();
+  const tracking = activeRouteId !== null ? { routeId: activeRouteId, state: trackingState } : null;
   return <>
+    {showIosInstructions && (
+      <div data-testid="ios-install-instructions" role="region" aria-label="Instrucciones para iPhone">
+        <p>Para recibir notificaciones en iPhone, agregá esta app a la pantalla de inicio desde Compartir &gt; Agregar al inicio.</p>
+      </div>
+    )}
     <button type="button" disabled={sending} onClick={() => void closeSession()}>Cerrar sesión</button>
     {loadError && <p role="alert">{loadError}</p>}
     {message && <p role="status">{message}</p>}
@@ -546,6 +669,7 @@ export function DriverHome({ apiUrl, userId, onSignedOut }: { apiUrl: string; us
           sending={sending}
           onAcknowledge={(routeId, version) => void acknowledge(routeId, version)}
           marking={marking}
+          tracking={tracking}
         />)
         : <p>No plan saved on the phone for today.</p>
       : <p>Loading your Recorridos...</p>}
