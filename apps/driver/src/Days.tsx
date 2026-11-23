@@ -10,6 +10,7 @@ import {
 import {
   activeTrackingRouteId, GPS_UNAVAILABLE_NOTICE, LOCATION_PERMISSION_NOTICE, positionQueue, sendPositions, startTracking, TRACKING_ACTIVE_TEXT, type TrackingState,
 } from "./Tracking";
+import { KEEP_SCREEN_ON_NOTICE, startWakeLock, type ScreenWakeLock, type ScreenWakeState } from "./WakeLock";
 
 export type DriverStop = {
   position: number;
@@ -366,8 +367,8 @@ function TrackingStatus({ state }: { state: TrackingState | undefined }) {
   return null;
 }
 
-export function RouteView({ route, sending, onAcknowledge, marking, tracking }: {
-  route: DriverRoute; sending: boolean; onAcknowledge: Acknowledge; marking?: Marking; tracking?: TrackingState;
+export function RouteView({ route, sending, onAcknowledge, marking, tracking, keepScreenOn }: {
+  route: DriverRoute; sending: boolean; onAcknowledge: Acknowledge; marking?: Marking; tracking?: TrackingState; keepScreenOn?: boolean;
 }) {
   return <section id={`route-${route.routeId}`} data-testid={`route-${route.routeId}`}>
     <h3>{`${route.startTime}-${route.endTime}, ${route.vehiclePlate}, version ${route.version}`}</h3>
@@ -384,6 +385,7 @@ export function RouteView({ route, sending, onAcknowledge, marking, tracking }: 
     {marking && route.status === "en_curso" && <>
       <p>Recorrido en curso.</p>
       <TrackingStatus state={tracking} />
+      {keepScreenOn && <p role="alert">{KEEP_SCREEN_ON_NOTICE}</p>}
       <button type="button" disabled={marking.sending} onClick={() => marking.onClose(route)}>Close Recorrido</button>
       {marking.refusedClose?.routeId === route.routeId && <CloseRefusal transfers={stillOpen(route, marking.refusedClose.transfers, marking)} />}
     </>}
@@ -400,7 +402,7 @@ export function RouteView({ route, sending, onAcknowledge, marking, tracking }: 
 
 export function DayView({ title, day, sending, onAcknowledge, marking, tracking }: {
   title: string; day: DriverDay; sending: boolean; onAcknowledge: Acknowledge; marking?: Marking;
-  tracking?: { routeId: number; state: TrackingState } | null;
+  tracking?: { routeId: number; state: TrackingState; keepScreenOn?: boolean } | null;
 }) {
   return <section>
     <h2>{`${title} (${day.date})`}</h2>
@@ -412,6 +414,7 @@ export function DayView({ title, day, sending, onAcknowledge, marking, tracking 
         onAcknowledge={onAcknowledge}
         marking={marking}
         tracking={tracking?.routeId === route.routeId ? tracking.state : undefined}
+        keepScreenOn={tracking?.routeId === route.routeId && tracking.keepScreenOn === true}
       />)
       : <p>No published Recorridos.</p>}
   </section>;
@@ -458,6 +461,7 @@ export function DriverHome({ apiUrl, userId, onSignedOut }: { apiUrl: string; us
   const [handover, setHandover] = useState<Marking["handover"]>(null);
   const [refusedClose, setRefusedClose] = useState<Marking["refusedClose"]>(null);
   const [trackingState, setTrackingState] = useState<TrackingState>("idle");
+  const [screenState, setScreenState] = useState<ScreenWakeState>("idle");
   const [store] = useState(() => indexedDbStore());
   const [session] = useState(() => () => fetch(`${apiUrl}/auth/me`, { credentials: "include" }));
   const [queue] = useState(() => markQueue(
@@ -560,6 +564,12 @@ export function DriverHome({ apiUrl, userId, onSignedOut }: { apiUrl: string; us
     onStateChange: setTrackingState,
     onUnauthorized: (response) => void endSession(response),
   }), [activeRouteId, positions, endSession]);
+  useEffect(() => startWakeLock({
+    routeId: activeRouteId,
+    doc: document,
+    wakeLock: (navigator as { wakeLock?: ScreenWakeLock }).wakeLock,
+    onStateChange: setScreenState,
+  }), [activeRouteId]);
   useEffect(() => {
     if (typeof window === "undefined" || !window.location || typeof document === "undefined" || typeof document.getElementById !== "function") return;
     const params = new URLSearchParams(window.location.search);
@@ -725,7 +735,9 @@ export function DriverHome({ apiUrl, userId, onSignedOut }: { apiUrl: string; us
   };
 
   const showIosInstructions = isIosDevice() && !isStandalonePwa();
-  const tracking = activeRouteId !== null ? { routeId: activeRouteId, state: trackingState } : null;
+  const tracking = activeRouteId !== null
+    ? { routeId: activeRouteId, state: trackingState, keepScreenOn: screenState === "unavailable" }
+    : null;
   return <>
     {showIosInstructions && (
       <div data-testid="ios-install-instructions" role="region" aria-label="Instrucciones para iPhone">

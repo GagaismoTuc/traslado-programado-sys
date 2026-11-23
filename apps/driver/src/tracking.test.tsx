@@ -1,4 +1,4 @@
-import { act, type ReactElement } from "react";
+import { act, useState, type ReactElement } from "react";
 import { createRoot } from "react-dom/client";
 import { renderToStaticMarkup } from "react-dom/server";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
@@ -16,6 +16,7 @@ import {
   type TrackingGeolocation,
   type TrackingState,
 } from "./Tracking";
+import { KEEP_SCREEN_ON_NOTICE, startWakeLock, type ScreenWakeLock, type ScreenWakeLockSentinel, type ScreenWakeState } from "./WakeLock";
 
 // Synthetic data only.
 const stop: DriverStop = {
@@ -412,6 +413,7 @@ async function mountApp(element: ReactElement, options: {
   visibilityState?: "visible" | "hidden";
   // The phone's IndexedDB from an earlier mount, so a second mount is a reload of the app.
   idb?: ReturnType<typeof fakeIndexedDb>;
+  wakeLock?: ScreenWakeLock;
 }) {
   (globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
   const win = new FakeWindow();
@@ -423,7 +425,7 @@ async function mountApp(element: ReactElement, options: {
 
   vi.stubGlobal("window", win);
   vi.stubGlobal("document", doc);
-  vi.stubGlobal("navigator", { geolocation: options.geolocation, storage: undefined });
+  vi.stubGlobal("navigator", { geolocation: options.geolocation, storage: undefined, wakeLock: options.wakeLock });
   vi.stubGlobal("indexedDB", idb.factory);
   vi.stubGlobal("fetch", options.fetchImpl);
 
@@ -930,6 +932,14 @@ describe("Seguimiento in the driver app", () => {
       <DayView title="Today" day={day} sending={false} onAcknowledge={() => undefined} marking={sampleMarking()} tracking={{ routeId: 9, state: "active" }} />,
     );
     expect(withTracking.match(new RegExp(TRACKING_ACTIVE_TEXT, "g"))).toHaveLength(1);
+    expect(withoutTracking).not.toContain(KEEP_SCREEN_ON_NOTICE);
+    expect(withTracking).not.toContain(KEEP_SCREEN_ON_NOTICE);
+
+    const withNotice = renderToStaticMarkup(
+      <DayView title="Today" day={day} sending={false} onAcknowledge={() => undefined} marking={sampleMarking()} tracking={{ routeId: 9, state: "active", keepScreenOn: true }} />,
+    );
+    expect(withNotice.match(new RegExp(KEEP_SCREEN_ON_NOTICE, "g"))).toHaveLength(1);
+    expect(withNotice).toContain("Close Recorrido");
   });
 
   it("preserves DriverHome initial render with Seguimiento wired", () => {
@@ -1186,6 +1196,276 @@ describe("pending Posiciones on the phone (#136)", () => {
       expect(reloaded.idb.stores.get("positions")?.size).toBe(0);
     } finally {
       await reloaded.unmount();
+    }
+  });
+});
+
+class FakeSentinel extends EventTarget implements ScreenWakeLockSentinel {
+  released = false;
+  release = vi.fn(async () => {
+    this.systemRelease();
+  });
+  /** What the browser does when the page hides or battery saver drops the lock. */
+  systemRelease() {
+    if (this.released) return;
+    this.released = true;
+    this.dispatchEvent(new Event("release"));
+  }
+}
+
+function fakeWakeLock(mode: "grant" | "reject" | "throw" | "deferred" = "grant") {
+  const sentinels: FakeSentinel[] = [];
+  const pending: (() => void)[] = [];
+  const request = vi.fn((type: "screen"): Promise<ScreenWakeLockSentinel> => {
+    if (type !== "screen") throw new Error(`unexpected type ${String(type)}`);
+    if (mode === "throw") throw new Error("Wake Lock crashed");
+    if (mode === "reject") return Promise.reject(new DOMException("Low battery", "NotAllowedError"));
+    const sentinel = new FakeSentinel();
+    sentinels.push(sentinel);
+    if (mode === "deferred") return new Promise((resolve) => pending.push(() => resolve(sentinel)));
+    return Promise.resolve(sentinel);
+  });
+  const resolvePending = () => {
+    for (const resolve of pending.splice(0)) resolve();
+  };
+  const held = () => sentinels.filter((sentinel) => !sentinel.released);
+  return { wakeLock: { request } as ScreenWakeLock, request, sentinels, held, resolvePending };
+}
+
+const settle = async () => {
+  for (let i = 0; i < 4; i += 1) await Promise.resolve();
+};
+
+describe("Pantalla encendida durante el Recorrido en curso", () => {
+  // Synthetic data only: one Recorrido 9 with one pickup (transferId 3).
+  const wakeFetch = (state: { status: string; marks: string[]; loggedOut: boolean }) => vi.fn(async (input: string | URL | Request, init?: RequestInit) => {
+    const url = String(input);
+    if (url.endsWith("/driver/days/2026-10-23")) {
+      return new Response(JSON.stringify({ date: "2026-10-23", routes: [sampleRoute(state.status, 9)] }), { status: 200 });
+    }
+    if (url.endsWith("/driver/days/2026-10-24")) return new Response(JSON.stringify({ date: "2026-10-24", routes: [] }), { status: 200 });
+    if (url.endsWith("/auth/me")) return new Response(JSON.stringify({ serverEpoch: "epoch-1" }), { status: 200 });
+    if (url.endsWith("/auth/logout")) {
+      state.loggedOut = true;
+      return new Response(null, { status: 204 });
+    }
+    if (url.endsWith("/driver/routes/9/positions")) return new Response(JSON.stringify({ saved: 0, ignored: 0 }), { status: 200 });
+    if (url.endsWith("/driver/routes/9/marks")) {
+      const payload = JSON.parse(String(init?.body ?? "{}")) as { id: string; kind: string };
+      state.marks.push(payload.kind);
+      return new Response(JSON.stringify({ mark: { id: payload.id, flags: [] } }), { status: 201 });
+    }
+    if (url.endsWith("/driver/routes/9/close")) {
+      state.status = "cerrado";
+      return new Response(JSON.stringify({ status: "cerrado" }), { status: 200 });
+    }
+    throw new Error(`Unexpected fetch URL: ${url}`);
+  }) as unknown as typeof fetch;
+
+  /** Like App: signing out unmounts DriverHome. */
+  function SignedInHarness() {
+    const [signedIn, setSignedIn] = useState(true);
+    return signedIn ? <DriverHome apiUrl="https://api.example" userId={1} onSignedOut={() => setSignedIn(false)} /> : <p>Signed out</p>;
+  }
+
+  it("requests a screen Wake Lock when a Recorrido is en_curso and the document is visible", async () => {
+    // Hidden at start: waits until the document is visible.
+    const doc = fakeDoc("hidden");
+    const lock = fakeWakeLock();
+    const states: ScreenWakeState[] = [];
+    const stop = startWakeLock({ routeId: 9, doc, wakeLock: lock.wakeLock, onStateChange: (state) => states.push(state) });
+    expect(lock.request).not.toHaveBeenCalled();
+    doc.visibilityState = "visible";
+    doc.dispatchEvent(new Event("visibilitychange"));
+    await settle();
+    expect(lock.request).toHaveBeenCalledTimes(1);
+    expect(lock.request).toHaveBeenCalledWith("screen");
+    expect(lock.held()).toHaveLength(1);
+    expect(states.at(-1)).toBe("held");
+    // A repeated visible event while the lock is held does not ask twice.
+    doc.dispatchEvent(new Event("visibilitychange"));
+    await settle();
+    expect(lock.request).toHaveBeenCalledTimes(1);
+    stop();
+
+    // Mounted app with the Recorrido en curso: one active screen Wake Lock and no notice.
+    const appLock = fakeWakeLock();
+    const app = await mountApp(<DriverHome apiUrl="https://api.example" userId={1} onSignedOut={vi.fn()} />, {
+      geolocation: fakeGeolocation().geolocation,
+      fetchImpl: wakeFetch({ status: "en_curso", marks: [], loggedOut: false }),
+      wakeLock: appLock.wakeLock,
+    });
+    try {
+      expect(appLock.request).toHaveBeenCalledTimes(1);
+      expect(appLock.request).toHaveBeenCalledWith("screen");
+      expect(appLock.held()).toHaveLength(1);
+      expect(app.container.textContent).toContain("Recorrido en curso.");
+      expect(app.container.textContent).not.toContain(KEEP_SCREEN_ON_NOTICE);
+    } finally {
+      await app.unmount();
+    }
+  });
+
+  it("requests the Wake Lock again when the Chofer returns from another app with the Recorrido still en curso", async () => {
+    const lock = fakeWakeLock();
+    const app = await mountApp(<DriverHome apiUrl="https://api.example" userId={1} onSignedOut={vi.fn()} />, {
+      geolocation: fakeGeolocation().geolocation,
+      fetchImpl: wakeFetch({ status: "en_curso", marks: [], loggedOut: false }),
+      wakeLock: lock.wakeLock,
+    });
+    try {
+      expect(lock.request).toHaveBeenCalledTimes(1);
+      expect(lock.held()).toHaveLength(1);
+
+      // Chofer goes to WhatsApp: the system releases the Wake Lock.
+      app.doc.visibilityState = "hidden";
+      lock.sentinels[0].systemRelease();
+      await act(async () => {
+        app.doc.dispatchEvent({ type: "visibilitychange" });
+      });
+      await app.flushWork();
+      expect(lock.held()).toHaveLength(0);
+      expect(lock.request).toHaveBeenCalledTimes(1);
+
+      // Chofer comes back: Wake Lock active again.
+      app.doc.visibilityState = "visible";
+      await act(async () => {
+        app.doc.dispatchEvent({ type: "visibilitychange" });
+      });
+      await app.flushWork();
+      expect(lock.request).toHaveBeenCalledTimes(2);
+      expect(lock.request).toHaveBeenLastCalledWith("screen");
+      expect(lock.held()).toEqual([lock.sentinels[1]]);
+      expect(app.container.textContent).not.toContain(KEEP_SCREEN_ON_NOTICE);
+    } finally {
+      await app.unmount();
+    }
+  });
+
+  it("releases the Wake Lock when the Recorrido closes or the Chofer signs out", async () => {
+    // Closing the Recorrido releases the lock and does not ask again.
+    const closeLock = fakeWakeLock();
+    const closeState = { status: "en_curso", marks: [] as string[], loggedOut: false };
+    const closeApp = await mountApp(<DriverHome apiUrl="https://api.example" userId={1} onSignedOut={vi.fn()} />, {
+      geolocation: fakeGeolocation().geolocation,
+      fetchImpl: wakeFetch(closeState),
+      wakeLock: closeLock.wakeLock,
+    });
+    try {
+      expect(closeLock.held()).toHaveLength(1);
+      await closeApp.click("Close Recorrido");
+      expect(closeState.status).toBe("cerrado");
+      expect(closeApp.container.textContent).toContain("Recorrido closed.");
+      expect(closeLock.sentinels[0].release).toHaveBeenCalledTimes(1);
+      expect(closeLock.held()).toHaveLength(0);
+      expect(closeLock.request).toHaveBeenCalledTimes(1);
+    } finally {
+      await closeApp.unmount();
+    }
+
+    // Signing out (DriverHome unmounts, as in App) releases the lock.
+    const outLock = fakeWakeLock();
+    const outState = { status: "en_curso", marks: [] as string[], loggedOut: false };
+    const outApp = await mountApp(<SignedInHarness />, {
+      geolocation: fakeGeolocation().geolocation,
+      fetchImpl: wakeFetch(outState),
+      wakeLock: outLock.wakeLock,
+    });
+    try {
+      expect(outLock.held()).toHaveLength(1);
+      await outApp.click("Cerrar sesión");
+      expect(outState.loggedOut).toBe(true);
+      expect(outApp.container.textContent).toContain("Signed out");
+      expect(outLock.sentinels[0].release).toHaveBeenCalledTimes(1);
+      expect(outLock.held()).toHaveLength(0);
+    } finally {
+      await outApp.unmount();
+    }
+
+    // A request still pending when the Recorrido closes is released as soon as it arrives.
+    const lateLock = fakeWakeLock("deferred");
+    const stop = startWakeLock({ routeId: 9, doc: fakeDoc("visible"), wakeLock: lateLock.wakeLock, onStateChange: () => undefined });
+    expect(lateLock.request).toHaveBeenCalledTimes(1);
+    stop();
+    lateLock.resolvePending();
+    await settle();
+    expect(lateLock.sentinels[0].release).toHaveBeenCalledTimes(1);
+    expect(lateLock.held()).toHaveLength(0);
+  });
+
+  it("shows the keep-screen-on notice when Wake Lock is unsupported or refused, and never blocks Marcas", async () => {
+    expect(KEEP_SCREEN_ON_NOTICE).toBe("Dejá la pantalla encendida y la app abierta para que la Oficina te siga");
+
+    for (const mode of ["missing", "reject", "throw"] as const) {
+      const states: ScreenWakeState[] = [];
+      const lock = mode === "missing" ? undefined : fakeWakeLock(mode);
+      let stop: () => void = () => undefined;
+      expect(() => {
+        stop = startWakeLock({ routeId: 9, doc: fakeDoc("visible"), wakeLock: lock?.wakeLock, onStateChange: (state) => states.push(state) });
+      }).not.toThrow();
+      await settle();
+      expect(states.at(-1)).toBe("unavailable");
+      stop();
+
+      const state = { status: "en_curso", marks: [] as string[], loggedOut: false };
+      const app = await mountApp(<DriverHome apiUrl="https://api.example" userId={1} onSignedOut={vi.fn()} />, {
+        // The Marca asks for one reading; without a fix it is saved without location.
+        geolocation: { ...fakeGeolocation().geolocation, getCurrentPosition: (_s, e) => { e?.({ code: 3 } as GeolocationPositionError); } },
+        fetchImpl: wakeFetch(state),
+        wakeLock: lock?.wakeLock,
+      });
+      try {
+        expect(app.container.textContent).toContain(KEEP_SCREEN_ON_NOTICE);
+        expect(app.container.textContent).toContain(TRACKING_ACTIVE_TEXT);
+        await app.click("Subió");
+        expect(state.marks).toEqual(["subio"]);
+        expect(app.idb.stores.get("marks")?.size).toBe(1);
+        expect(app.container.textContent).toContain("Marca confirmed by the server");
+      } finally {
+        await app.unmount();
+      }
+    }
+  });
+
+  it("never requests a Wake Lock without a Recorrido en curso", async () => {
+    const lock = fakeWakeLock();
+    const states: ScreenWakeState[] = [];
+    const doc = fakeDoc("visible");
+    const stop = startWakeLock({ routeId: null, doc, wakeLock: lock.wakeLock, onStateChange: (state) => states.push(state) });
+    doc.dispatchEvent(new Event("visibilitychange"));
+    await settle();
+    expect(lock.request).not.toHaveBeenCalled();
+    expect(states).toEqual(["idle"]);
+    stop();
+
+    for (const status of ["publicado", "cerrado"]) {
+      const appLock = fakeWakeLock();
+      const app = await mountApp(<DriverHome apiUrl="https://api.example" userId={1} onSignedOut={vi.fn()} />, {
+        geolocation: fakeGeolocation().geolocation,
+        fetchImpl: wakeFetch({ status, marks: [], loggedOut: false }),
+        wakeLock: appLock.wakeLock,
+      });
+      try {
+        await act(async () => {
+          app.doc.dispatchEvent({ type: "visibilitychange" });
+        });
+        await app.flushWork();
+        expect(appLock.request).not.toHaveBeenCalled();
+        expect(app.container.textContent).not.toContain(KEEP_SCREEN_ON_NOTICE);
+      } finally {
+        await app.unmount();
+      }
+    }
+
+    // Without wakeLock and without a Recorrido en curso there is no notice either.
+    const bare = await mountApp(<DriverHome apiUrl="https://api.example" userId={1} onSignedOut={vi.fn()} />, {
+      geolocation: fakeGeolocation().geolocation,
+      fetchImpl: wakeFetch({ status: "publicado", marks: [], loggedOut: false }),
+    });
+    try {
+      expect(bare.container.textContent).not.toContain(KEEP_SCREEN_ON_NOTICE);
+    } finally {
+      await bare.unmount();
     }
   });
 });
