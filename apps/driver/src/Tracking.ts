@@ -112,6 +112,7 @@ export function startTracking({
     const batch = buffer.slice(0, MAX_BATCH_SIZE);
     try {
       const response = await send(routeId!, batch);
+      if (stopped) return;
       if (response.ok) {
         // Remove only what was sent; readings captured while the request was in flight stay in buffer.
         buffer.splice(0, batch.length);
@@ -129,7 +130,6 @@ export function startTracking({
 
   function onPosition(position: GeolocationPosition) {
     if (stopped) return;
-    setState("active");
     const lat = position.coords?.latitude;
     const lng = position.coords?.longitude;
     const accuracyMeters = position.coords?.accuracy;
@@ -140,6 +140,7 @@ export function startTracking({
     ) {
       return;
     }
+    setState("active");
     if (accuracyMeters > MAX_ACCURACY_METERS) return;
     const timeMs = typeof position.timestamp === "number" && Number.isFinite(position.timestamp) && position.timestamp > 0
       ? position.timestamp
