@@ -108,7 +108,126 @@ export type LiveMapProps = {
   selectedRouteId: number | null;
   trail?: RouteTrail | null;
   onSelectRoute?: (routeId: number) => void;
+  /** While following, where the map centers on every refresh; null leaves the map where it is. */
+  followCenter?: [number, number] | null;
+  highlightedStopId?: number | null;
+  /** The Oficina moved the map by hand (drag, zoom, rotate or pitch). */
+  onManualMove?: () => void;
 };
+
+/** What the Oficina follows: a Recorrido, or a Pasajero through its Recorrido. */
+export type FollowRequest = { kind: "route"; routeId: number } | { kind: "passenger"; passengerId: number };
+
+export type FollowTarget = {
+  center: [number, number] | null;
+  routeId: number | null;
+  highlightStopId: number | null;
+  label: string;
+};
+
+const routeCenter = (route: LiveRoute): [number, number] | null =>
+  route.currentPosition ? [route.currentPosition.longitude, route.currentPosition.latitude] : null;
+
+/**
+ * Recomputed from fresh live data on every refresh. A Pasajero's state comes from its Traslado's stops: a stop
+ * ausente → Ausente; a dropoff entregado → Entregado; a pickup subio → Subió; else planificado. The Traslado used
+ * is the first not terminado (Entregado or Ausente) by target time, or the last one when all are terminado.
+ * Null when the followed Recorrido or Pasajero is not in the data.
+ */
+export function followTarget(routes: LiveRoute[], follow: FollowRequest | null): FollowTarget | null {
+  if (!follow) return null;
+  if (follow.kind === "route") {
+    const route = routes.find((candidate) => candidate.id === follow.routeId);
+    if (!route) return null;
+    const center = routeCenter(route);
+    return { center, routeId: route.id, highlightStopId: null, label: center ? `Siguiendo al Recorrido #${route.id}` : "Sin posición todavía" };
+  }
+
+  const transfers = new Map<number, { route: LiveRoute; stop: LiveStop }[]>();
+  for (const route of routes) {
+    for (const stop of route.stops) {
+      if (stop.passengerId !== follow.passengerId) continue;
+      transfers.set(stop.transferId, [...(transfers.get(stop.transferId) ?? []), { route, stop }]);
+    }
+  }
+  if (transfers.size === 0) return null;
+
+  const states = [...transfers.entries()]
+    .sort(([idA, a], [idB, b]) => a[0].stop.targetTime.localeCompare(b[0].stop.targetTime) || idA - idB)
+    .map(([, stops]): FollowTarget => {
+      if (stops.some(({ stop }) => stop.status === "ausente")) {
+        return { center: null, routeId: null, highlightStopId: null, label: "Ausente" };
+      }
+      const dropoff = stops.find(({ stop }) => stop.kind === "dropoff" && (stop.delivered || stop.status === "entregado"));
+      if (dropoff) {
+        const delivered = dropoff.stop.delivered;
+        const located = delivered && delivered.latitude !== null && delivered.longitude !== null;
+        return {
+          center: located ? [delivered.longitude!, delivered.latitude!] : null,
+          routeId: null,
+          highlightStopId: null,
+          label: delivered ? `Entregado a las ${delivered.phoneTimeHhmi}` : "Entregado",
+        };
+      }
+      const boarded = stops.find(({ stop }) => stop.kind === "pickup" && stop.status === "subio");
+      if (boarded) {
+        const { route } = boarded;
+        return { center: routeCenter(route), routeId: route.id, highlightStopId: null, label: `A bordo del Recorrido #${route.id} (Chofer ${route.driver.name})` };
+      }
+      const { route, stop } = stops.find((entry) => entry.stop.kind === "pickup") ?? stops[0];
+      return {
+        center: routeCenter(route),
+        routeId: route.id,
+        highlightStopId: stop.kind === "pickup" ? stop.id : null,
+        label: `Lo busca el Recorrido #${route.id}, ${stop.plannedTime} planificada`,
+      };
+    });
+  return states.find((state) => state.routeId !== null) ?? states[states.length - 1];
+}
+
+export type DayPassenger = { id: number; name: string };
+
+/** The Pasajeros with a stop that day, once each, by name. */
+export function dayPassengers(routes: LiveRoute[]): DayPassenger[] {
+  const byId = new Map<number, DayPassenger>();
+  for (const route of routes) {
+    for (const stop of route.stops) byId.set(stop.passengerId, { id: stop.passengerId, name: stop.passengerName });
+  }
+  return [...byId.values()].sort((a, b) => a.name.localeCompare(b.name, "es"));
+}
+
+const foldName = (text: string) => text.normalize("NFD").replace(/\p{M}/gu, "").toLowerCase().trim();
+
+/** Matches by name ignoring case and accents ("jose" finds "José"); an empty query matches nobody. */
+export function filterPassengers(passengers: DayPassenger[], query: string): DayPassenger[] {
+  const folded = foldName(query);
+  if (!folded) return [];
+  return passengers.filter((passenger) => foldName(passenger.name).includes(folded));
+}
+
+export type FollowMapLike = {
+  easeTo(options: { center: [number, number] }): unknown;
+  on(type: string, listener: (event: any) => void): unknown;
+  off(type: string, listener: (event: any) => void): unknown;
+};
+
+/** Centers the map on the followed target; without a position the map does not move. */
+export function applyFollowCenter(map: Pick<FollowMapLike, "easeTo">, center: [number, number] | null) {
+  if (center) map.easeTo({ center });
+}
+
+const MANUAL_MOVE_EVENTS = ["dragstart", "zoomstart", "rotatestart", "pitchstart"];
+
+/** Calls onStop when the Oficina moves the map by hand; a programmatic move (easeTo) has no originalEvent. */
+export function bindManualMoveStop(map: Pick<FollowMapLike, "on" | "off">, onStop: () => void) {
+  const listener = (event: { originalEvent?: unknown } | undefined) => {
+    if (event?.originalEvent) onStop();
+  };
+  for (const type of MANUAL_MOVE_EVENTS) map.on(type, listener);
+  return () => {
+    for (const type of MANUAL_MOVE_EVENTS) map.off(type, listener);
+  };
+}
 
 export type MapInstanceLike = {
   getLayer(id: string): any;
@@ -135,6 +254,7 @@ export function updateMapRoutes(
   markersRef: { current: MarkerLike[] },
   renderedRouteIdsRef: { current: Set<number> },
   nowMs = Date.now(),
+  highlightedStopId: number | null = null,
 ) {
   // Remove layers and sources for routes no longer present (Regla 3)
   const currentRouteIds = new Set(routes.map((r) => r.id));
@@ -214,13 +334,15 @@ export function updateMapRoutes(
     for (const stop of route.stops) {
       const popupContent = createStopPopupContent(stop);
 
+      // The followed Pasajero's pickup stop is bigger and outlined so it stands out (issue #140).
+      const highlighted = stop.id === highlightedStopId;
       const markerEl = document.createElement("div");
-      markerEl.className = "live-stop-marker";
-      markerEl.style.width = "18px";
-      markerEl.style.height = "18px";
+      markerEl.className = highlighted ? "live-stop-marker live-stop-marker-highlighted" : "live-stop-marker";
+      markerEl.style.width = highlighted ? "28px" : "18px";
+      markerEl.style.height = highlighted ? "28px" : "18px";
       markerEl.style.borderRadius = "50%";
       markerEl.style.backgroundColor = route.color;
-      markerEl.style.border = "2px solid #ffffff";
+      markerEl.style.border = highlighted ? "4px solid #212529" : "2px solid #ffffff";
       markerEl.style.boxShadow = "0 1px 3px rgba(0,0,0,0.3)";
       markerEl.title = `${stop.position}. ${stop.passengerName}`;
 
@@ -314,7 +436,15 @@ export function updateMapTrail(
   });
 }
 
-export function LiveMap({ routes, selectedRouteId, trail = null, onSelectRoute }: LiveMapProps) {
+export function LiveMap({
+  routes,
+  selectedRouteId,
+  trail = null,
+  onSelectRoute,
+  followCenter = null,
+  highlightedStopId = null,
+  onManualMove,
+}: LiveMapProps) {
   const container = useRef<HTMLDivElement>(null);
   const mapRef = useRef<{ library: MapLibre; map: MapLibreMap } | null>(null);
   const markersRef = useRef<Marker[]>([]);
@@ -369,8 +499,21 @@ export function LiveMap({ routes, selectedRouteId, trail = null, onSelectRoute }
   useEffect(() => {
     if (!ready || !mapRef.current) return;
     const { library, map } = mapRef.current;
-    updateMapRoutes(map, library, routes, selectedRouteId, markersRef, renderedRouteIdsRef);
-  }, [routes, ready, selectedRouteId]);
+    updateMapRoutes(map, library, routes, selectedRouteId, markersRef, renderedRouteIdsRef, undefined, highlightedStopId);
+  }, [routes, ready, selectedRouteId, highlightedStopId]);
+
+  // While following, recenter on every refresh of the live data
+  useEffect(() => {
+    if (!ready || !mapRef.current) return;
+    applyFollowCenter(mapRef.current.map, followCenter);
+  }, [routes, ready, followCenter?.[0], followCenter?.[1]]);
+
+  const onManualMoveRef = useRef(onManualMove);
+  onManualMoveRef.current = onManualMove;
+  useEffect(() => {
+    if (!ready || !mapRef.current) return;
+    return bindManualMoveStop(mapRef.current.map, () => onManualMoveRef.current?.());
+  }, [ready]);
 
   // The Rastro goes on top of the planned lines; only the chosen Recorrido's one is ever on the map
   useEffect(() => {

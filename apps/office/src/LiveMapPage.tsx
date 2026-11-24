@@ -1,7 +1,17 @@
-import { useEffect, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import type { LiveDailyPlan } from "@traslado/api";
 import { fetchRouteTrail, redirectUnauthorized, send, type TrailPoint } from "./api";
-import { currentPositionLabel, LiveMap, positionAge, type RouteTrail } from "./LiveMap";
+import {
+  currentPositionLabel,
+  dayPassengers,
+  filterPassengers,
+  followTarget,
+  LiveMap,
+  positionAge,
+  type DayPassenger,
+  type FollowRequest,
+  type RouteTrail,
+} from "./LiveMap";
 import { OfficeNav } from "./OfficeNav";
 
 const PLAN_TIME_ZONE = "America/Argentina/Tucuman";
@@ -37,13 +47,63 @@ export function startTrailRefresh(
   };
 }
 
-export function LiveMapPage({ initialData }: { initialData?: LiveDailyPlan } = {}) {
+const TAP_BUTTON = { minHeight: "44px", padding: "8px 14px", fontSize: "15px", cursor: "pointer" } as const;
+
+/** Search of the day's Pasajeros by name; each match is a button that follows it. */
+export function PassengerSearch({
+  passengers,
+  query,
+  onQuery,
+  onChoose,
+}: {
+  passengers: DayPassenger[];
+  query: string;
+  onQuery: (query: string) => void;
+  onChoose: (passenger: DayPassenger) => void;
+}) {
+  const matches = filterPassengers(passengers, query);
+  return (
+    <div style={{ flex: "1 1 280px", minWidth: 0 }}>
+      <label style={{ display: "block" }}>
+        <strong>Buscar Pasajero</strong>
+        <input
+          type="search"
+          name="passenger-search"
+          value={query}
+          onChange={(e) => onQuery(e.target.value)}
+          style={{ display: "block", width: "100%", maxWidth: "360px", boxSizing: "border-box", minHeight: "44px", fontSize: "16px", marginTop: "4px" }}
+        />
+      </label>
+      {query.trim() !== "" && (
+        matches.length === 0
+          ? <p style={{ color: "#6c757d" }}>Ningún Pasajero del día coincide</p>
+          : (
+            <ul style={{ listStyle: "none", padding: 0, margin: "8px 0 0", display: "flex", flexWrap: "wrap", gap: "8px" }}>
+              {matches.map((passenger) => (
+                <li key={passenger.id}>
+                  <button type="button" data-testid={`passenger-${passenger.id}`} onClick={() => onChoose(passenger)} style={TAP_BUTTON}>{passenger.name}</button>
+                </li>
+              ))}
+            </ul>
+          )
+      )}
+    </div>
+  );
+}
+
+export function LiveMapPage({ initialData, initialFollow = null }: { initialData?: LiveDailyPlan; initialFollow?: FollowRequest | null } = {}) {
   const [date, setDate] = useState(todayInPlanZone);
   const [data, setData] = useState<LiveDailyPlan | null>(initialData ?? null);
   const [loading, setLoading] = useState(initialData ? false : true);
   const [error, setError] = useState("");
   const [selectedRouteId, setSelectedRouteId] = useState<number | null>(null);
   const [trail, setTrail] = useState<RouteTrail | null>(null);
+  const [follow, setFollow] = useState<FollowRequest | null>(initialFollow);
+  const [passengerQuery, setPassengerQuery] = useState("");
+  const routes = data?.routes ?? [];
+  // Recomputed on every live refresh, so the map follows the fresh position (issue #140)
+  const target = useMemo(() => followTarget(routes, follow), [data, follow]);
+  const passengers = useMemo(() => dayPassengers(routes), [data]);
 
   useEffect(() => {
     setTrail(null);
@@ -109,10 +169,31 @@ export function LiveMapPage({ initialData }: { initialData?: LiveDailyPlan } = {
             onChange={(e) => {
               setDate(e.target.value);
               setSelectedRouteId(null);
+              setFollow(null);
             }}
           />
         </label>
         {loading && <span role="status">Actualizando...</span>}
+      </div>
+
+      <div style={{ marginBottom: "16px", display: "flex", alignItems: "flex-end", gap: "16px", flexWrap: "wrap" }}>
+        <PassengerSearch
+          passengers={passengers}
+          query={passengerQuery}
+          onQuery={setPassengerQuery}
+          onChoose={(passenger) => {
+            const request = { kind: "passenger", passengerId: passenger.id } as const;
+            setFollow(request);
+            const routeId = followTarget(routes, request)?.routeId ?? null;
+            if (routeId !== null) setSelectedRouteId(routeId);
+          }}
+        />
+        {follow && (
+          <div style={{ display: "flex", alignItems: "center", gap: "12px", flexWrap: "wrap" }}>
+            {target && <p role="status" data-testid="follow-label" style={{ margin: 0, fontWeight: 600 }}>{target.label}</p>}
+            <button type="button" onClick={() => setFollow(null)} style={TAP_BUTTON}>Dejar de seguir</button>
+          </div>
+        )}
       </div>
 
       <div
@@ -135,13 +216,17 @@ export function LiveMapPage({ initialData }: { initialData?: LiveDailyPlan } = {
 
       {error && <p role="alert" style={{ color: "#b02a37" }}>{error}</p>}
 
-      <div style={{ display: "grid", gridTemplateColumns: "minmax(320px, 1fr) 2fr", gap: "20px" }}>
+      {/* Panel and map side by side on a computer; they stack on the planificadora's phone */}
+      <div data-testid="live-layout" style={{ display: "flex", flexWrap: "wrap", gap: "20px" }}>
         {/* Panel listing per Recorrido */}
         <aside
           aria-label="Recorridos del día"
           className="live-panel"
           data-testid="live-panel"
           style={{
+            flex: "1 1 320px",
+            minWidth: 0,
+            boxSizing: "border-box",
             backgroundColor: "#fdfdfd",
             border: "1px solid #dee2e6",
             borderRadius: "8px",
@@ -179,6 +264,18 @@ export function LiveMapPage({ initialData }: { initialData?: LiveDailyPlan } = {
                     <span style={{ fontWeight: 600, fontSize: "16px" }}>
                       Recorrido #{route.id}
                     </span>
+                    <button
+                      type="button"
+                      data-testid={`follow-route-${route.id}`}
+                      onClick={(e) => {
+                        e.stopPropagation();
+                        setFollow({ kind: "route", routeId: route.id });
+                        setSelectedRouteId(route.id);
+                      }}
+                      style={TAP_BUTTON}
+                    >
+                      Seguir
+                    </button>
                     <span
                       style={{
                         fontSize: "12px",
@@ -289,12 +386,18 @@ export function LiveMapPage({ initialData }: { initialData?: LiveDailyPlan } = {
         </aside>
 
         {/* Map view */}
-        <div data-testid="live-map-container" style={{ borderRadius: "8px", overflow: "hidden", border: "1px solid #dee2e6" }}>
+        <div
+          data-testid="live-map-container"
+          style={{ flex: "2 1 480px", minWidth: 0, borderRadius: "8px", overflow: "hidden", border: "1px solid #dee2e6" }}
+        >
           <LiveMap
-            routes={data?.routes ?? []}
+            routes={routes}
             selectedRouteId={selectedRouteId}
             trail={trail}
             onSelectRoute={setSelectedRouteId}
+            followCenter={target?.center ?? null}
+            highlightedStopId={target?.highlightStopId ?? null}
+            onManualMove={() => setFollow(null)}
           />
         </div>
       </div>
