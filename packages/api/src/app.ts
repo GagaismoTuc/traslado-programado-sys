@@ -196,6 +196,15 @@ async function appendChange(
   );
 }
 
+const TRAIL_POINT_LIMIT = 500;
+
+/** Keeps at most TRAIL_POINT_LIMIT evenly spaced entries, always the first and the last. */
+function downsampleTrail<T>(items: T[]): T[] {
+  const n = items.length;
+  if (n <= TRAIL_POINT_LIMIT) return items;
+  return Array.from({ length: TRAIL_POINT_LIMIT }, (_, i) => items[Math.round((i * (n - 1)) / (TRAIL_POINT_LIMIT - 1))]);
+}
+
 function parseId(value: string) {
   const id = Number(value);
   return positiveInt(id);
@@ -5348,6 +5357,24 @@ export function createApp({ db, routing, router, geocoder, solver, travelTime, e
       const route = await db.query("SELECT id FROM routes WHERE id = $1", [id]) as QueryResult;
       if (!route.rows[0]) return context.json({ error: "Recorrido not found" }, 404);
       return context.json({ versions: await loadPlanVersions(db, "pv.route_id = $1", [id]) });
+    })
+    // The Rastro of a Recorrido for the live map: its Posiciones by phone time, reduced uniformly to at most TRAIL_POINT_LIMIT.
+    .get("/routes/:id/trail", async (context) => {
+      const actor = await requireOffice(context);
+      if (actor instanceof Response) return actor;
+      const id = parseId(context.req.param("id"));
+      const route = id ? (await db.query("SELECT id FROM routes WHERE id = $1", [id]) as QueryResult).rows[0] : undefined;
+      if (!route) return context.json({ error: "Recorrido not found" }, 404);
+      const positions = (await db.query(
+        `SELECT latitude, longitude, phone_time FROM positions WHERE route_id = $1 ORDER BY phone_time, id`,
+        [id],
+      ) as QueryResult).rows;
+      const points = downsampleTrail(positions).map((row) => ({
+        lat: Number(row.latitude),
+        lng: Number(row.longitude),
+        phoneTime: new Date(row.phone_time as Date | string).toISOString(),
+      }));
+      return context.json({ points });
     })
     // Publishes every Recorrido of the day, each in its own transaction, without forcing; unchanged ones keep their version.
     .post("/daily-plans/:date/publish", async (context) => {
