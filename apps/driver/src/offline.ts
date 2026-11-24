@@ -3,6 +3,7 @@
 import { markOrder } from "@traslado/shared";
 import type { DriverDay } from "./Days";
 import type { Handover, Incident, Mark } from "./Marks";
+import type { PositionSample } from "./Tracking";
 
 /**
  * A Marca on the phone: pending until the server confirms it, then kept as confirmed until the end-of-day wipe; a server
@@ -45,28 +46,73 @@ export type LocalStore = {
   /** The server epoch the phone's confirmed Marcas were stored under, or null before the first one. */
   epoch(): Promise<string | null>;
   putEpoch(epoch: string): Promise<void>;
-  /** The end-of-day wipe of what `endedData` names, in one step that does nothing while a Marca on the phone is pending. */
+  /**
+   * The end-of-day wipe of what `endedData` names, in one step that does nothing while a Marca on the phone is pending;
+   * a store holding pending Posiciones also drops the ones of an earlier day (`endedPositionIds`).
+   */
   wipeEnded(today: string): Promise<void>;
   /** Wipes everything; only a revoked device does it. */
   clear(): Promise<void>;
 };
+
+/** A Posición the phone took during Seguimiento and the server has not confirmed yet; `id` is its Recorrido and phone time. */
+export type PendingPosition = PositionSample & { id: string; routeId: number };
+
+/** The Posiciones waiting on the phone, in their own IndexedDB store next to the Marca queue. */
+export type PositionStore = {
+  /** Every pending Posición, oldest phone time first. */
+  positions(): Promise<PendingPosition[]>;
+  /** Saves one Posición and, past `MAX_PENDING_POSITIONS`, drops the oldest ones in the same step. */
+  addPosition(position: PendingPosition): Promise<void>;
+  deletePositions(ids: string[]): Promise<void>;
+  clearPositions(): Promise<void>;
+};
+
+// One hour of Seguimiento at one Posición every 15 s.
+export const MAX_PENDING_POSITIONS = 240;
+
+/** The pending Posiciones in the order they are sent: phone time, then id. */
+export function positionOrder(a: PendingPosition, b: PendingPosition) {
+  return a.phoneTime.localeCompare(b.phoneTime) || a.id.localeCompare(b.id);
+}
+
+/** The ids of the oldest Posiciones beyond `MAX_PENDING_POSITIONS`, the ones to drop. */
+export function overflowPositionIds(positions: PendingPosition[]) {
+  const sorted = [...positions].sort(positionOrder);
+  return sorted.slice(0, Math.max(0, sorted.length - MAX_PENDING_POSITIONS)).map((position) => position.id);
+}
+
+/** The pending Posiciones the end-of-day wipe removes on `today`: those taken on an earlier Plan diario day. */
+export function endedPositionIds(positions: PendingPosition[], today: string) {
+  return positions.filter((position) => planDay(new Date(position.phoneTime)) < today).map((position) => position.id);
+}
 
 // The 401 code the server answers to a device revoked by the Oficina; any other failure keeps the queue.
 export const REVOKED_CODE = "session_revoked";
 export const CONFLICT_NOTE = "The server already had this Marca with other content; it kept the first one";
 
 /** The store in IndexedDB; a write resolves once its transaction is committed. */
-export function indexedDbStore(factory: IDBFactory = indexedDB): LocalStore {
+export function indexedDbStore(factory: IDBFactory = indexedDB): LocalStore & PositionStore {
   let opened: Promise<IDBDatabase> | null = null;
   const database = () => opened ??= new Promise<IDBDatabase>((resolve, reject) => {
-    const request = factory.open("driver-app", 1);
-    request.onupgradeneeded = () => {
-      request.result.createObjectStore("marks", { keyPath: "id" });
-      request.result.createObjectStore("plan");
+    // Version 2 adds the pending Posiciones store; a phone on version 1 keeps its Marcas and plan.
+    const request = factory.open("driver-app", 2);
+    request.onupgradeneeded = (event?: IDBVersionChangeEvent) => {
+      const oldVersion = event?.oldVersion ?? 0;
+      if (oldVersion < 1) {
+        request.result.createObjectStore("marks", { keyPath: "id" });
+        request.result.createObjectStore("plan");
+      }
+      if (oldVersion < 2) request.result.createObjectStore("positions", { keyPath: "id" });
     };
     request.onsuccess = () => {
       // The browser may close the connection (WebKit does after a while in the background): the next call reopens it.
       request.result.onclose = () => {
+        opened = null;
+      };
+      // A newer version of the app opening the base in another tab closes this connection; the next call reopens it.
+      request.result.onversionchange = () => {
+        request.result.close();
         opened = null;
       };
       resolve(request.result);
@@ -102,13 +148,42 @@ export function indexedDbStore(factory: IDBFactory = indexedDB): LocalStore {
     putEpoch: async (epoch) => {
       await run(["plan"], "readwrite", (transaction) => void transaction.objectStore("plan").put(epoch, "epoch"));
     },
+    positions: async () => (await run(["positions"], "readonly", (transaction) => transaction.objectStore("positions").getAll() as IDBRequest<PendingPosition[]>) ?? []).sort(positionOrder),
+    // One transaction saves and trims, so two Posiciones saved at once never leave more than the maximum.
+    addPosition: async (position) => {
+      await run(["positions"], "readwrite", (transaction) => {
+        const positions = transaction.objectStore("positions");
+        const existing = positions.getAll() as IDBRequest<PendingPosition[]>;
+        existing.onsuccess = () => {
+          positions.put(position);
+          const all = [...existing.result.filter((item) => item.id !== position.id), position];
+          for (const id of overflowPositionIds(all)) positions.delete(id);
+        };
+      });
+    },
+    deletePositions: async (ids) => {
+      if (!ids.length) return;
+      await run(["positions"], "readwrite", (transaction) => {
+        const positions = transaction.objectStore("positions");
+        for (const id of ids) positions.delete(id);
+      });
+    },
+    clearPositions: async () => {
+      await run(["positions"], "readwrite", (transaction) => void transaction.objectStore("positions").clear());
+    },
     // One transaction reads and wipes, so a Marca saved meanwhile is either seen as pending or saved after the wipe.
+    // The Posiciones of an earlier day go even while a Marca is pending: they are never kept past their day.
     wipeEnded: async (today) => {
-      await run(["marks", "plan"], "readwrite", (transaction) => {
+      await run(["marks", "plan", "positions"], "readwrite", (transaction) => {
         const marks = transaction.objectStore("marks");
         const plans = transaction.objectStore("plan");
+        const positions = transaction.objectStore("positions");
         const items = marks.getAll() as IDBRequest<QueuedMark[]>;
         const plan = plans.get("current") as IDBRequest<CachedPlan | undefined>;
+        const pendingPositions = positions.getAll() as IDBRequest<PendingPosition[]>;
+        pendingPositions.onsuccess = () => {
+          for (const id of endedPositionIds(pendingPositions.result, today)) positions.delete(id);
+        };
         plan.onsuccess = () => {
           const ended = endedData(items.result, plan.result ?? null, today);
           if (!ended) return;
@@ -118,9 +193,10 @@ export function indexedDbStore(factory: IDBFactory = indexedDB): LocalStore {
       });
     },
     clear: async () => {
-      await run(["marks", "plan"], "readwrite", (transaction) => {
+      await run(["marks", "plan", "positions"], "readwrite", (transaction) => {
         transaction.objectStore("marks").clear();
         transaction.objectStore("plan").clear();
+        transaction.objectStore("positions").clear();
       });
     },
   };
@@ -382,24 +458,39 @@ export type SignOutOutcome =
 /**
  * "Cerrar sesión": sends the queue first and ends the session only when no Marca is left unconfirmed on the phone. Without
  * signal, or with a Marca the server did not take, it refuses and keeps everything. An expired session keeps the queue for
- * the next sign-in; a revoked device is wiped, also when the queue was already empty and the flush asked nothing.
+ * the next sign-in; a revoked device is wiped, also when the queue was already empty and the flush asked nothing. Once the
+ * session ends, signed out or expired, the pending Posiciones in `positions` are wiped too: they never wait on the phone
+ * for the next sign-in.
  */
 export async function signOut(
   store: LocalStore,
   queue: { flush: () => Promise<FlushOutcome> },
   server: { session: SessionCheck; logout: () => Promise<Response> },
+  positions?: Pick<PositionStore, "clearPositions">,
 ): Promise<SignOutOutcome> {
   const outcome = await queue.flush();
   if (outcome.result === "revoked") return { result: "revoked" };
-  if (outcome.result === "signed_out") return { result: "expired" };
+  // An expired session ends here too, so its Posiciones go: another Chofer may sign in next.
+  const wipePositions = async () => await positions?.clearPositions().catch(() => undefined);
+  if (outcome.result === "signed_out") {
+    await wipePositions();
+    return { result: "expired" };
+  }
   const pending = (await store.marks()).filter((item) => item.state === "pending").length;
   if (pending) return { result: "refused", pending, offline: outcome.result === "offline" };
   try {
     // The logout answers 204 even to a revoked session: only the session itself says whether to wipe.
     const session = await server.session();
-    if (session.status === 401) return { result: await wipeIfRevoked(session, store) ? "revoked" : "expired" };
+    if (session.status === 401) {
+      if (await wipeIfRevoked(session, store)) return { result: "revoked" };
+      await wipePositions();
+      return { result: "expired" };
+    }
     if (!session.ok) return { result: "unreachable" };
-    return (await server.logout()).ok ? { result: "signed_out" } : { result: "unreachable" };
+    if (!(await server.logout()).ok) return { result: "unreachable" };
+    // A failed wipe leaves them for the end-of-day wipe; the session is already over.
+    await wipePositions();
+    return { result: "signed_out" };
   } catch {
     return { result: "unreachable" };
   }

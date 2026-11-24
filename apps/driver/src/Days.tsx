@@ -8,7 +8,7 @@ import {
   type QueuedItem, type QueuedMark, type SignOutOutcome,
 } from "./offline";
 import {
-  activeTrackingRouteId, GPS_UNAVAILABLE_NOTICE, LOCATION_PERMISSION_NOTICE, sendPositions, startTracking, TRACKING_ACTIVE_TEXT, type TrackingState,
+  activeTrackingRouteId, GPS_UNAVAILABLE_NOTICE, LOCATION_PERMISSION_NOTICE, positionQueue, sendPositions, startTracking, TRACKING_ACTIVE_TEXT, type TrackingState,
 } from "./Tracking";
 import { KEEP_SCREEN_ON_NOTICE, startWakeLock, type ScreenWakeLock, type ScreenWakeState } from "./WakeLock";
 
@@ -470,6 +470,7 @@ export function DriverHome({ apiUrl, userId, onSignedOut }: { apiUrl: string; us
     session,
     (routeId, incident) => sendIncident(apiUrl, routeId, incident),
   ));
+  const [positions] = useState(() => positionQueue(store, (routeId, batch) => sendPositions(apiUrl, routeId, batch)));
   const latestLoad = useRef(0);
   const signedOut = useRef(onSignedOut);
   signedOut.current = onSignedOut;
@@ -550,14 +551,19 @@ export function DriverHome({ apiUrl, userId, onSignedOut }: { apiUrl: string; us
 
   useEffect(() => startRefetching(window, document, () => void load()), [load]);
   useEffect(() => startFlushing(window, document, () => void flush()), [flush]);
+  // The Posiciones left on the phone go out when the app opens, the signal returns or the app is visible again, also
+  // once their Recorrido is cerrado.
+  useEffect(() => startFlushing(window, document, () => void positions.flush().then((outcome) => {
+    if (outcome.result === "unauthorized") void endSession(outcome.response);
+  })), [positions, endSession]);
   useEffect(() => startTracking({
     routeId: activeRouteId,
     doc: document,
     geolocation: navigator.geolocation,
-    send: (routeId, positions) => sendPositions(apiUrl, routeId, positions),
+    queue: positions,
     onStateChange: setTrackingState,
     onUnauthorized: (response) => void endSession(response),
-  }), [activeRouteId, apiUrl, endSession]);
+  }), [activeRouteId, positions, endSession]);
   useEffect(() => startWakeLock({
     routeId: activeRouteId,
     doc: document,
@@ -581,7 +587,7 @@ export function DriverHome({ apiUrl, userId, onSignedOut }: { apiUrl: string; us
       const outcome = await signOut(store, queue, {
         session,
         logout: () => fetch(`${apiUrl}/auth/logout`, { method: "POST", credentials: "include" }),
-      });
+      }, store);
       if (outcome.result === "revoked") {
         setPlan(null);
         setLocal([]);

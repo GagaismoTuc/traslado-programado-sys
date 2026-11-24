@@ -1,6 +1,8 @@
 // Foreground Seguimiento for the driver PWA: watches the Chofer's phone position while a Recorrido is en curso and the
-// document is visible, samples at most once every 15 s (<= 100 m accuracy), and posts batches every 30 s with in-memory retry.
+// document is visible, samples at most once every 15 s (<= 100 m accuracy), and posts batches every 30 s from the
+// phone's queue of pending Posiciones, which keeps them through a lost signal or a reload.
 import type { DriverDay } from "./Days";
+import { endedPositionIds, overflowPositionIds, planDay, positionOrder, type PendingPosition, type PositionStore } from "./offline";
 
 export const SAMPLE_INTERVAL_MS = 15_000;
 export const FLUSH_INTERVAL_MS = 30_000;
@@ -23,15 +25,97 @@ export type TrackingState = "idle" | "active" | "permission_denied" | "gps_unava
 export type TrackingGeolocation = Pick<Geolocation, "watchPosition" | "clearWatch">;
 export type TrackingDocument = Pick<EventTarget, "addEventListener" | "removeEventListener"> & { visibilityState: string };
 
+export type SendPositions = (routeId: number, positions: PositionSample[]) => Promise<Response>;
+
 export type StartTrackingOptions = {
   routeId: number | null;
   doc: TrackingDocument;
   geolocation: TrackingGeolocation | undefined;
-  send: (routeId: number, positions: PositionSample[]) => Promise<Response>;
   onStateChange: (state: TrackingState) => void;
   onUnauthorized?: (response: Response) => void;
   now?: () => number;
+} & (
+  /** The phone's queue of pending Posiciones, shared with the flush that runs when the app opens or the signal returns. */
+  | { queue: PositionQueue; send?: undefined }
+  /** Without a queue, the Posiciones wait in memory only and go out through `send`. */
+  | { send: SendPositions; queue?: undefined }
+);
+
+export type PositionFlushOutcome = { result: "done" | "offline" } | { result: "unauthorized"; response: Response };
+export type PositionQueue = {
+  add(routeId: number, sample: PositionSample): Promise<void>;
+  flush(): Promise<PositionFlushOutcome>;
 };
+
+/** A `PositionStore` in memory, for a phone without IndexedDB; nothing in it survives a reload. */
+export function memoryPositionStore(): PositionStore {
+  let items: PendingPosition[] = [];
+  return {
+    positions: async () => [...items].sort(positionOrder),
+    addPosition: async (position) => {
+      items = [...items.filter((item) => item.id !== position.id), position];
+      const dropped = new Set(overflowPositionIds(items));
+      items = items.filter((item) => !dropped.has(item.id));
+    },
+    deletePositions: async (ids) => {
+      const deleted = new Set(ids);
+      items = items.filter((item) => !deleted.has(item.id));
+    },
+    clearPositions: async () => {
+      items = [];
+    },
+  };
+}
+
+/**
+ * The phone's queue of pending Posiciones. A round sends them in phone-time order, at most `MAX_BATCH_SIZE` per batch and
+ * one Recorrido per batch. A 200 or 201 deletes the batch from the phone; a 400 or 409 also deletes it, since the server
+ * will never take it, and logs the refusal without coordinates. No signal stops the round and keeps everything; a 5xx or
+ * any other answer keeps that batch and skips the rest of its Recorrido until the next round. A 401 stops the round and
+ * keeps everything, for the caller to end the session (a revoked device wipes the store). Each round first drops the
+ * Posiciones of an earlier day, unsent, even without signal or with Marcas pending. One round runs at a time.
+ */
+export function positionQueue(store: PositionStore, send: SendPositions): PositionQueue {
+  let running: Promise<PositionFlushOutcome> | null = null;
+  async function round(): Promise<PositionFlushOutcome> {
+    const all = await store.positions();
+    const ended = new Set(endedPositionIds(all, planDay(new Date())));
+    if (ended.size) await store.deletePositions([...ended]);
+    const pending = all.filter((item) => !ended.has(item.id));
+    const blocked = new Set<number>();
+    const sentIds = new Set<string>();
+    for (const first of pending) {
+      if (sentIds.has(first.id) || blocked.has(first.routeId)) continue;
+      const batch = pending.filter((item) => item.routeId === first.routeId && !sentIds.has(item.id)).slice(0, MAX_BATCH_SIZE);
+      for (const item of batch) sentIds.add(item.id);
+      const ids = batch.map((item) => item.id);
+      let response: Response;
+      try {
+        response = await send(first.routeId, batch.map(({ lat, lng, accuracyMeters, phoneTime }) => ({ lat, lng, accuracyMeters, phoneTime })));
+      } catch {
+        return { result: "offline" };
+      }
+      if (response.status === 401) return { result: "unauthorized", response };
+      if (response.status === 200 || response.status === 201) {
+        await store.deletePositions(ids);
+      } else if (response.status === 400 || response.status === 409) {
+        await store.deletePositions(ids);
+        console.warn(`Discarded ${ids.length} pending Posiciones of Recorrido ${first.routeId}: the server refused the batch with ${response.status}`);
+      } else {
+        blocked.add(first.routeId);
+      }
+    }
+    return { result: "done" };
+  }
+  return {
+    add: async (routeId, sample) => {
+      await store.addPosition({ ...sample, id: `${routeId}|${sample.phoneTime}`, routeId });
+    },
+    flush: () => running ??= round().catch(() => ({ result: "offline" as const })).finally(() => {
+      running = null;
+    }),
+  };
+}
 
 /** The Recorrido currently en curso in the visible days, or null when no Recorrido is active. */
 export function activeTrackingRouteId(days: DriverDay[] | null | undefined): number | null {
@@ -58,28 +142,20 @@ export async function sendPositions(apiUrl: string, routeId: number, positions: 
  * Clears the watch whenever the document hides or the returned cleanup runs (route closed or unmount).
  * Never throws: any geolocation or network failure stays isolated from Marcas.
  */
-export function startTracking({
-  routeId,
-  doc,
-  geolocation,
-  send,
-  onStateChange,
-  onUnauthorized,
-  now = () => Date.now(),
-}: StartTrackingOptions): () => void {
+export function startTracking(options: StartTrackingOptions): () => void {
+  const { routeId, doc, geolocation, onStateChange, onUnauthorized, now = () => Date.now() } = options;
   if (routeId === null) {
     onStateChange("idle");
     return () => undefined;
   }
+  const queue = options.queue ?? positionQueue(memoryPositionStore(), options.send);
 
   let stopped = false;
   let watchId: number | null = null;
   let watchToken = 0;
   let intervalId: ReturnType<typeof setInterval> | null = null;
   let lastSampledAt: number | null = null;
-  let flushing = false;
   let currentState: TrackingState = "idle";
-  const buffer: PositionSample[] = [];
 
   function setState(next: TrackingState, force = false) {
     if (!force && next === currentState) return;
@@ -118,26 +194,13 @@ export function startTracking({
     }
   }
 
+  // Anything the queue keeps goes out on the next 30 s tick; readings captured while a batch is in flight stay queued.
   async function flush() {
-    if (stopped || flushing || buffer.length === 0) return;
-    flushing = true;
-    const batch = buffer.slice(0, MAX_BATCH_SIZE);
-    try {
-      const response = await send(routeId!, batch);
-      if (stopped) return;
-      if (response.ok) {
-        // Remove only what was sent; readings captured while the request was in flight stay in buffer.
-        buffer.splice(0, batch.length);
-      } else if (response.status === 401) {
-        stop();
-        onUnauthorized?.(response);
-      }
-      // Other non-ok responses keep batch in memory for the next 30 s tick.
-    } catch {
-      // Network failure keeps batch in memory for the next 30 s tick.
-    } finally {
-      flushing = false;
-    }
+    if (stopped) return;
+    const outcome = await queue.flush();
+    if (stopped || outcome.result !== "unauthorized") return;
+    stop();
+    onUnauthorized?.(outcome.response);
   }
 
   function onPosition(position: GeolocationPosition) {
@@ -159,7 +222,8 @@ export function startTracking({
       : now();
     if (lastSampledAt !== null && timeMs - lastSampledAt < SAMPLE_INTERVAL_MS) return;
     lastSampledAt = timeMs;
-    buffer.push({ lat, lng, accuracyMeters, phoneTime: new Date(timeMs).toISOString() });
+    // A failed save loses only this reading; Seguimiento goes on.
+    void queue.add(routeId!, { lat, lng, accuracyMeters, phoneTime: new Date(timeMs).toISOString() }).catch(() => undefined);
   }
 
   function onError(error: Pick<GeolocationPositionError, "code">) {

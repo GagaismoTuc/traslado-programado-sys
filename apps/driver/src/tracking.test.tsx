@@ -3,10 +3,12 @@ import { createRoot } from "react-dom/client";
 import { renderToStaticMarkup } from "react-dom/server";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { DayView, DriverHome, RouteView, type DriverDay, type DriverRoute, type DriverStop, type Marking } from "./Days";
+import { indexedDbStore, REVOKED_CODE, signOut, wipeIfRevoked, type QueuedMark } from "./offline";
 import {
   activeTrackingRouteId,
   GPS_UNAVAILABLE_NOTICE,
   LOCATION_PERMISSION_NOTICE,
+  positionQueue,
   sendPositions,
   startTracking,
   TRACKING_ACTIVE_TEXT,
@@ -409,6 +411,8 @@ async function mountApp(element: ReactElement, options: {
   geolocation: (TrackingGeolocation & Partial<Pick<Geolocation, "getCurrentPosition">>) | undefined;
   fetchImpl: typeof fetch;
   visibilityState?: "visible" | "hidden";
+  // The phone's IndexedDB from an earlier mount, so a second mount is a reload of the app.
+  idb?: ReturnType<typeof fakeIndexedDb>;
   wakeLock?: ScreenWakeLock;
 }) {
   (globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
@@ -417,7 +421,7 @@ async function mountApp(element: ReactElement, options: {
   win.document = doc;
   const container = doc.createElement("div");
   doc.body.appendChild(container);
-  const idb = fakeIndexedDb();
+  const idb = options.idb ?? fakeIndexedDb();
 
   vi.stubGlobal("window", win);
   vi.stubGlobal("document", doc);
@@ -945,6 +949,254 @@ describe("Seguimiento in the driver app", () => {
     );
     expect(html).toContain("Cerrar sesión");
     expect(html).toContain("Loading your Recorridos...");
+  });
+});
+
+describe("pending Posiciones on the phone (#136)", () => {
+  const at = (iso: string, lat = -26.8312345, lng = -65.2109876): PositionSample => ({ lat, lng, accuracyMeters: 12, phoneTime: iso });
+  const minute = (offset: number) => new Date(Date.parse("2026-10-23T12:00:00.000Z") + offset * 60_000).toISOString();
+  const answered = (status: number) => async () => new Response(JSON.stringify({ saved: 0, ignored: 0 }), { status });
+  const offline = async (): Promise<Response> => {
+    throw new TypeError("Failed to fetch");
+  };
+
+  it("keeps pending Posiciones in their own store of the driver-app IndexedDB base, apart from the Marca queue, through a reload", async () => {
+    const idb = fakeIndexedDb();
+    const open = vi.spyOn(idb.factory, "open");
+    const store = indexedDbStore(idb.factory);
+    const mark: QueuedMark = {
+      id: "mark-1", routeId: 9, state: "pending", confirmedAt: null, note: null, sent: false,
+      mark: { id: "mark-1", transferId: 3, kind: "subio", phoneTime: minute(0), location: null, version: 1 },
+    };
+    await store.putMark(mark);
+    await positionQueue(store, offline).add(9, at(minute(1)));
+
+    expect(open).toHaveBeenCalledWith("driver-app", 2);
+    expect([...idb.stores.get("positions")!.values()]).toEqual([{ ...at(minute(1)), id: `9|${minute(1)}`, routeId: 9 }]);
+    expect([...idb.stores.get("marks")!.keys()]).toEqual(["mark-1"]);
+
+    const reloaded = indexedDbStore(idb.factory);
+    expect(await reloaded.positions()).toEqual([{ ...at(minute(1)), id: `9|${minute(1)}`, routeId: 9 }]);
+    expect(await reloaded.marks()).toEqual([mark]);
+  });
+
+  it("upgrades a version-1 driver-app base by adding only the positions store, keeping its Marcas", async () => {
+    const idb = fakeIndexedDb();
+    const created: string[] = [];
+    const factory = {
+      open(name: string, version: number) {
+        const request = idb.factory.open(name, version) as unknown as Record<string, unknown> & { result: Record<string, unknown> };
+        const db = request.result as { createObjectStore(name: string): void; transaction(names: string[]): unknown };
+        request.result = { transaction: db.transaction.bind(db), createObjectStore: (store: string) => {
+          created.push(store);
+          db.createObjectStore(store);
+        } };
+        let upgrade: ((event: { oldVersion: number }) => void) | null = null;
+        Object.defineProperty(request, "onupgradeneeded", {
+          get: () => upgrade && (() => upgrade!({ oldVersion: 1 })),
+          set: (handler) => { upgrade = handler; },
+        });
+        return request;
+      },
+    } as unknown as IDBFactory;
+    const mark: QueuedMark = {
+      id: "mark-v1", routeId: 9, state: "pending", confirmedAt: null, note: null, sent: false,
+      mark: { id: "mark-v1", transferId: 3, kind: "subio", phoneTime: minute(0), location: null, version: 1 },
+    };
+    idb.stores.set("marks", new Map([["mark-v1", mark]]));
+
+    const store = indexedDbStore(factory);
+    expect(await store.marks()).toEqual([mark]);
+    expect(created).toEqual(["positions"]);
+  });
+
+  it("keeps at most 240 pending Posiciones and drops the oldest ones past the maximum", async () => {
+    const store = indexedDbStore(fakeIndexedDb().factory);
+    const queue = positionQueue(store, offline);
+    const times = Array.from({ length: 241 }, (_, index) => new Date(Date.parse("2026-10-23T11:00:00.000Z") + index * 15_000).toISOString());
+    for (const time of times) await queue.add(9, at(time));
+
+    const kept = await store.positions();
+    expect(kept).toHaveLength(240);
+    expect(kept.map((position) => position.phoneTime)).toEqual(times.slice(1));
+  });
+
+  it("deletes a batch from the phone once the server answers 200 or 201 and keeps it after a network error or a 5xx", async () => {
+    const store = indexedDbStore(fakeIndexedDb().factory);
+    const pending = [at(minute(-2)), at(minute(-1))];
+    for (const sample of pending) await positionQueue(store, offline).add(9, sample);
+
+    expect(await positionQueue(store, offline).flush()).toEqual({ result: "offline" });
+    expect((await store.positions()).map((position) => position.phoneTime)).toEqual([minute(-2), minute(-1)]);
+    for (const status of [500, 503]) {
+      expect(await positionQueue(store, answered(status)).flush()).toEqual({ result: "done" });
+      expect((await store.positions()).map((position) => position.phoneTime)).toEqual([minute(-2), minute(-1)]);
+    }
+
+    const sent: PositionSample[][] = [];
+    const created = positionQueue(store, async (_routeId, batch) => {
+      sent.push(batch);
+      return new Response(JSON.stringify({ saved: batch.length, ignored: 0 }), { status: 201 });
+    });
+    expect(await created.flush()).toEqual({ result: "done" });
+    expect(sent).toEqual([pending]);
+    expect(await store.positions()).toEqual([]);
+
+    await created.add(9, at(minute(0)));
+    expect(await positionQueue(store, answered(200)).flush()).toEqual({ result: "done" });
+    expect(await store.positions()).toEqual([]);
+  });
+
+  it("discards a batch the server answers 400 or 409 and logs it without coordinates", async () => {
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => undefined);
+    try {
+      const store = indexedDbStore(fakeIndexedDb().factory);
+      const queue = positionQueue(store, answered(400));
+      await queue.add(9, at(minute(-1)));
+      await queue.add(9, at(minute(0)));
+
+      expect(await queue.flush()).toEqual({ result: "done" });
+      expect(await store.positions()).toEqual([]);
+      expect(warn.mock.calls).toEqual([["Discarded 2 pending Posiciones of Recorrido 9: the server refused the batch with 400"]]);
+      expect(JSON.stringify(warn.mock.calls)).not.toMatch(/-26\.83|-65\.21/);
+
+      // A second round does not send the discarded batch again.
+      const again = vi.fn(answered(201));
+      expect(await positionQueue(store, again).flush()).toEqual({ result: "done" });
+      expect(again).not.toHaveBeenCalled();
+
+      // Main's answer on #136: a 409 (a Posición after the close) is discarded the same way.
+      warn.mockClear();
+      await queue.add(9, at(minute(1)));
+      expect(await positionQueue(store, answered(409)).flush()).toEqual({ result: "done" });
+      expect(await store.positions()).toEqual([]);
+      expect(warn.mock.calls).toEqual([["Discarded 1 pending Posiciones of Recorrido 9: the server refused the batch with 409"]]);
+    } finally {
+      warn.mockRestore();
+    }
+  });
+
+  it("wipes every pending Posición on sign-out and on a revoked session, and the end-of-day wipe drops those of earlier days", async () => {
+    const store = indexedDbStore(fakeIndexedDb().factory);
+    const queue = positionQueue(store, offline);
+
+    await queue.add(9, at(minute(-1)));
+    await queue.add(9, at(minute(0)));
+    const outcome = await signOut(store, { flush: async () => ({ result: "done", confirmed: 0 }) }, {
+      session: async () => new Response(JSON.stringify({ serverEpoch: "epoch-1" }), { status: 200 }),
+      logout: async () => new Response(null, { status: 204 }),
+    }, store);
+    expect(outcome).toEqual({ result: "signed_out" });
+    expect(await store.positions()).toEqual([]);
+
+    // Signing out of an expired session (the Marca queue or the session check answers a plain 401) wipes them too.
+    const expired = async () => new Response(JSON.stringify({ code: "session_expired" }), { status: 401 });
+    await queue.add(9, at(minute(-1)));
+    expect(await signOut(store, { flush: async () => ({ result: "signed_out", confirmed: 0 }) }, {
+      session: expired, logout: async () => new Response(null, { status: 204 }),
+    }, store)).toEqual({ result: "expired" });
+    expect(await store.positions()).toEqual([]);
+    await queue.add(9, at(minute(-1)));
+    expect(await signOut(store, { flush: async () => ({ result: "done", confirmed: 0 }) }, {
+      session: expired, logout: async () => new Response(null, { status: 204 }),
+    }, store)).toEqual({ result: "expired" });
+    expect(await store.positions()).toEqual([]);
+
+    await queue.add(9, at(minute(-1)));
+    expect(await wipeIfRevoked(new Response(JSON.stringify({ code: REVOKED_CODE }), { status: 401 }), store)).toBe(true);
+    expect(await store.positions()).toEqual([]);
+
+    // Yesterday's Posiciones go at the end-of-day wipe even with a Marca still pending on the phone; today's stay.
+    await store.putMark({
+      id: "mark-2", routeId: 9, state: "pending", confirmedAt: null, note: null, sent: true,
+      mark: { id: "mark-2", transferId: 3, kind: "subio", phoneTime: minute(0), location: null, version: 1 },
+    });
+    await queue.add(8, at("2026-10-22T20:00:00.000Z"));
+    await queue.add(9, at(minute(0)));
+    await store.wipeEnded("2026-10-23");
+    expect((await store.positions()).map((position) => position.phoneTime)).toEqual([minute(0)]);
+    expect((await store.marks()).map((item) => item.id)).toEqual(["mark-2"]);
+
+    // Without signal the Marca round never reaches the wipe: the Posiciones round drops yesterday's ones unsent.
+    await queue.add(8, at("2026-10-22T20:00:00.000Z"));
+    const send = vi.fn(async (_routeId: number, _batch: PositionSample[]): Promise<Response> => {
+      throw new TypeError("Failed to fetch");
+    });
+    expect(await positionQueue(store, send).flush()).toEqual({ result: "offline" });
+    expect(send.mock.calls.map(([routeId]) => routeId)).toEqual([9]);
+    expect((await store.positions()).map((position) => position.phoneTime)).toEqual([minute(0)]);
+  });
+
+  it("sends the pending Posiciones in phone-time order in batches of at most 100 of one Recorrido", async () => {
+    const store = indexedDbStore(fakeIndexedDb().factory);
+    const queue = positionQueue(store, offline);
+    const times = Array.from({ length: 230 }, (_, index) => new Date(Date.parse("2026-10-23T11:00:00.000Z") + index * 15_000).toISOString());
+    for (const time of [...times].reverse()) await queue.add(9, at(time));
+    await queue.add(4, at("2026-10-23T10:00:00.000Z"));
+
+    const sent: { routeId: number; times: string[] }[] = [];
+    const flushed = await positionQueue(store, async (routeId, batch) => {
+      sent.push({ routeId, times: batch.map((position) => position.phoneTime) });
+      return new Response(JSON.stringify({ saved: batch.length, ignored: 0 }), { status: 201 });
+    }).flush();
+
+    expect(flushed).toEqual({ result: "done" });
+    expect(sent).toEqual([
+      { routeId: 4, times: ["2026-10-23T10:00:00.000Z"] },
+      { routeId: 9, times: times.slice(0, 100) },
+      { routeId: 9, times: times.slice(100, 200) },
+      { routeId: 9, times: times.slice(200) },
+    ]);
+    expect(await store.positions()).toEqual([]);
+  });
+
+  it("keeps a Posición taken without signal through a reload of the app and sends it when the app opens with signal", async () => {
+    const days = (url: string) => {
+      if (url.endsWith("/driver/days/2026-10-23")) return new Response(JSON.stringify({ date: "2026-10-23", routes: [sampleRoute("en_curso", 9)] }), { status: 200 });
+      if (url.endsWith("/driver/days/2026-10-24")) return new Response(JSON.stringify({ date: "2026-10-24", routes: [] }), { status: 200 });
+      if (url.endsWith("/auth/me")) return new Response(JSON.stringify({ serverEpoch: "epoch-1" }), { status: 200 });
+      return null;
+    };
+    const geo = fakeGeolocation();
+    const noSignal = vi.fn(async (input: string | URL | Request) => {
+      const url = String(input);
+      if (url.endsWith("/driver/routes/9/positions")) throw new TypeError("Failed to fetch");
+      return days(url) ?? new Response(null, { status: 404 });
+    }) as unknown as typeof fetch;
+    const first = await mountApp(<DriverHome apiUrl="https://api.example" userId={1} onSignedOut={vi.fn()} />, { geolocation: geo.geolocation, fetchImpl: noSignal });
+    try {
+      geo.emit(-26.83, -65.21, 15, Date.parse("2026-10-23T12:00:00.000Z"));
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(30_000);
+      });
+      await first.flushWork();
+      expect(first.idb.stores.get("positions")?.size).toBe(1);
+    } finally {
+      await first.unmount();
+    }
+
+    const sent: { url: string; body: unknown }[] = [];
+    const withSignal = vi.fn(async (input: string | URL | Request, init?: RequestInit) => {
+      const url = String(input);
+      if (url.endsWith("/driver/routes/9/positions")) {
+        sent.push({ url, body: JSON.parse(String(init?.body)) });
+        return new Response(JSON.stringify({ saved: 1, ignored: 0 }), { status: 201 });
+      }
+      return days(url) ?? new Response(null, { status: 404 });
+    }) as unknown as typeof fetch;
+    const reloaded = await mountApp(<DriverHome apiUrl="https://api.example" userId={1} onSignedOut={vi.fn()} />, {
+      geolocation: fakeGeolocation().geolocation, fetchImpl: withSignal, idb: first.idb,
+    });
+    try {
+      await reloaded.flushWork();
+      expect(sent).toEqual([{
+        url: "https://api.example/driver/routes/9/positions",
+        body: { positions: [{ lat: -26.83, lng: -65.21, accuracyMeters: 15, phoneTime: "2026-10-23T12:00:00.000Z" }] },
+      }]);
+      expect(reloaded.idb.stores.get("positions")?.size).toBe(0);
+    } finally {
+      await reloaded.unmount();
+    }
   });
 });
 
