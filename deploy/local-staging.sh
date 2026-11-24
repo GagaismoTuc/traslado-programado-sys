@@ -4,7 +4,7 @@ set -eu
 # One engine for the two local environments of ADR 0003: local staging and the Prueba de campo (issue #146), which
 # keeps real Posiciones. deploy/prueba-de-campo.sh sources this file, so the project comes from the entry script that
 # was run, never from the environment.
-case "$0" in prueba-de-campo.sh|*/prueba-de-campo.sh|*\prueba-de-campo.sh) entry=prueba-de-campo;; *) entry=staging;; esac
+case "$0" in prueba-de-campo.sh|*/prueba-de-campo.sh|*\\prueba-de-campo.sh) entry=prueba-de-campo;; *) entry=staging;; esac
 if [ "$entry" = prueba-de-campo ]; then
   name=prueba-de-campo; label='Prueba de campo'; title='Prueba de campo'; port=18790
   deploy_subnet=172.16.31.0/24; ingress_subnet=172.16.30.0/24
