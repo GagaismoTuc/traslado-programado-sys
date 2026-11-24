@@ -168,6 +168,9 @@ describe("Office live map and ETAs", () => {
             {
               id: 1,
               position: 1,
+              transferId: 1,
+              targetTime: "08:00",
+              delivered: null,
               kind: "pickup" as const,
               passengerId: 10,
               passengerName: "Ana Gómez",
@@ -182,6 +185,9 @@ describe("Office live map and ETAs", () => {
             {
               id: 2,
               position: 2,
+              transferId: 1,
+              targetTime: "08:00",
+              delivered: null,
               kind: "dropoff" as const,
               passengerId: 10,
               passengerName: "Ana Gómez",
@@ -238,6 +244,9 @@ describe("Office live map and ETAs", () => {
         {
           id: 1,
           position: 1,
+          transferId: 1,
+          targetTime: "08:00",
+          delivered: null,
           kind: "pickup" as const,
           passengerId: 5,
           passengerName: "Lucas Pérez",
@@ -316,6 +325,9 @@ describe("Office live map and ETAs", () => {
         {
           id: 1,
           position: 1,
+          transferId: 1,
+          targetTime: "08:00",
+          delivered: null,
           kind: "pickup" as const,
           passengerId: 5,
           passengerName: "Lucas Pérez",
@@ -352,7 +364,7 @@ describe("Office live map and ETAs", () => {
   });
 
   it("does not label a planned time as ETA without a mark", () => {
-    const stop = { id: 1, position: 1, kind: "pickup" as const, passengerId: 1, passengerName: "Synthetic", placeName: "Synthetic", latitude: 0, longitude: 0, plannedTime: "08:55", eta: null, status: "pending", completed: false };
+    const stop = { id: 1, position: 1, transferId: 1, targetTime: "08:00", delivered: null, kind: "pickup" as const, passengerId: 1, passengerName: "Synthetic", placeName: "Synthetic", latitude: 0, longitude: 0, plannedTime: "08:55", eta: null, status: "pending", completed: false };
     const route = { id: 1, status: "planned", driver: { id: 1, name: "Synthetic" }, vehicle: { id: 1, plate: "TEST" }, color: "#000", childrenOnBoard: 0, passengersOnBoard: [], lastMarca: null, currentPosition: null, stops: [stop], nextStop: { ...stop, eta: "08:55" }, geometry: [] as [number, number][] };
     const html = renderToStaticMarkup(<LiveMapPage initialData={{ date: "2026-10-23", timeZone: "America/Argentina/Tucuman", routes: [route] }} />);
     expect(html).not.toMatch(/<strong>ETA:<\/strong>\s*<span[^>]*>08:55/);
@@ -440,6 +452,9 @@ describe("Office live map and ETAs", () => {
         {
           id: 1,
           position: 1,
+          transferId: 1,
+          targetTime: "08:00",
+          delivered: null,
           kind: "pickup" as const,
           passengerId: 1,
           passengerName: "Pasajero",
@@ -498,6 +513,9 @@ describe("Office live map and ETAs", () => {
         {
           id: 1,
           position: 1,
+          transferId: 1,
+          targetTime: "08:00",
+          delivered: null,
           kind: "pickup" as const,
           passengerId: 1,
           passengerName: "Pasajero",
@@ -548,6 +566,9 @@ describe("Office live map and ETAs", () => {
         {
           id: 1,
           position: 1,
+          transferId: 1,
+          targetTime: "08:00",
+          delivered: null,
           kind: "dropoff",
           passengerId: 1,
           passengerName: "Pasajero Sintético",

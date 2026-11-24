@@ -1371,9 +1371,19 @@ export const ROUTE_COLORS = [
   "#7b2cbf",
 ];
 
+export type LiveDelivered = {
+  phoneTimeHhmi: string;
+  latitude: number | null;
+  longitude: number | null;
+};
+
 export type LiveStop = {
   id: number;
   position: number;
+  transferId: number;
+  targetTime: string;
+  // The in-force Entregado Marca of the Traslado: only on the dropoff stop of an Entregado Traslado, else null.
+  delivered: LiveDelivered | null;
   kind: "pickup" | "dropoff";
   passengerId: number;
   passengerName: string;
@@ -1485,6 +1495,10 @@ async function loadLiveDailyPlan(client: Queryable, router: Router | undefined, 
          p.name AS "passengerName",
          t.status AS "transferStatus",
          t.direction,
+         to_char(t.target_time, 'HH24:MI') AS "targetTime",
+         dm.phone_time_hhmi AS "deliveredHhmi",
+         dm.latitude AS "deliveredLat",
+         dm.longitude AS "deliveredLng",
          ${stopPointSql("s.kind")},
          CASE
            WHEN s.kind = t.trasbordo_stop OR (s.kind = 'dropoff' AND nx.id IS NOT NULL) THEN 'Trasbordo'
@@ -1502,6 +1516,13 @@ async function loadLiveDailyPlan(client: Queryable, router: Router | undefined, 
           ORDER BY pv.route_id, pv.version DESC
        ) latest_pv ON latest_pv.route_id = s.route_id
        LEFT JOIN plan_version_legs pvl ON pvl.plan_version_id = latest_pv.id AND pvl.transfer_id = s.transfer_id AND pvl.kind = s.kind
+       LEFT JOIN LATERAL (
+         SELECT e.latitude, e.longitude, ${LIVE_PHONE_TIME_SQL("e.phone_time")}
+           FROM marks e
+          WHERE e.transfer_id = t.id AND e.kind = 'entregado' AND ${MARK_IN_FORCE_SQL}
+          ${LATEST_MARK_FIRST_SQL}
+          LIMIT 1
+       ) dm ON s.kind = 'dropoff' AND t.status = 'entregado'
        WHERE s.route_id = $1
        ORDER BY s.position, s.id`,
       [routeId],
@@ -1528,6 +1549,14 @@ async function loadLiveDailyPlan(client: Queryable, router: Router | undefined, 
         id: Number(row.id),
         position: Number(row.position),
         transferId: Number(row.transferId),
+        targetTime: String(row.targetTime ?? ""),
+        delivered: row.deliveredHhmi === null || row.deliveredHhmi === undefined
+          ? null
+          : {
+            phoneTimeHhmi: String(row.deliveredHhmi),
+            latitude: row.deliveredLat === null || row.deliveredLat === undefined ? null : Number(row.deliveredLat),
+            longitude: row.deliveredLng === null || row.deliveredLng === undefined ? null : Number(row.deliveredLng),
+          } as LiveDelivered | null,
         kind: String(row.kind) as "pickup" | "dropoff",
         passengerId: Number(row.passengerId),
         passengerName: String(row.passengerName),
@@ -1665,7 +1694,7 @@ async function loadLiveDailyPlan(client: Queryable, router: Router | undefined, 
       geometry.push([stop.longitude, stop.latitude]);
     }
 
-    const stops: LiveStop[] = rawStops.map(({ transferId: _, serviceMinutes: __, transferStatus: ___, ...stop }) => stop);
+    const stops: LiveStop[] = rawStops.map(({ serviceMinutes: _, transferStatus: __, ...stop }) => stop);
 
     routes.push({
       id: routeId,

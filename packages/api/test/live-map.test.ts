@@ -446,6 +446,83 @@ describe("Issue #135: each Recorrido at its latest Posición, with the Pasajeros
   });
 });
 
+describe("Issue #140: each LiveStop carries its Traslado, target time and Entregado Marca", () => {
+  const DROP = { lat: -26.82, lng: -65.2 };
+
+  async function liveStops(cookie: string, routeId: number) {
+    const body = await answer(request(`/daily-plans/${TODAY}/live`, "GET", undefined, cookie), 200) as { routes: any[] };
+    const stops = body.routes.find((r) => r.id === routeId).stops as any[];
+    return { pickup: stops.find((s) => s.kind === "pickup"), dropoff: stops.find((s) => s.kind === "dropoff"), stops };
+  }
+
+  it("S13: before any Marca every stop has its transferId, the Traslado's target time and delivered null", async () => {
+    const { office, passenger, served } = await setup("issue-140-before");
+    const { routeId, transferId } = await served((await passenger()).passengerId, "entrada", "08:15");
+
+    const { stops } = await liveStops(office, routeId);
+
+    expect(stops).toHaveLength(2);
+    for (const stop of stops) {
+      expect(stop.transferId).toBe(transferId);
+      expect(stop.targetTime).toBe("08:15");
+      expect(stop.delivered).toBeNull();
+    }
+  });
+
+  it("S13: after Subió and Entregado with GPS only the dropoff stop carries the Entregado Marca", async () => {
+    const { office, passenger, served, school } = await setup("issue-140-delivered-gps");
+    const { driver, routeId, transferId } = await served((await passenger()).passengerId, "entrada");
+    await answer(mark(driver.cookie, routeId, markBody(transferId, "subio", { phoneTime: "2026-10-23T11:30:00.000Z" })), 201);
+    await answer(mark(driver.cookie, routeId, markBody(transferId, "entregado", {
+      location: DROP,
+      phoneTime: "2026-10-23T11:42:00.000Z", // 08:42 in Tucumán
+      receiver: { kind: "destination", destinationId: school },
+    })), 201);
+
+    const { pickup, dropoff } = await liveStops(office, routeId);
+
+    expect(pickup.delivered).toBeNull();
+    expect(dropoff.delivered).toEqual({ phoneTimeHhmi: "08:42", latitude: DROP.lat, longitude: DROP.lng });
+    expect(dropoff.transferId).toBe(transferId);
+    expect(dropoff.targetTime).toBe("08:00");
+  });
+
+  it("S13: an Entregado Marca without GPS gives delivered with null latitude and longitude", async () => {
+    const { office, passenger, served, school } = await setup("issue-140-delivered-no-gps");
+    const { driver, routeId, transferId } = await served((await passenger()).passengerId, "entrada");
+    await answer(mark(driver.cookie, routeId, markBody(transferId, "subio", { phoneTime: "2026-10-23T11:30:00.000Z" })), 201);
+    await answer(mark(driver.cookie, routeId, markBody(transferId, "entregado", {
+      location: null,
+      phoneTime: "2026-10-23T11:44:00.000Z", // 08:44 in Tucumán
+      receiver: { kind: "destination", destinationId: school },
+    })), 201);
+
+    const { pickup, dropoff } = await liveStops(office, routeId);
+
+    expect(pickup.delivered).toBeNull();
+    expect(dropoff.delivered).toEqual({ phoneTimeHhmi: "08:44", latitude: null, longitude: null });
+  });
+
+  it("S13: an undone Entregado Marca leaves delivered null", async () => {
+    const { office, passenger, served, school } = await setup("issue-140-delivered-undone");
+    const { driver, routeId, transferId } = await served((await passenger()).passengerId, "entrada");
+    await answer(mark(driver.cookie, routeId, markBody(transferId, "subio", { phoneTime: "2026-10-23T11:30:00.000Z" })), 201);
+    const entregado = markBody(transferId, "entregado", {
+      location: DROP,
+      phoneTime: "2026-10-23T11:42:00.000Z",
+      receiver: { kind: "destination", destinationId: school },
+    });
+    await answer(mark(driver.cookie, routeId, entregado), 201);
+    await answer(mark(driver.cookie, routeId, markBody(transferId, "undo", { corrects: entregado.id, phoneTime: "2026-10-23T11:43:00.000Z" })), 201);
+
+    const { pickup, dropoff } = await liveStops(office, routeId);
+
+    expect(pickup.delivered).toBeNull();
+    expect(dropoff.delivered).toBeNull();
+    expect(dropoff.status).toBe("pending");
+  });
+});
+
 describe("Issue #135: ETA from the current Posición", () => {
   it("Regla 5: ETA is not available when the router fails, even with a Posición", async () => {
     const { get } = setupMockReview("subio", false, { routerFails: true, position: { lat: -26.15, lng: -65.15 } });
