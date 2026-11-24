@@ -1,10 +1,20 @@
 import { renderToStaticMarkup } from "react-dom/server";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { App } from "./App";
-import { LIVE_REFRESH_MS, LiveMapPage, startTrailRefresh } from "./LiveMapPage";
+import { LIVE_REFRESH_MS, LiveMapPage, PassengerSearch, startTrailRefresh } from "./LiveMapPage";
 import type { LiveRoute } from "@traslado/api";
 import type { TrailPoint } from "./api";
-import { createMarcaPopupContent, createStopPopupContent, updateMapRoutes, updateMapTrail } from "./LiveMap";
+import {
+  applyFollowCenter,
+  bindManualMoveStop,
+  createMarcaPopupContent,
+  createStopPopupContent,
+  dayPassengers,
+  filterPassengers,
+  followTarget,
+  updateMapRoutes,
+  updateMapTrail,
+} from "./LiveMap";
 import liveMapSource from "./LiveMap.tsx?raw";
 import secondFactorSource from "./SecondFactor.tsx?raw";
 
@@ -785,5 +795,211 @@ describe("Office live map and ETAs", () => {
     await Promise.resolve();
     await Promise.resolve();
     expect(onTrail).not.toHaveBeenCalled();
+  });
+
+  // Issue #140. Synthetic data only.
+  const at = (latitude: number, longitude: number) => ({ source: "posicion" as const, latitude, longitude, phoneTime: NOW, phoneTimeHhmi: "08:20", accuracyMeters: 10 });
+  const stop140 = (overrides: Partial<LiveRoute["stops"][number]>): LiveRoute["stops"][number] => ({
+    ...issue135Route().stops[0],
+    passengerId: 30,
+    passengerName: "José Sintético",
+    ...overrides,
+  });
+  const followMap = () => {
+    const handlers = new Map<string, (event: any) => void>();
+    return {
+      handlers,
+      easeTo: vi.fn(),
+      on: vi.fn((type: string, handler: (event: any) => void) => { handlers.set(type, handler); }),
+      off: vi.fn((type: string) => { handlers.delete(type); }),
+    };
+  };
+
+  it("#140 Regla 1: following a Recorrido centers the map on its position on every refresh; without a position the map does not move and the label says Sin posición todavía", () => {
+    const map = followMap();
+    const first = followTarget([issue135Route({ currentPosition: at(-26.8, -65.18) })], { kind: "route", routeId: 7 });
+    expect(first).toEqual({ center: [-65.18, -26.8], routeId: 7, highlightStopId: null, label: "Siguiendo al Recorrido #7" });
+    applyFollowCenter(map, first!.center);
+    const refreshed = followTarget([issue135Route({ currentPosition: at(-26.79, -65.17) })], { kind: "route", routeId: 7 });
+    applyFollowCenter(map, refreshed!.center);
+    expect(map.easeTo.mock.calls).toEqual([[{ center: [-65.18, -26.8] }], [{ center: [-65.17, -26.79] }]]);
+
+    const withoutPosition = followTarget([issue135Route({ currentPosition: null })], { kind: "route", routeId: 7 });
+    expect(withoutPosition).toEqual({ center: null, routeId: 7, highlightStopId: null, label: "Sin posición todavía" });
+    applyFollowCenter(map, withoutPosition!.center);
+    expect(map.easeTo).toHaveBeenCalledTimes(2);
+
+    expect(followTarget([issue135Route()], null)).toBeNull();
+    expect(followTarget([], { kind: "route", routeId: 7 })).toBeNull();
+  });
+
+  it("#140 Regla 2: moving the map by hand (drag or zoom) stops following, a programmatic move does not, and Seguir follows again", () => {
+    const map = followMap();
+    const onStop = vi.fn();
+    const unbind = bindManualMoveStop(map, onStop);
+    map.handlers.get("zoomstart")!({});
+    map.handlers.get("dragstart")!({ type: "dragstart" });
+    expect(onStop).not.toHaveBeenCalled();
+    map.handlers.get("dragstart")!({ originalEvent: {} });
+    map.handlers.get("zoomstart")!({ originalEvent: {} });
+    expect(onStop).toHaveBeenCalledTimes(2);
+    unbind();
+    expect(map.handlers.size).toBe(0);
+    expect(map.off).toHaveBeenCalledWith("dragstart", expect.any(Function));
+    expect(map.off).toHaveBeenCalledWith("zoomstart", expect.any(Function));
+
+    // Not following any more: the Seguir button is still there to follow again.
+    const markup = renderPanel(issue135Route({ currentPosition: at(-26.8, -65.18) }));
+    expect(markup).toContain('data-testid="follow-route-7"');
+    expect(markup).not.toContain('data-testid="follow-label"');
+  });
+
+  it("#140 Regla 3: a Pasajero in Subió follows the Recorrido of that Traslado, labelled A bordo del Recorrido #N (Chofer X)", () => {
+    const route = issue135Route({
+      id: 8,
+      driver: { id: 2, name: "Carla Sintética" },
+      currentPosition: at(-26.81, -65.19),
+      stops: [
+        stop140({ id: 81, kind: "pickup", transferId: 5, status: "subio", completed: true, plannedTime: "07:40" }),
+        stop140({ id: 82, kind: "dropoff", transferId: 5, status: "pending" }),
+      ],
+    });
+    expect(followTarget([issue135Route(), route], { kind: "passenger", passengerId: 30 })).toEqual({
+      center: [-65.19, -26.81],
+      routeId: 8,
+      highlightStopId: null,
+      label: "A bordo del Recorrido #8 (Chofer Carla Sintética)",
+    });
+    // The followed Recorrido without a position: the map does not move, the Pasajero label stays.
+    expect(followTarget([{ ...route, currentPosition: null }], { kind: "passenger", passengerId: 30 })).toEqual({
+      center: null,
+      routeId: 8,
+      highlightStopId: null,
+      label: "A bordo del Recorrido #8 (Chofer Carla Sintética)",
+    });
+  });
+
+  it("#140 Regla 4: a planificado Pasajero follows the Recorrido that picks it up, highlights its pickup stop and says Lo busca el Recorrido #N, HH:MM planificada", () => {
+    const route = issue135Route({
+      currentPosition: at(-26.8, -65.18),
+      stops: [
+        stop140({ id: 71, kind: "pickup", transferId: 5, status: "pending", plannedTime: "07:40" }),
+        stop140({ id: 72, kind: "dropoff", transferId: 5, status: "pending", plannedTime: "08:10" }),
+      ],
+    });
+    const target = followTarget([route], { kind: "passenger", passengerId: 30 });
+    expect(target).toEqual({ center: [-65.18, -26.8], routeId: 7, highlightStopId: 71, label: "Lo busca el Recorrido #7, 07:40 planificada" });
+
+    const { map, library, createdMarkers } = createMockMap();
+    updateMapRoutes(map, library, [route], 7, { current: [] }, { current: new Set<number>() }, undefined, target!.highlightStopId);
+    const stops = createdMarkers.filter((m) => m.element?.className.startsWith("live-stop-marker"));
+    expect(stops.map((m) => m.element?.className)).toEqual(["live-stop-marker live-stop-marker-highlighted", "live-stop-marker"]);
+    expect(stops[0].element?.style.width).toBe("28px");
+    expect(stops[1].element?.style.width).toBe("18px");
+  });
+
+  it("#140 Regla 5: an Entregado Pasajero follows no Recorrido, centers on the Entregado Marca when located and says Entregado a las HH:MM; without location only the label", () => {
+    const delivered = (latitude: number | null, longitude: number | null) => [issue135Route({
+      currentPosition: at(-26.8, -65.18),
+      stops: [
+        stop140({ id: 71, kind: "pickup", transferId: 5, status: "subio", completed: true }),
+        stop140({ id: 72, kind: "dropoff", transferId: 5, status: "entregado", completed: true, delivered: { phoneTimeHhmi: "08:05", latitude, longitude } }),
+      ],
+    })];
+    expect(followTarget(delivered(-26.82, -65.2), { kind: "passenger", passengerId: 30 })).toEqual({
+      center: [-65.2, -26.82], routeId: null, highlightStopId: null, label: "Entregado a las 08:05",
+    });
+    expect(followTarget(delivered(null, null), { kind: "passenger", passengerId: 30 })).toEqual({
+      center: null, routeId: null, highlightStopId: null, label: "Entregado a las 08:05",
+    });
+  });
+
+  it("#140 Regla 6: an Ausente Pasajero is labelled Ausente and follows nobody", () => {
+    const route = issue135Route({
+      currentPosition: at(-26.8, -65.18),
+      stops: [
+        stop140({ id: 71, kind: "pickup", transferId: 5, status: "ausente", completed: true }),
+        stop140({ id: 72, kind: "dropoff", transferId: 5, status: "ausente", completed: true }),
+      ],
+    });
+    expect(followTarget([route], { kind: "passenger", passengerId: 30 })).toEqual({ center: null, routeId: null, highlightStopId: null, label: "Ausente" });
+  });
+
+  it("#140 Regla 7: with two Traslados the first not terminado by target time is used; if all are terminado, the last", () => {
+    const salida = (status: string) => issue135Route({
+      id: 8,
+      currentPosition: at(-26.7, -65.1),
+      stops: [
+        stop140({ id: 81, kind: "pickup", transferId: 6, targetTime: "12:30", status, completed: status !== "pending", plannedTime: "12:10" }),
+        stop140({ id: 82, kind: "dropoff", transferId: 6, targetTime: "12:30", status, completed: status !== "pending" }),
+      ],
+    });
+    const entrada = issue135Route({
+      currentPosition: at(-26.8, -65.18),
+      stops: [
+        stop140({ id: 71, kind: "pickup", transferId: 5, targetTime: "08:00", status: "subio", completed: true }),
+        stop140({ id: 72, kind: "dropoff", transferId: 5, targetTime: "08:00", status: "entregado", completed: true, delivered: { phoneTimeHhmi: "07:55", latitude: null, longitude: null } }),
+      ],
+    });
+    // The salida comes first in the response to show that the target time, not the order, decides.
+    expect(followTarget([salida("pending"), entrada], { kind: "passenger", passengerId: 30 })).toEqual({
+      center: [-65.1, -26.7], routeId: 8, highlightStopId: 81, label: "Lo busca el Recorrido #8, 12:10 planificada",
+    });
+    expect(followTarget([salida("ausente"), entrada], { kind: "passenger", passengerId: 30 })?.label).toBe("Ausente");
+    expect(followTarget([entrada, salida("ausente")], { kind: "passenger", passengerId: 30 })?.label).toBe("Ausente");
+  });
+
+  it("#140 Regla 8: only Pasajeros with Traslados that day appear in the search, once each", () => {
+    const routes = [
+      issue135Route({ stops: [stop140({ id: 71, kind: "pickup" }), stop140({ id: 72, kind: "dropoff" })] }),
+      issue135Route({ id: 8, stops: [stop140({ id: 81, passengerId: 31, passengerName: "Ana Sintética" })] }),
+    ];
+    expect(dayPassengers(routes)).toEqual([{ id: 31, name: "Ana Sintética" }, { id: 30, name: "José Sintético" }]);
+    expect(dayPassengers([])).toEqual([]);
+    expect(filterPassengers(dayPassengers(routes), "Bruno")).toEqual([]);
+    expect(followTarget(routes, { kind: "passenger", passengerId: 99 })).toBeNull();
+  });
+
+  it("#140 Regla 9: the search matches the name ignoring case and accents", () => {
+    const passengers = [{ id: 30, name: "José Sintético" }, { id: 31, name: "Ana Sintética" }];
+    expect(filterPassengers(passengers, "jose")).toEqual([{ id: 30, name: "José Sintético" }]);
+    expect(filterPassengers(passengers, "JOSÉ")).toEqual([{ id: 30, name: "José Sintético" }]);
+    expect(filterPassengers(passengers, "  sintetic ")).toEqual(passengers);
+    expect(filterPassengers(passengers, "")).toEqual([]);
+  });
+
+  it("#140 Criterio 1: every Recorrido has a Seguir button; while following, the label and Dejar de seguir are shown", () => {
+    const plan = { date: "2026-10-23", timeZone: "America/Argentina/Tucuman", routes: [issue135Route({ currentPosition: at(-26.8, -65.18) }), issue135Route({ id: 8 })] };
+    const markup = renderToStaticMarkup(<LiveMapPage initialData={plan} initialFollow={{ kind: "route", routeId: 7 }} />);
+    expect(markup).toMatch(/<button[^>]*data-testid="follow-route-7"[^>]*>Seguir<\/button>/);
+    expect(markup).toMatch(/<button[^>]*data-testid="follow-route-8"[^>]*>Seguir<\/button>/);
+    expect(markup).toMatch(/data-testid="follow-label"[^>]*>Siguiendo al Recorrido #7<\/p>/);
+    expect(markup).toContain(">Dejar de seguir</button>");
+  });
+
+  it("#140 Criterio 2: the Pasajero search lists the day's matches as buttons and the chosen Pasajero's state is labelled", () => {
+    const route = issue135Route({ currentPosition: at(-26.8, -65.18), stops: [stop140({ id: 71, kind: "pickup", transferId: 5, plannedTime: "07:40" })] });
+    const plan = { date: "2026-10-23", timeZone: "America/Argentina/Tucuman", routes: [route] };
+    const markup = renderToStaticMarkup(<LiveMapPage initialData={plan} initialFollow={{ kind: "passenger", passengerId: 30 }} />);
+    expect(markup).toContain("Buscar Pasajero");
+    expect(markup).toMatch(/<input[^>]*type="search"/);
+    expect(markup).toMatch(/data-testid="follow-label"[^>]*>Lo busca el Recorrido #7, 07:40 planificada<\/p>/);
+
+    const search = renderToStaticMarkup(
+      <PassengerSearch passengers={dayPassengers([route])} query="jose" onQuery={() => {}} onChoose={() => {}} />,
+    );
+    expect(search).toMatch(/<button[^>]*data-testid="passenger-30"[^>]*>José Sintético<\/button>/);
+    expect(renderToStaticMarkup(
+      <PassengerSearch passengers={dayPassengers([route])} query="zzz" onQuery={() => {}} onChoose={() => {}} />,
+    )).toContain("Ningún Pasajero del día coincide");
+  });
+
+  it("#140 Criterio 3: the panel and the map stack on a phone instead of a fixed two-column grid, with tappable buttons", () => {
+    const markup = renderPanel(issue135Route());
+    expect(markup).not.toContain("grid-template-columns");
+    expect(markup).toContain('data-testid="live-layout" style="display:flex;flex-wrap:wrap');
+    expect(markup).toMatch(/data-testid="live-panel" style="flex:1 1 320px;min-width:0/);
+    expect(markup).toMatch(/data-testid="live-map-container" style="flex:2 1 480px;min-width:0/);
+    expect(markup).toMatch(/<button[^>]*data-testid="follow-route-7"[^>]*style="[^"]*min-height:44px/);
   });
 });
