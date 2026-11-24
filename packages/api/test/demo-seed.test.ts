@@ -25,12 +25,17 @@ afterEach(async () => {
   await Promise.all(states.splice(0).map((dir) => rm(dir, { recursive: true, force: true })));
 });
 
-// Stand-in for OSRM: 1 m per 0.00001 degree of lat plus lng, at 10 m/s, or `legSeconds` per leg when given.
-const routerWith = (legSeconds?: number): Router => async (points) => points.slice(1).map((to, index) => {
-  const from = points[index];
-  const meters = Math.round((Math.abs(from.lat - to.lat) + Math.abs(from.lng - to.lng)) * 100000);
-  return { distanceMeters: meters, durationSeconds: legSeconds ?? meters / 10 };
-});
+type Point = { lat: number; lng: number };
+// Stand-in for OSRM: 1 m per 0.00001 degree of lat plus lng, at 10 m/s, or `legSeconds` per leg when given (only for
+// Recorridos that stop at `slowAt`, when that is given too).
+const routerWith = (legSeconds?: number, slowAt?: Point): Router => async (points) => {
+  const slow = legSeconds !== undefined && (!slowAt || points.some((point) => point.lat === slowAt.lat && point.lng === slowAt.lng));
+  return points.slice(1).map((to, index) => {
+    const from = points[index];
+    const meters = Math.round((Math.abs(from.lat - to.lat) + Math.abs(from.lng - to.lng)) * 100000);
+    return { distanceMeters: meters, durationSeconds: slow ? legSeconds : meters / 10 };
+  });
+};
 
 type Shipment = {
   amount: number[];
@@ -71,11 +76,11 @@ function fakeEngine(options: { leaveOut?: number } = {}) {
 type Call = { url: string; method: string; origin: string | null; body: string | undefined };
 
 /** The API under test behind the office URL, plus every call the seed made. */
-function environment(engine = fakeEngine(), options: { down?: boolean; legSeconds?: number } = {}) {
+function environment(engine = fakeEngine(), options: { down?: boolean; legSeconds?: number; slowAt?: Point } = {}) {
   const app = createApp({
     db: appPool,
     routing: routingUp,
-    router: routerWith(options.legSeconds),
+    router: routerWith(options.legSeconds, options.slowAt),
     solver: engine.solver,
     travelTime: async () => 600,
     config: { serverEpoch: "demo-seed-test", trustedOrigins: [OFFICE], now: () => clock.now, getClientIp: () => "198.51.100.41" },
@@ -128,12 +133,15 @@ async function office(env: ReturnType<typeof environment>) {
 }
 
 async function counts(read: Awaited<ReturnType<typeof office>>) {
+  const passengers = (await read("/passengers")).passengers;
   return {
     destinations: (await read("/destinations")).destinations.length,
     vehicles: (await read("/vehicles")).vehicles.length,
     drivers: (await read("/drivers")).drivers.length,
-    passengers: (await read("/passengers")).passengers.length,
+    passengers: passengers.length,
     users: (await read("/users")).users.length,
+    adults: (await Promise.all(passengers.map(async (passenger) =>
+      (await read(`/passengers/${passenger.id}/authorized-adults`)).adults.length))).reduce((sum, count) => sum + count, 0),
   };
 }
 
@@ -285,7 +293,7 @@ describe("demo seed", () => {
     await expect(seed(env, state)).rejects.toThrow(
       `demo-oficina ya tiene el TOTP enrolado pero falta ${join(state, "office-totp-secret")}: recuperá la cuenta con db:break-glass-office y volvé a correr el seed`,
     );
-    expect(await counts(await office(env))).toEqual({ destinations: 0, vehicles: 0, drivers: 0, passengers: 0, users: 2 });
+    expect(await counts(await office(env))).toEqual({ destinations: 0, vehicles: 0, drivers: 0, passengers: 0, users: 2, adults: 0 });
     await expect(readFile(join(state, "demo-driver-passwords"))).rejects.toThrow();
   });
 
@@ -308,6 +316,21 @@ describe("demo seed", () => {
     const publishes = env.calls.filter((call) => call.url.endsWith("/publish"));
     expect(publishes).toHaveLength(1);
     expect(publishes.every((call) => call.body === "{}")).toBe(true);
+  });
+
+  it("Regla 4: a rerun on a day published only in part leaves it untouched and fails saying what is missing", async () => {
+    // Only the Recorrido to the Centro de día Demo (Chofer Demo 2) breaks limits, after Chofer Demo 1's is published.
+    const env = environment(fakeEngine(), { legSeconds: 3600, slowAt: { lat: -26.8369, lng: -65.2124 } });
+    await officeAccount();
+    const state = await stateDir();
+    await expect(seed(env, state)).rejects.toThrow(/respondió 409: The Recorrido breaks limits/);
+    const read = await office(env);
+    const before = await read(`/daily-plans/${DAY}`);
+    expect(before.routes.map((route) => route.version)).toEqual([1, null, null]);
+    await expect(seed(env, state)).rejects.toThrow(
+      `El Plan diario ${DAY} quedó publicado a medias (falta: el Recorrido de Chofer Demo 2, el Recorrido de Chofer Demo 3, Traslados sin publicar): no lo toco; terminá de publicarlo desde la Oficina`,
+    );
+    expect(await read(`/daily-plans/${DAY}`)).toEqual(before);
   });
 
   it("Regla 9: an invalid or past date fails before any request", async () => {

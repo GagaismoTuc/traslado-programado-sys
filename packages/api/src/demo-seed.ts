@@ -389,7 +389,17 @@ async function ensureDriverUsers(api: Client, state: string) {
 async function ensurePlan(api: Client, date: string, masters: Masters, log: (line: string) => void) {
   const plan = await api.call("POST", "/daily-plans", { date });
   const routes = rows(plan, "routes");
-  if (routes.some((route) => route.version !== null && route.version !== undefined)) {
+  const published = (route: Json | undefined) => route?.version !== null && route?.version !== undefined;
+  if (routes.some(published)) {
+    // Left untouched either way; a day published only in part (a rejection or a crash between publications) is an error.
+    const missing = ROUTES
+      .filter((spec) => !published(routes.find((route) => Number(route.driverId) === masters.drivers[spec.driver])))
+      .map((spec) => `el Recorrido de ${DRIVERS[spec.driver].name}`);
+    const unpublished = plan.unpublishedTransferIds;
+    if (!Array.isArray(unpublished) || unpublished.length) missing.push("Traslados sin publicar");
+    if (missing.length) {
+      throw new DemoSeedError(`El Plan diario ${date} quedó publicado a medias (falta: ${missing.join(", ")}): no lo toco; terminá de publicarlo desde la Oficina`);
+    }
     log(`El Plan diario ${date} ya tiene Recorridos publicados: no lo toco.`);
     return false;
   }
