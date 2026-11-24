@@ -9,12 +9,13 @@ describe("Issue #139: GET /routes/:routeId/trail", () => {
   it("Regla 1: 1200 Posiciones are reduced uniformly to 500 points ordered by phone time, keeping the first and the last", async () => {
     const { office, passenger, served } = await setup("issue-139-rule-1");
     const { driver, routeId } = await served((await passenger()).passengerId, "entrada");
-    // Synthetic Posiciones inserted newest first, so storage order is the reverse of phone-time order.
+    // Synthetic Posiciones inserted newest first, with server time running the other way, so neither storage order
+    // nor server-time order matches phone-time order.
     await rows(
       `INSERT INTO positions (route_id, driver_id, latitude, longitude, accuracy_meters, phone_time, server_time)
        SELECT $1, $2, -26.8 - i / 100000.0, -65.2 + i / 100000.0, 10,
               timestamptz '2026-10-23T11:00:00Z' + i * interval '1 second',
-              timestamptz '2026-10-23T11:00:00Z' + i * interval '1 second'
+              timestamptz '2026-10-23T12:00:00Z' - i * interval '1 second'
          FROM generate_series(1199, 0, -1) AS i`,
       [routeId, driver.driverId],
     );
