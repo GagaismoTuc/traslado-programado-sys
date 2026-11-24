@@ -1,7 +1,7 @@
 import { useEffect, useState } from "react";
 import type { LiveDailyPlan } from "@traslado/api";
-import { redirectUnauthorized, send } from "./api";
-import { currentPositionLabel, LiveMap } from "./LiveMap";
+import { fetchRouteTrail, redirectUnauthorized, send, type TrailPoint } from "./api";
+import { currentPositionLabel, LiveMap, positionAge, type RouteTrail } from "./LiveMap";
 import { OfficeNav } from "./OfficeNav";
 
 const PLAN_TIME_ZONE = "America/Argentina/Tucuman";
@@ -10,12 +10,46 @@ export function todayInPlanZone(now = new Date()) {
   return new Intl.DateTimeFormat("en-CA", { timeZone: PLAN_TIME_ZONE }).format(now);
 }
 
+/** How often the map refreshes the live data and the chosen Recorrido's Rastro. */
+export const LIVE_REFRESH_MS = 15_000;
+
+/**
+ * Loads a Recorrido's Rastro now and on every map refresh. The returned stop ends the refresh and drops any
+ * answer still in flight, so a late Rastro of a previous selection is never drawn.
+ */
+export function startTrailRefresh(
+  routeId: number,
+  fetchTrail: (routeId: number) => Promise<TrailPoint[] | null>,
+  onTrail: (trail: RouteTrail) => void,
+  intervalMs = LIVE_REFRESH_MS,
+) {
+  let stopped = false;
+  const load = () => {
+    void fetchTrail(routeId).then((points) => {
+      if (!stopped && points) onTrail({ routeId, points });
+    });
+  };
+  load();
+  const handle = setInterval(load, intervalMs);
+  return () => {
+    stopped = true;
+    clearInterval(handle);
+  };
+}
+
 export function LiveMapPage({ initialData }: { initialData?: LiveDailyPlan } = {}) {
   const [date, setDate] = useState(todayInPlanZone);
   const [data, setData] = useState<LiveDailyPlan | null>(initialData ?? null);
   const [loading, setLoading] = useState(initialData ? false : true);
   const [error, setError] = useState("");
   const [selectedRouteId, setSelectedRouteId] = useState<number | null>(null);
+  const [trail, setTrail] = useState<RouteTrail | null>(null);
+
+  useEffect(() => {
+    setTrail(null);
+    if (selectedRouteId === null) return;
+    return startTrailRefresh(selectedRouteId, fetchRouteTrail, setTrail);
+  }, [selectedRouteId, date]);
 
   useEffect(() => {
     if (initialData) return;
@@ -52,7 +86,7 @@ export function LiveMapPage({ initialData }: { initialData?: LiveDailyPlan } = {
     // Auto-refresh by polling every ~15 s
     const interval = setInterval(() => {
       void load();
-    }, 15000);
+    }, LIVE_REFRESH_MS);
 
     return () => {
       cancelled = true;
@@ -72,7 +106,10 @@ export function LiveMapPage({ initialData }: { initialData?: LiveDailyPlan } = {
             type="date"
             name="date"
             value={date}
-            onChange={(e) => setDate(e.target.value)}
+            onChange={(e) => {
+              setDate(e.target.value);
+              setSelectedRouteId(null);
+            }}
           />
         </label>
         {loading && <span role="status">Actualizando...</span>}
@@ -122,6 +159,7 @@ export function LiveMapPage({ initialData }: { initialData?: LiveDailyPlan } = {
           <ul style={{ listStyle: "none", padding: 0, margin: 0 }}>
             {data?.routes.map((route) => {
               const isSelected = selectedRouteId === route.id;
+              const age = route.currentPosition ? positionAge(route.currentPosition, route.status) : null;
               return (
                 <li
                   key={route.id}
@@ -205,6 +243,12 @@ export function LiveMapPage({ initialData }: { initialData?: LiveDailyPlan } = {
                       <div style={{ color: "#495057", fontSize: "13px", marginTop: "4px" }}>
                         <strong>Posición:</strong>{" "}
                         <span data-testid={`route-position-${route.id}`}>{currentPositionLabel(route.currentPosition)}</span>
+                        {age && (
+                          <>
+                            {" · "}
+                            <span data-testid={`route-age-${route.id}`}>{age.label}</span>
+                          </>
+                        )}
                       </div>
                     )}
                     {route.lastMarca && (
@@ -249,6 +293,7 @@ export function LiveMapPage({ initialData }: { initialData?: LiveDailyPlan } = {
           <LiveMap
             routes={data?.routes ?? []}
             selectedRouteId={selectedRouteId}
+            trail={trail}
             onSelectRoute={setSelectedRouteId}
           />
         </div>

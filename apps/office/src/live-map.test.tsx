@@ -1,13 +1,15 @@
 import { renderToStaticMarkup } from "react-dom/server";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { App } from "./App";
-import { LiveMapPage } from "./LiveMapPage";
+import { LIVE_REFRESH_MS, LiveMapPage, startTrailRefresh } from "./LiveMapPage";
 import type { LiveRoute } from "@traslado/api";
-import { createMarcaPopupContent, createStopPopupContent, updateMapRoutes } from "./LiveMap";
+import type { TrailPoint } from "./api";
+import { createMarcaPopupContent, createStopPopupContent, updateMapRoutes, updateMapTrail } from "./LiveMap";
 import liveMapSource from "./LiveMap.tsx?raw";
 import secondFactorSource from "./SecondFactor.tsx?raw";
 
 afterEach(() => {
+  vi.useRealTimers();
   vi.unstubAllGlobals();
   vi.restoreAllMocks();
 });
@@ -628,5 +630,139 @@ describe("Office live map and ETAs", () => {
     }));
     expect(markup).toContain('data-testid="route-boarded-7">2</span>');
     expect(markup).toContain('data-testid="route-boarded-names-7">Pasajero Sintético 2, Pasajero Sintético 3</span>');
+  });
+  // Issue #139. Synthetic data only; the fixed clock is 2026-10-23T11:20:00Z (08:20 in Tucumán).
+  const NOW = "2026-10-23T11:20:00.000Z";
+  const secondsAgo = (s: number) => new Date(Date.parse(NOW) - s * 1000).toISOString();
+  const posicion = (phoneTime: string) => ({ source: "posicion" as const, latitude: -26.8, longitude: -65.18, phoneTime, phoneTimeHhmi: "08:17", accuracyMeters: 10 });
+  const GRAY = "#6c757d";
+  const trailPoints: TrailPoint[] = [
+    { lat: -26.83, lng: -65.21, phoneTime: "2026-10-23T11:00:00.000Z" },
+    { lat: -26.82, lng: -65.2, phoneTime: "2026-10-23T11:05:00.000Z" },
+    { lat: -26.81, lng: -65.19, phoneTime: "2026-10-23T11:10:00.000Z" },
+  ];
+
+  it("Regla 3: labels a Posición by its age, en vivo up to 60 s, hace N s up to 2 min, then stale with a gray marker", () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date(NOW));
+    const cases: [number, string, boolean][] = [
+      [60, "en vivo", false],
+      [61, "hace 61 s", false],
+      [120, "hace 120 s", false],
+      [121, "sin posición desde 08:17", true],
+    ];
+    for (const [age, label, stale] of cases) {
+      const route = issue135Route({ currentPosition: posicion(secondsAgo(age)) });
+      expect(renderPanel(route)).toContain(`data-testid="route-age-7">${label}</span>`);
+      const marker = vehicleMarkers(route)[0];
+      expect(marker.element?.style.backgroundColor).toBe(stale ? GRAY : "#2e5aa8");
+      expect(marker.element?.title).toContain(label);
+    }
+  });
+
+  it("Regla 4: a phone time in the future counts as age 0, en vivo", () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date(NOW));
+    const route = issue135Route({ currentPosition: posicion(secondsAgo(-300)) });
+    expect(renderPanel(route)).toContain('data-testid="route-age-7">en vivo</span>');
+    expect(vehicleMarkers(route)[0].element?.style.backgroundColor).toBe("#2e5aa8");
+  });
+
+  it("Regla 5: a position from a Marca keeps Última marca, HH:MM and shows no age", () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date(NOW));
+    const route = issue135Route({
+      currentPosition: { source: "marca", latitude: -26.82, longitude: -65.2, phoneTime: secondsAgo(600), phoneTimeHhmi: "08:10", accuracyMeters: null },
+    });
+    const markup = renderPanel(route);
+    expect(markup).toContain('data-testid="route-position-7">Última marca, 08:10</span>');
+    expect(markup).not.toContain('data-testid="route-age-7"');
+    expect(markup).not.toContain("sin posición desde");
+    expect(vehicleMarkers(route)[0].element?.style.backgroundColor).toBe("#2e5aa8");
+  });
+
+  it("Regla 6: a closed Recorrido shows its whole Rastro and no age label", () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date(NOW));
+    const route = issue135Route({ status: "cerrado", currentPosition: posicion(secondsAgo(3600)) });
+    const markup = renderPanel(route);
+    expect(markup).not.toContain('data-testid="route-age-7"');
+    expect(markup).not.toContain("sin posición desde");
+    expect(vehicleMarkers(route)[0].element?.style.backgroundColor).toBe("#2e5aa8");
+
+    const { map, layers, sources } = createMockMap();
+    updateMapTrail(map, [route], { routeId: 7, points: trailPoints }, { current: null });
+    expect(layers.get("route-trail-layer-7")?.paint["line-color"]).toBe("#2e5aa8");
+    expect(sources.get("route-trail-7")?.data.geometry.coordinates).toEqual([[-65.21, -26.83], [-65.2, -26.82], [-65.19, -26.81]]);
+  });
+
+  it("Criterio 1: draws the chosen Recorrido's Rastro as a solid line in its color, apart from the dashed planned line", () => {
+    const { map, library, layers, sources } = createMockMap();
+    const route = issue135Route();
+    updateMapRoutes(map, library, [route], 7, { current: [] }, { current: new Set<number>() });
+    updateMapTrail(map, [route], { routeId: 7, points: trailPoints }, { current: null });
+
+    const planned = layers.get("route-layer-7");
+    const trail = layers.get("route-trail-layer-7");
+    expect(planned.paint["line-dasharray"]).toEqual([2, 2]);
+    expect(trail.type).toBe("line");
+    expect(trail.source).toBe("route-trail-7");
+    expect(trail.paint["line-color"]).toBe("#2e5aa8");
+    expect(trail.paint["line-dasharray"]).toBeUndefined();
+    expect(sources.get("route-trail-7")?.data.geometry).toEqual({
+      type: "LineString",
+      coordinates: [[-65.21, -26.83], [-65.2, -26.82], [-65.19, -26.81]],
+    });
+  });
+
+  it("Criterio 3: refetches the Rastro on every 15 s map refresh until the selection ends", async () => {
+    vi.useFakeTimers();
+    const fetchTrail = vi.fn(async () => trailPoints);
+    const onTrail = vi.fn();
+    const stop = startTrailRefresh(7, fetchTrail, onTrail);
+    expect(LIVE_REFRESH_MS).toBe(15_000);
+    await vi.advanceTimersByTimeAsync(0);
+    expect(fetchTrail).toHaveBeenCalledTimes(1);
+    expect(fetchTrail).toHaveBeenCalledWith(7);
+    expect(onTrail).toHaveBeenLastCalledWith({ routeId: 7, points: trailPoints });
+    await vi.advanceTimersByTimeAsync(14_999);
+    expect(fetchTrail).toHaveBeenCalledTimes(1);
+    await vi.advanceTimersByTimeAsync(1);
+    expect(fetchTrail).toHaveBeenCalledTimes(2);
+    expect(onTrail).toHaveBeenCalledTimes(2);
+    stop();
+    await vi.advanceTimersByTimeAsync(60_000);
+    expect(fetchTrail).toHaveBeenCalledTimes(2);
+  });
+
+  it("Regla 7: changing the date or the chosen Recorrido removes the previous Rastro, and a late answer for it is not drawn", async () => {
+    const { map, layers, sources } = createMockMap();
+    const first = issue135Route();
+    const second = issue135Route({ id: 8, color: "#bf4520" });
+    const renderedTrail = { current: null as number | null };
+
+    updateMapTrail(map, [first, second], { routeId: 7, points: trailPoints }, renderedTrail);
+    expect(layers.has("route-trail-layer-7")).toBe(true);
+
+    // Another Recorrido chosen: Recorrido 7's Rastro leaves the map.
+    updateMapTrail(map, [first, second], { routeId: 8, points: trailPoints }, renderedTrail);
+    expect(layers.has("route-trail-layer-7")).toBe(false);
+    expect(sources.has("route-trail-7")).toBe(false);
+    expect(layers.get("route-trail-layer-8")?.paint["line-color"]).toBe("#bf4520");
+
+    // Date changed (no Recorrido chosen): no Rastro remains.
+    updateMapTrail(map, [], null, renderedTrail);
+    expect(layers.has("route-trail-layer-8")).toBe(false);
+    expect(sources.has("route-trail-8")).toBe(false);
+
+    // A late answer for the previous selection is dropped once it ends.
+    let answer: (points: TrailPoint[]) => void = () => {};
+    const onTrail = vi.fn();
+    const stop = startTrailRefresh(7, () => new Promise<TrailPoint[]>((resolve) => { answer = resolve; }), onTrail);
+    stop();
+    answer(trailPoints);
+    await Promise.resolve();
+    await Promise.resolve();
+    expect(onTrail).not.toHaveBeenCalled();
   });
 });

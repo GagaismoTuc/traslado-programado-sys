@@ -68,3 +68,18 @@ export async function suggestAddressPin(rawAddress: string): Promise<AddressSugg
     return { ok: false, message: "Address search is unavailable. Place the pin on the map by hand." };
   }
 }
+
+/** One Posición of a Recorrido's Rastro, as GET /routes/:routeId/trail returns it. */
+export type TrailPoint = { lat: number; lng: number; phoneTime: string };
+
+/** The Rastro of a Recorrido in phone-time order, or null when it could not be loaded. */
+export async function fetchRouteTrail(routeId: number): Promise<TrailPoint[] | null> {
+  try {
+    const response = await send(`/routes/${routeId}/trail`, "GET");
+    if (await redirectUnauthorized(response)) return null;
+    if (!response.ok) return null;
+    return (await response.json() as { points: TrailPoint[] }).points;
+  } catch {
+    return null;
+  }
+}
