@@ -5,7 +5,7 @@ services:
     volumes:
       - ./LocalGateway.Caddyfile:/etc/caddy/Caddyfile:ro
     ports:
-      - "127.0.0.1:18780:80"
+      - "127.0.0.1:${LOCAL_GATEWAY_PORT:-18780}:80"
   # Throwaway offline prototype of issue #40, on the API image that `up` already pulled. Fake marks only, kept in memory.
   offline-prototype:
     image: ${API_IMAGE:-ghcr.io/gagaismotuc/traslado-api}:${IMAGE_TAG:?required}
