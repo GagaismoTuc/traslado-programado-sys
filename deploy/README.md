@@ -171,12 +171,13 @@ When the test ends:
    left on the phone, and uninstalls it.
 2. Run `sh deploy/prueba-de-campo.sh borrar` to see what would be deleted, then
    `sh deploy/prueba-de-campo.sh borrar --confirmar`. It stops the tunnels and
-   deletes the containers, the database volume, the networks and the state
+   deletes the containers, every volume and network of the Compose project
+   `traslado-prueba-de-campo` (never staging's), the ingress network and the state
    directory, and ends by listing what it deleted. If something cannot be
    deleted, it fails and lists what is left; fix the cause and run it again
    (a second run that finds nothing succeeds).
-3. Check that `docker volume ls` no longer lists
-   `traslado-prueba-de-campo_database` and that `$DEPLOY_ROOT/prueba-de-campo`
+3. Check that `docker volume ls` no longer lists any `traslado-prueba-de-campo_*`
+   volume and that `$DEPLOY_ROOT/prueba-de-campo`
    no longer exists.
 4. Record in issue #142 how many participants accepted and that the database
    was deleted.

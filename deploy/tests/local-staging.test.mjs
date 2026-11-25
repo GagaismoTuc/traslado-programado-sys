@@ -456,12 +456,16 @@ function withTwoEnvironments(check) {
     'echo "$*" >> "$LOG"',
     'all="$*"; project=; prev=',
     'for arg do [ "$prev" != --project-name ] || project=$arg; prev=$arg; done',
-    'touch "$FAKE/containers" "$FAKE/volumes" "$FAKE/networks"',
+    'touch "$FAKE/containers" "$FAKE/volumes" "$FAKE/networks" "$FAKE/labels"',
     'drop() { awk -v item="$2" -v field="$3" \'field == 0 ? $0 != item : $field != item\' "$FAKE/$1" > "$FAKE/$1.tmp"; mv "$FAKE/$1.tmp" "$FAKE/$1"; }',
     'add() { grep -Fxq "$2" "$FAKE/$1" 2>/dev/null || echo "$2" >> "$FAKE/$1"; }',
     'case "$all" in',
     '  "ps -aq --filter label=com.docker.compose.project="*) [ "${FAIL_INSPECT-}" != 1 ] || exit 1; awk -v p="${all##*=}" \'$1 == p {print $2}\' "$FAKE/containers";;',
     '  "rm -f "*) shift 2; for id do drop containers "$id" 2; done;;',
+    // $FAKE/labels holds "<volume|network> <compose project> <name>" for resources Compose labelled with a project.
+    '  "volume ls --filter label=com.docker.compose.project="*|"network ls --filter label=com.docker.compose.project="*)',
+    '    [ "${FAIL_INSPECT-}" != 1 ] || exit 1',
+    '    awk -v k="$1" -v p="${4#label=com.docker.compose.project=}" \'$1 == k && $2 == p {print $3}\' "$FAKE/labels" | grep -Fxf "$FAKE/${1}s" || true;;',
     '  "volume ls"*) [ "${FAIL_INSPECT-}" != 1 ] || exit 1; cat "$FAKE/volumes";;',
     '  "volume rm "*) [ "${FAIL_VOLUME_RM-}" != 1 ] || exit 1; drop volumes "$3" 0; rm -f "$FAKE/office-${3%_database}";;',
     '  "network ls"*) cat "$FAKE/networks";;',
@@ -715,6 +719,80 @@ test('borrar --confirmar fails and says what is left when something cannot be de
     assert.equal(retry.status, 0, retry.stderr);
     assert.equal(read('volumes').trim(), '');
     assert.equal(existsSync(state), false);
+  });
+});
+
+test('borrar --confirmar fails and names an extra project volume that survives volume rm', () => {
+  const root = mkdtempSync(join(tmpdir(), 'field-test-'));
+  try {
+    mkdirSync(join(root, 'bin'));
+    writeFileSync(join(root, 'bin', 'docker'), '#!/bin/sh\necho "$*" >> "$LOG"\ncase "$1 $2" in\n  "volume ls") echo traslado-prueba-de-campo_extra ;;\nesac\n', { mode: 0o755 });
+    const log = join(root, 'docker-log');
+    const result = spawnSync(shell, [fieldScript, 'borrar', '--confirmar'], {
+      encoding: 'utf8', timeout: 20000,
+      env: { ...process.env, DEPLOY_ROOT: root, LOG: log, PATH: `${join(root, 'bin')}${process.platform === 'win32' ? ';' : ':'}${process.env.PATH}` },
+    });
+    assert.equal(result.status, 1, result.stdout);
+    assert.equal(result.stdout, '');
+    assert.equal(result.stderr, 'borrar could not delete everything; still left:\n  volume traslado-prueba-de-campo_extra\nFix the cause and run sh deploy/prueba-de-campo.sh borrar --confirmar again\n');
+    assert.match(readFileSync(log, 'utf8'), /^volume rm traslado-prueba-de-campo_extra$/m);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test('borrar lists and deletes every volume and network of the Prueba de campo Compose project', () => {
+  withTwoEnvironments(({ root, env, field, read, log }) => {
+    assert.equal(field('up').status, 0);
+    writeFileSync(join(env.FAKE, 'volumes'), `${read('volumes')}traslado-prueba-de-campo_extra\n`);
+    writeFileSync(join(env.FAKE, 'networks'), `${read('networks')}traslado-prueba-de-campo-extra-net\n`);
+    writeFileSync(join(env.FAKE, 'labels'), 'network traslado-prueba-de-campo traslado-prueba-de-campo-extra-net\n');
+    const before = [read('volumes'), read('networks')];
+    const listed = field('borrar');
+    assert.equal(listed.status, 0, listed.stderr);
+    assert.deepEqual(listed.stdout.split('\n').slice(0, 7), [
+      'borrar --confirmar would delete:',
+      '  containers of traslado-prueba-de-campo: traslado-prueba-de-campo-gateway',
+      `  database volume ${fieldVolume}`,
+      '  volume traslado-prueba-de-campo_extra',
+      '  network traslado-prueba-de-campo-extra-net',
+      '  network traslado-prueba-de-campo_default',
+      `  network ${fieldNetwork}`,
+    ]);
+    assert.deepEqual([read('volumes'), read('networks')], before);
+    assert.doesNotMatch(log(), /^(rm -f|volume rm|network rm)/m);
+    const result = field('borrar', '--confirmar');
+    assert.equal(result.status, 0, result.stderr);
+    assert.match(result.stdout, /\n  volume traslado-prueba-de-campo_extra\n  network traslado-prueba-de-campo-extra-net\n/);
+    assert.match(log(), /^volume rm traslado-prueba-de-campo_extra$/m);
+    assert.match(log(), /^network rm traslado-prueba-de-campo-extra-net$/m);
+    assert.equal(read('volumes').trim(), '');
+    assert.equal(read('networks').trim(), '');
+  });
+});
+
+test('borrar never lists or deletes a staging volume or network, even labelled with the Prueba de campo project', () => {
+  withTwoEnvironments(({ root, env, field, staging, read, log }) => {
+    assert.equal(staging('up').status, 0);
+    assert.equal(field('up').status, 0);
+    writeFileSync(join(env.FAKE, 'labels'), [
+      'volume traslado-prueba-de-campo traslado-staging_database',
+      'network traslado-prueba-de-campo traslado-staging_default',
+      'network traslado-prueba-de-campo traslado-local-ingress-staging',
+      '',
+    ].join('\n'));
+    const listed = field('borrar');
+    assert.equal(listed.status, 0, listed.stderr);
+    assert.doesNotMatch(listed.stdout, /staging/);
+    const mark = log().length;
+    const result = field('borrar', '--confirmar');
+    assert.equal(result.status, 0, result.stderr);
+    assert.doesNotMatch(result.stdout, /staging/);
+    assert.doesNotMatch(log().slice(mark), /^(rm -f|volume rm|network rm) .*staging/m);
+    assert.match(read('volumes'), /^traslado-staging_database$/m);
+    assert.match(read('networks'), /^traslado-staging_default$/m);
+    assert.match(read('networks'), /^traslado-local-ingress-staging$/m);
+    assert.ok(existsSync(join(root, 'staging', '.env')));
   });
 });
 

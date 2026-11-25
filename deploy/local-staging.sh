@@ -87,16 +87,27 @@ stop_all() {
   rm -f "$state/local-staging-active" "$state/urls"
 }
 if [ "$action" = down ]; then stop_all; remind; exit 0; fi
+# Every volume or network ("$1") of the Compose project, sorted: those Compose labelled with it and those named
+# "${compose_project}_*", plus "$2" when it exists. A labelled name that does not carry the project name, or that
+# names staging, is never included, whatever its label says.
+project_resources() {
+  labelled=$(docker "$1" ls --filter "label=com.docker.compose.project=$compose_project" --format '{{.Name}}') || return 1
+  all=$(docker "$1" ls --format '{{.Name}}') || return 1
+  {
+    printf '%s\n' "$labelled" | awk -v n="$name" 'index($0, n) && !/staging/'
+    printf '%s\n' "$all" | awk -v p="${compose_project}_" -v x="${2-}" 'index($0, p) == 1 || (x != "" && $0 == x)'
+  } | LC_ALL=C sort -u
+}
 # What the Prueba de campo leaves on this PC, one item per line; fails when Docker cannot be read.
 leftovers() {
   ids=$(docker ps -aq --filter "label=com.docker.compose.project=$compose_project") || return 1
-  volumes=$(docker volume ls --format '{{.Name}}') || return 1
-  networks=$(docker network ls --format '{{.Name}}') || return 1
+  volumes=$(project_resources volume) || return 1
+  networks=$(project_resources network "$ingress_network") || return 1
   if [ -n "$ids" ]; then echo "containers of $compose_project:" $ids; fi
   if printf '%s\n' "$volumes" | grep -Fxq "$volume"; then echo "database volume $volume"; fi
-  for network in "${compose_project}_default" "$ingress_network"; do
-    if printf '%s\n' "$networks" | grep -Fxq "$network"; then echo "network $network"; fi
-  done
+  for item in $volumes; do [ "$item" = "$volume" ] || echo "volume $item"; done
+  for item in $networks; do [ "$item" = "$ingress_network" ] || echo "network $item"; done
+  if printf '%s\n' "$networks" | grep -Fxq "$ingress_network"; then echo "network $ingress_network"; fi
   for tunnel in office driver; do
     if [ -e "$state/$tunnel.pid" ]; then echo "cloudflared $tunnel tunnel"; fi
   done
@@ -119,9 +130,11 @@ if [ "$action" = borrar ]; then
   else
     failed=1
   fi
-  if printf '%s\n' "$found" | grep -Fxq "database volume $volume"; then docker volume rm "$volume" >/dev/null || failed=1; fi
-  for network in "${compose_project}_default" "$ingress_network"; do
-    if printf '%s\n' "$found" | grep -Fxq "network $network"; then docker network rm "$network" >/dev/null || failed=1; fi
+  for item in $(printf '%s\n' "$found" | sed -n 's/^database volume //p; s/^volume //p'); do
+    docker volume rm "$item" >/dev/null || failed=1
+  done
+  for item in $(printf '%s\n' "$found" | sed -n 's/^network //p'); do
+    docker network rm "$item" >/dev/null || failed=1
   done
   # The directory goes last: while anything else is left, its tunnel state and env are still needed to retry.
   if [ "$failed" -eq 0 ] && [ -e "$state" ]; then rm -rf -- "$state" || failed=1; fi
