@@ -465,7 +465,7 @@ function withTwoEnvironments(check) {
     // $FAKE/labels holds "<volume|network> <compose project> <name>" for resources Compose labelled with a project.
     '  "volume ls --filter label=com.docker.compose.project="*|"network ls --filter label=com.docker.compose.project="*)',
     '    [ "${FAIL_INSPECT-}" != 1 ] || exit 1',
-    '    awk -v k="$1" -v p="${4#label=com.docker.compose.project=}" \'$1 == k && $2 == p {print $3}\' "$FAKE/labels" | grep -Fxf "$FAKE/${1}s" || true;;',
+    '    awk -v k="$1" -v p="${4#label=com.docker.compose.project=}" \'$1 == k && $2 == p {sub(/^[^ ]+ [^ ]+ /, ""); print}\' "$FAKE/labels" | grep -Fxf "$FAKE/${1}s" || true;;',
     '  "volume ls"*) [ "${FAIL_INSPECT-}" != 1 ] || exit 1; cat "$FAKE/volumes";;',
     '  "volume rm "*) [ "${FAIL_VOLUME_RM-}" != 1 ] || exit 1; drop volumes "$3" 0; rm -f "$FAKE/office-${3%_database}";;',
     '  "network ls"*) cat "$FAKE/networks";;',
@@ -839,6 +839,42 @@ test('borrar never lists or deletes a staging volume or network, even labelled w
     assert.match(read('networks'), /^traslado-staging_default$/m);
     assert.match(read('networks'), /^traslado-local-ingress-staging$/m);
     assert.ok(existsSync(join(root, 'staging', '.env')));
+  });
+});
+
+test('borrar never splits a Docker name with a space into a staging name', () => {
+  withTwoEnvironments(({ env, field, staging, read, log }) => {
+    assert.equal(staging('up').status, 0);
+    assert.equal(field('up').status, 0);
+    const odd = 'traslado-prueba-de-campo_a traslado-staging_default';
+    writeFileSync(join(env.FAKE, 'networks'), `${read('networks')}${odd}\n`);
+    writeFileSync(join(env.FAKE, 'labels'), `network traslado-prueba-de-campo ${odd}\n`);
+    const listed = field('borrar');
+    assert.equal(listed.status, 0, listed.stderr);
+    assert.doesNotMatch(listed.stdout, /staging/);
+    const mark = log().length;
+    const result = field('borrar', '--confirmar');
+    assert.equal(result.status, 0, result.stderr);
+    assert.doesNotMatch(result.stdout, /staging/);
+    assert.doesNotMatch(log().slice(mark), /^network rm traslado-staging_default$/m);
+    assert.doesNotMatch(log().slice(mark), /^(volume|network) rm \S+ /m);
+    assert.match(read('networks'), /^traslado-staging_default$/m);
+  });
+});
+
+test('borrar ignores a volume of a similarly named project and a labelled volume without the project name', () => {
+  withTwoEnvironments(({ env, field, read, log }) => {
+    assert.equal(field('up').status, 0);
+    writeFileSync(join(env.FAKE, 'volumes'), `${read('volumes')}traslado-prueba-de-campo2_db\nunrelated-vol\n`);
+    writeFileSync(join(env.FAKE, 'labels'), 'volume traslado-prueba-de-campo unrelated-vol\n');
+    const listed = field('borrar');
+    assert.equal(listed.status, 0, listed.stderr);
+    assert.doesNotMatch(listed.stdout, /prueba-de-campo2_db|unrelated-vol/);
+    const result = field('borrar', '--confirmar');
+    assert.equal(result.status, 0, result.stderr);
+    assert.doesNotMatch(result.stdout, /prueba-de-campo2_db|unrelated-vol/);
+    assert.doesNotMatch(log(), /^volume rm (traslado-prueba-de-campo2_db|unrelated-vol)$/m);
+    assert.deepEqual(read('volumes').trim().split('\n'), ['traslado-prueba-de-campo2_db', 'unrelated-vol']);
   });
 });
 
