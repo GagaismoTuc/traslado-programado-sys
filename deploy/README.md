@@ -124,6 +124,67 @@ It queues fake marks in IndexedDB, keeps what it receives in memory until the
 container restarts, and never touches the real apps or the database. The phone
 test protocol is `prototypes/offline-pwa/PROTOCOL.md`.
 
+## Prueba de campo
+
+**Real data warning.** The Prueba de campo is the December tracking test's own
+environment (ADR 0003) and the only place that stores real data: the Posiciones
+of the team members who accepted in writing, and nothing else real. Every person
+record in it (Chofer, Pasajero, Adulto autorizado, Oficina account) has a
+synthetic name, and its database is deleted when the test ends. It never shares
+its database with staging; staging, development and CI stay synthetic-only.
+
+It runs like local staging (same PC, Docker Desktop, GHCR login, two Quick
+Tunnels, the `main` images, real OSRM and VROOM) but separately: Compose project
+`traslado-prueba-de-campo`, state in `$DEPLOY_ROOT/prueba-de-campo` (by default
+`$HOME/traslado-staging/prueba-de-campo`), subnets
+`172.16.31.0/24` and `172.16.30.0/24`, ingress network
+`traslado-local-ingress-prueba-de-campo`, and gateway port `127.0.0.1:18790`.
+The port is saved as `LOCAL_GATEWAY_PORT=18790` in its `.env`, so a
+`docker compose --env-file "$DEPLOY_ROOT/prueba-de-campo/.env"` run by hand
+never lands on staging's 18780; `up` refuses an env without it.
+Both environments can run at the same time without touching each other, and
+each script refuses the other's state directory. It costs nothing: no hosting,
+domain or paid service.
+
+1. Consent. Each participant accepts in writing (a message is enough) that the
+   test stores their phone's location. Keep those messages outside the
+   repository and the system; issue #142 only records how many accepted and
+   that the database was deleted, never names.
+2. Start it and load the demo data, with a date of today or later:
+
+   ```sh
+   sh deploy/prueba-de-campo.sh up
+   DEPLOY_PROJECT=prueba-de-campo sh deploy/seed-demo.sh 2026-12-05
+   ```
+
+   `up` creates the synthetic `demo-oficina` account as in local staging and
+   prints the office and driver URLs; it loads no other person. The seed creates
+   the Choferes, Pasajeros and Adultos autorizados with synthetic names
+   ("Chofer Demo 1") and publishes the Plan diario of that date. Participants
+   sign in with those Chofer accounts (passwords in
+   `$DEPLOY_ROOT/prueba-de-campo/demo-driver-passwords`); a participant's real
+   name is never entered in the system.
+3. Between test days, `sh deploy/prueba-de-campo.sh down` stops the containers
+   and tunnels and keeps the database, so the test can be repeated; it reminds
+   you that the database holds real Posiciones.
+
+When the test ends:
+
+1. Each participant signs out of the driver app, which deletes the Posiciones
+   left on the phone, and uninstalls it.
+2. Run `sh deploy/prueba-de-campo.sh borrar` to see what would be deleted, then
+   `sh deploy/prueba-de-campo.sh borrar --confirmar`. It stops the tunnels and
+   deletes the containers, every volume and network of the Compose project
+   `traslado-prueba-de-campo` (never staging's), the ingress network and the state
+   directory, and ends by listing what it deleted. If something cannot be
+   deleted, it fails and lists what is left; fix the cause and run it again
+   (a second run that finds nothing succeeds).
+3. Check that `docker volume ls` no longer lists any `traslado-prueba-de-campo_*`
+   volume and that `$DEPLOY_ROOT/prueba-de-campo`
+   no longer exists.
+4. Record in issue #142 how many participants accepted and that the database
+   was deleted.
+
 ## Local verification
 
 `node --test deploy/tests/compose.test.mjs` checks the rendered Compose isolation. `deploy/tests/edge-smoke.ps1` creates and removes three disposable projects and checks HTTPS and network isolation using `deploy/tests/mock-osrm.Dockerfile`, a test-only stub. Build the local app images and mock first; the stub is not a substitute for the real OSRM artifact or a representative resource measurement. The real image and full-stack memory measurement remain pending until the registry grants `read:packages`.

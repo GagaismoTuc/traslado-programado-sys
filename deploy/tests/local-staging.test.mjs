@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, existsSync, rmSync, statSync } from 'node:fs';
+import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, existsSync, rmSync, statSync, symlinkSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
 import { spawnSync } from 'node:child_process';
@@ -437,5 +437,499 @@ test('down stops staging while keeping office-password, driver-password and env 
     assert.equal(readFileSync(join(root, 'staging', 'driver-password'), 'utf8'), driverPasswordBefore);
     assert.equal(readFileSync(officePasswordPath, 'utf8'), original);
     assert.equal(readFileSync(join(root, 'office-db'), 'utf8'), persistedOfficeBefore);
+  });
+});
+
+// Prueba de campo (issue #146): a second local environment run by deploy/prueba-de-campo.sh. This Docker fake keeps
+// the containers, volumes and networks of every Compose project, so both environments can share one PC and one root.
+const fieldScript = resolve('deploy/prueba-de-campo.sh');
+const fieldVolume = 'traslado-prueba-de-campo_database';
+const fieldNetwork = 'traslado-local-ingress-prueba-de-campo';
+
+function withTwoEnvironments(check) {
+  const root = mkdtempSync(join(tmpdir(), 'field-test-'));
+  const fake = join(root, 'fake');
+  mkdirSync(join(root, 'bin'));
+  mkdirSync(fake);
+  writeFileSync(join(root, 'bin', 'docker'), [
+    '#!/bin/sh',
+    'echo "$*" >> "$LOG"',
+    'all="$*"; project=; prev=',
+    'for arg do [ "$prev" != --project-name ] || project=$arg; prev=$arg; done',
+    'touch "$FAKE/containers" "$FAKE/volumes" "$FAKE/networks" "$FAKE/labels"',
+    'drop() { awk -v item="$2" -v field="$3" \'field == 0 ? $0 != item : $field != item\' "$FAKE/$1" > "$FAKE/$1.tmp"; mv "$FAKE/$1.tmp" "$FAKE/$1"; }',
+    'add() { grep -Fxq "$2" "$FAKE/$1" 2>/dev/null || echo "$2" >> "$FAKE/$1"; }',
+    'case "$all" in',
+    '  "ps -aq --filter label=com.docker.compose.project="*) [ "${FAIL_INSPECT-}" != 1 ] || exit 1; awk -v p="${all##*=}" \'$1 == p {print $2}\' "$FAKE/containers";;',
+    '  "rm -f "*) shift 2; for id do drop containers "$id" 2; done;;',
+    // $FAKE/labels holds "<volume|network> <compose project> <name>" for resources Compose labelled with a project.
+    '  "volume ls --filter label=com.docker.compose.project="*|"network ls --filter label=com.docker.compose.project="*)',
+    '    [ "${FAIL_INSPECT-}" != 1 ] || exit 1',
+    '    awk -v k="$1" -v p="${4#label=com.docker.compose.project=}" \'$1 == k && $2 == p {sub(/^[^ ]+ [^ ]+ /, ""); print}\' "$FAKE/labels" | grep -Fxf "$FAKE/${1}s" || true;;',
+    '  "volume ls"*) [ "${FAIL_INSPECT-}" != 1 ] || exit 1; cat "$FAKE/volumes";;',
+    '  "volume rm "*) [ "${FAIL_VOLUME_RM-}" != 1 ] || exit 1; drop volumes "$3" 0; rm -f "$FAKE/office-${3%_database}";;',
+    '  "network ls"*) cat "$FAKE/networks";;',
+    '  "network inspect "*) grep -Fxq "$3" "$FAKE/networks" || exit 1;;',
+    '  "network create "*) for arg do last=$arg; done; add networks "$last";;',
+    '  "network rm "*) drop networks "$3" 0;;',
+    '  compose*" up -d"*) add containers "$project $project-gateway"; add volumes "${project}_database"; add networks "${project}_default"; add ports "$project $LOCAL_GATEWAY_PORT";;',
+    '  compose*"down --remove-orphans"*) drop containers "$project" 1; drop networks "${project}_default" 0;;',
+    '  *"run --rm --no-deps -e SYNTHETIC_PASSWORD"*) echo synthetic-hash;;',
+    '  *"db:bootstrap-office"*)',
+    '    if [ -f "$FAKE/office-$project" ]; then echo "An Office account already exists" >&2; exit 1; fi',
+    '    for arg do last=$arg; done; echo "$last" > "$FAKE/office-$project";;',
+    '  *"exec -T db psql"*) cat > "$FAKE/sql-$project";;',
+    '  *"exec -T db sh -c"*) cat > "$FAKE/seed-sql-$project";;',
+    'esac',
+    'exit 0',
+    '',
+  ].join('\n'), { mode: 0o755 });
+  writeFileSync(join(root, 'bin', 'cloudflared'), '#!/bin/sh\necho "$*" >> "$TUNNELS"\nif [ -e "$COUNT" ]; then host=driver; rm -f "$COUNT"; else host=office; touch "$COUNT"; fi\necho "https://$host.trycloudflare.com" >&2\nwhile :; do sleep 1; done\n', { mode: 0o755 });
+  const env = {
+    ...process.env,
+    DEPLOY_ROOT: root,
+    IMAGE_TAG: 'test',
+    FAKE: fake,
+    COUNT: join(root, 'count'),
+    LOG: join(root, 'docker-log'),
+    TUNNELS: join(root, 'tunnels'),
+    PATH: `${join(root, 'bin')}${process.platform === 'win32' ? ';' : ':'}${process.env.PATH}`,
+  };
+  const run = (path, args, extraEnv) => spawnSync(shell, [path, ...args], { encoding: 'utf8', timeout: 20000, env: { ...env, ...extraEnv } });
+  const field = (...args) => run(fieldScript, args);
+  const staging = (...args) => run(script, args);
+  const read = (name) => (existsSync(join(fake, name)) ? readFileSync(join(fake, name), 'utf8') : '');
+  const log = () => (existsSync(env.LOG) ? readFileSync(env.LOG, 'utf8') : '');
+  try { check({ root, env, run, field, staging, read, log }); } finally {
+    run(fieldScript, ['borrar', '--confirmar']);
+    run(script, ['down']);
+    rmSync(root, { recursive: true, force: true });
+  }
+}
+
+const stateFiles = ['.env', 'urls', 'office-password', 'driver-password', 'office.pid', 'driver.pid', 'local-staging-owned', 'local-staging-active'];
+const snapshot = (dir) => Object.fromEntries(stateFiles.map((name) => [name, existsSync(join(dir, name)) ? readFileSync(join(dir, name), 'utf8') : null]));
+const alive = (pid) => spawnSync(shell, ['-c', `kill -0 ${pid}`]).status === 0;
+const tunnelPids = (dir) => ['office', 'driver'].map((name) => readFileSync(join(dir, `${name}.pid`), 'utf8').split(' ')[0]);
+const projectContainers = (text, project) => text.split('\n').filter((line) => line.startsWith(`${project} `));
+
+test('prueba-de-campo up runs its own Compose project, state directory, subnets, port and tunnels', () => {
+  withTwoEnvironments(({ root, env, field, staging, read, log }) => {
+    assert.equal(staging('up').status, 0);
+    const mark = log().length;
+    const result = field('up');
+    assert.equal(result.status, 0, result.stderr);
+    assert.match(result.stdout, /^office: https:\/\/[a-z0-9-]+\.trycloudflare\.com\ndriver: https:\/\/[a-z0-9-]+\.trycloudflare\.com\n$/);
+    const state = readFileSync(join(root, 'prueba-de-campo', '.env'), 'utf8');
+    assert.match(state, /^DEPLOY_PROJECT=prueba-de-campo$/m);
+    assert.match(state, /^DEPLOY_SUBNET=172\.16\.31\.0\/24$/m);
+    assert.match(state, /^INGRESS_SUBNET=172\.16\.30\.0\/24$/m);
+    assert.match(state, /^TRUSTED_PROXY_CIDRS=172\.16\.31\.0\/24,172\.16\.30\.0\/24$/m);
+    assert.deepEqual(state.match(/^LOCAL_GATEWAY_PORT=.*$/gm), ['LOCAL_GATEWAY_PORT=18790']);
+    const calls = log().slice(mark).split('\n').filter((call) => call.startsWith('compose'));
+    assert.ok(calls.length > 0);
+    for (const call of calls) assert.match(call, /--project-name traslado-prueba-de-campo /);
+    assert.match(log(), new RegExp(`network create --subnet 172\\.16\\.30\\.0/24 ${fieldNetwork}`));
+    assert.deepEqual(readFileSync(env.TUNNELS, 'utf8').trim().split('\n').slice(-2), Array(2).fill('tunnel --url http://127.0.0.1:18790'));
+    assert.match(read('ports'), /^traslado-prueba-de-campo 18790$/m);
+    assert.match(read('ports'), /^traslado-staging 18780$/m);
+    assert.deepEqual(read('volumes').trim().split('\n').sort(), [fieldVolume, 'traslado-staging_database']);
+  });
+});
+
+test('prueba-de-campo compose publishes only its gateway on its own loopback port, network and volume', () => {
+  withTwoEnvironments(({ root, field }) => {
+    assert.equal(field('up').status, 0);
+    // A Compose call made outside the engine only has the generated .env: nothing injects the port.
+    const outside = { ...process.env };
+    for (const key of ['LOCAL_GATEWAY_PORT', 'DEPLOY_PROJECT', 'IMAGE_TAG', 'DEPLOY_SUBNET', 'INGRESS_SUBNET', 'INGRESS_PREFIX', 'COMPOSE_PROJECT_NAME', 'COMPOSE_FILE', 'COMPOSE_ENV_FILES']) delete outside[key];
+    const result = spawnSync('docker', ['compose', '--project-name', 'traslado-prueba-de-campo', '--env-file', join(root, 'prueba-de-campo', '.env'), '-f', 'deploy/compose.yaml', '-f', 'deploy/local-staging.compose.yaml', 'config', '--format', 'json'], {
+      encoding: 'utf8', env: outside,
+    });
+    assert.equal(result.status, 0, result.stderr);
+    const config = JSON.parse(result.stdout);
+    for (const [name, service] of Object.entries(config.services)) {
+      if (name !== 'gateway') assert.equal(service.ports, undefined, name);
+    }
+    assert.deepEqual(config.services.gateway.ports.map(({ host_ip, published }) => [host_ip, String(published)]), [['127.0.0.1', '18790']]);
+    assert.equal(config.volumes.database.name, fieldVolume);
+    assert.equal(config.networks.ingress.name, fieldNetwork);
+    assert.equal(config.networks.default.ipam.config[0].subnet, '172.16.31.0/24');
+  });
+});
+
+test('prueba-de-campo up rejects an env whose LOCAL_GATEWAY_PORT is missing, repeated or the staging port', () => {
+  for (const edit of [
+    (text) => text.replace(/^LOCAL_GATEWAY_PORT=.*\r?\n/m, ''),
+    (text) => text.replace(/^LOCAL_GATEWAY_PORT=.*$/m, 'LOCAL_GATEWAY_PORT=18780'),
+    (text) => `${text}LOCAL_GATEWAY_PORT=18790\n`,
+  ]) {
+    withTwoEnvironments(({ root, field, log }) => {
+      assert.equal(field('up').status, 0);
+      assert.equal(field('down').status, 0);
+      const path = join(root, 'prueba-de-campo', '.env');
+      writeFileSync(path, edit(readFileSync(path, 'utf8')));
+      const mark = log().length;
+      const result = field('up');
+      assert.equal(result.status, 1);
+      assert.equal(result.stdout, '');
+      assert.equal(result.stderr, 'Invalid Prueba de campo env\n');
+      assert.deepEqual(log().slice(mark).trim().split('\n'), ['info']);
+    });
+  }
+});
+
+test('local-staging up accepts a staging env written before LOCAL_GATEWAY_PORT was persisted, and rejects a wrong one', () => {
+  withTwoEnvironments(({ root, staging, read, log }) => {
+    assert.equal(staging('up').status, 0);
+    assert.equal(staging('down').status, 0);
+    const path = join(root, 'staging', '.env');
+    const text = readFileSync(path, 'utf8');
+    assert.deepEqual(text.match(/^LOCAL_GATEWAY_PORT=.*$/gm), ['LOCAL_GATEWAY_PORT=18780']);
+    writeFileSync(path, text.replace(/^LOCAL_GATEWAY_PORT=.*\r?\n/m, ''));
+    const legacy = staging('up');
+    assert.equal(legacy.status, 0, legacy.stderr);
+    assert.match(read('ports'), /^traslado-staging 18780$/m);
+    assert.equal(staging('down').status, 0);
+    writeFileSync(path, readFileSync(path, 'utf8').concat('LOCAL_GATEWAY_PORT=18790\n'));
+    const mark = log().length;
+    const wrong = staging('up');
+    assert.equal(wrong.status, 1);
+    assert.equal(wrong.stderr, 'Invalid local staging env\n');
+    assert.deepEqual(log().slice(mark).trim().split('\n'), ['info']);
+  });
+});
+
+test('local-staging up and down keep the staging project, port, subnets and synthetic seed', () => {
+  withTwoEnvironments(({ root, env, staging, read, log }) => {
+    const up = staging('up');
+    assert.equal(up.status, 0, up.stderr);
+    assert.match(up.stdout, /^office: https:\/\/office\.trycloudflare\.com\ndriver: https:\/\/driver\.trycloudflare\.com\n$/);
+    for (const call of log().split('\n').filter((line) => line.startsWith('compose'))) assert.match(call, /--project-name traslado-staging /);
+    assert.match(log(), /network create --subnet 172\.16\.20\.0\/24 traslado-local-ingress-staging/);
+    assert.equal(readFileSync(env.TUNNELS, 'utf8'), 'tunnel --url http://127.0.0.1:18780\n'.repeat(2));
+    assert.match(read('ports'), /^traslado-staging 18780$/m);
+    const state = readFileSync(join(root, 'staging', '.env'), 'utf8');
+    assert.match(state, /^DEPLOY_PROJECT=staging$/m);
+    assert.match(state, /^TRUSTED_PROXY_CIDRS=172\.16\.21\.0\/24,172\.16\.20\.0\/24$/m);
+    assert.match(read('seed-sql-traslado-staging'), /Synthetic Passenger 001/);
+    assert.match(read('sql-traslado-staging'), /Synthetic Driver 001/);
+    assert.equal(read('office-traslado-staging').trim(), 'demo-oficina');
+    const down = staging('down');
+    assert.equal(down.status, 0, down.stderr);
+    assert.equal(down.stdout, '');
+    assert.deepEqual(read('volumes').trim().split('\n'), ['traslado-staging_database']);
+    assert.ok(existsSync(join(root, 'staging', 'driver-password')));
+    const usage = staging('borrar');
+    assert.equal(usage.status, 2);
+    assert.equal(usage.stderr, 'Usage: local-staging.sh <up|down>\n');
+  });
+});
+
+test('prueba-de-campo up reuses the ownership check and office account and loads no staging seed', () => {
+  withTwoEnvironments(({ root, env, field, read }) => {
+    writeFileSync(join(env.FAKE, 'volumes'), `${fieldVolume}\n`);
+    const unowned = field('up');
+    assert.equal(unowned.status, 1);
+    assert.match(unowned.stderr, /Existing prueba-de-campo resources are not owned by Prueba de campo/);
+    assert.equal(existsSync(env.TUNNELS), false);
+    rmSync(join(env.FAKE, 'volumes'));
+    rmSync(join(root, 'prueba-de-campo'), { recursive: true });
+    const up = field('up');
+    assert.equal(up.status, 0, up.stderr);
+    assert.equal(read('office-traslado-prueba-de-campo').trim(), 'demo-oficina');
+    assert.match(readFileSync(join(root, 'prueba-de-campo', 'office-password'), 'utf8'), /^[0-9a-f]{24}\r?\n$/);
+    assert.equal(read('sql-traslado-prueba-de-campo'), '');
+    assert.equal(read('seed-sql-traslado-prueba-de-campo'), '');
+    assert.equal(existsSync(join(root, 'prueba-de-campo', 'driver-password')), false);
+  });
+});
+
+test('each script refuses the env file of the other project without touching anything', () => {
+  for (const other of ['staging', 'production']) {
+    withTwoEnvironments(({ root, env, field }) => {
+      mkdirSync(join(root, 'prueba-de-campo'));
+      const file = join(root, 'prueba-de-campo', '.env');
+      writeFileSync(file, `DEPLOY_PROJECT=${other}\n`);
+      for (const args of [['up'], ['down'], ['borrar'], ['borrar', '--confirmar']]) {
+        const result = field(...args);
+        assert.equal(result.status, 1, `${other} ${args.join(' ')}`);
+        assert.equal(result.stderr, 'Prueba de campo only runs the prueba-de-campo project\n');
+      }
+      assert.equal(existsSync(env.LOG), false);
+      assert.equal(existsSync(env.TUNNELS), false);
+      assert.equal(readFileSync(file, 'utf8'), `DEPLOY_PROJECT=${other}\n`);
+      rmSync(join(root, 'prueba-de-campo'), { recursive: true });
+    });
+  }
+  withTwoEnvironments(({ root, env, staging }) => {
+    mkdirSync(join(root, 'staging'));
+    writeFileSync(join(root, 'staging', '.env'), 'DEPLOY_PROJECT=prueba-de-campo\n');
+    for (const action of ['up', 'down']) {
+      const result = staging(action);
+      assert.equal(result.status, 1, action);
+      assert.equal(result.stderr, 'local staging only runs the staging project\n');
+    }
+    assert.equal(existsSync(env.LOG), false);
+    assert.equal(existsSync(env.TUNNELS), false);
+    rmSync(join(root, 'staging'), { recursive: true });
+  });
+});
+
+test('borrar never deletes the staging volume or directory, even when pointed at them', () => {
+  withTwoEnvironments(({ root, run, read, log }) => {
+    assert.equal(run(script, ['up']).status, 0);
+    const stagingState = join(root, 'staging');
+    const before = snapshot(stagingState);
+    const mark = log().length;
+    const pointed = run(fieldScript, ['borrar', '--confirmar'], { COMPOSE_PROJECT_NAME: 'traslado-staging', DEPLOY_PROJECT: 'staging' });
+    assert.equal(pointed.status, 0, pointed.stderr);
+    assert.equal(pointed.stdout, 'Nothing to delete: the Prueba de campo is already deleted\n');
+    symlinkSync(stagingState, join(root, 'prueba-de-campo'), 'junction');
+    for (const args of [['borrar'], ['borrar', '--confirmar']]) {
+      const linked = run(fieldScript, args);
+      assert.equal(linked.status, 1, args.join(' '));
+      assert.match(linked.stderr, /only uses its own directory|only runs the prueba-de-campo project/);
+    }
+    rmSync(join(root, 'prueba-de-campo'));
+    assert.deepEqual(snapshot(stagingState), before);
+    assert.match(read('volumes'), /^traslado-staging_database$/m);
+    assert.equal(projectContainers(read('containers'), 'traslado-staging').length, 1);
+    assert.doesNotMatch(log().slice(mark), /^(rm -f|volume rm|network rm)/m);
+    assert.deepEqual(tunnelPids(stagingState).map(alive), [true, true]);
+  });
+});
+
+test('borrar without --confirmar deletes nothing and prints what it would delete and how to confirm', () => {
+  withTwoEnvironments(({ root, field, read }) => {
+    assert.equal(field('up').status, 0);
+    const state = join(root, 'prueba-de-campo');
+    const before = [snapshot(state), read('containers'), read('volumes'), read('networks')];
+    const result = field('borrar');
+    assert.equal(result.status, 0, result.stderr);
+    const lines = result.stdout.split('\n');
+    assert.equal(lines[0], 'borrar --confirmar would delete:');
+    assert.deepEqual(lines.slice(1, 7), [
+      '  containers of traslado-prueba-de-campo: traslado-prueba-de-campo-gateway',
+      `  database volume ${fieldVolume}`,
+      '  network traslado-prueba-de-campo_default',
+      `  network ${fieldNetwork}`,
+      '  cloudflared office tunnel',
+      '  cloudflared driver tunnel',
+    ]);
+    assert.match(lines[7], /^  state directory .*prueba-de-campo$/);
+    assert.equal(lines[8], 'Nothing was deleted. To delete it, run: sh deploy/prueba-de-campo.sh borrar --confirmar');
+    assert.deepEqual([snapshot(state), read('containers'), read('volumes'), read('networks')], before);
+    assert.deepEqual(tunnelPids(state).map(alive), [true, true]);
+  });
+});
+
+test('borrar --confirmar deletes containers, database volume, ingress network and state, stops the tunnels, and can run twice', () => {
+  withTwoEnvironments(({ root, field, read, log }) => {
+    assert.equal(field('up').status, 0);
+    const state = join(root, 'prueba-de-campo');
+    const pids = tunnelPids(state);
+    const result = field('borrar', '--confirmar');
+    assert.equal(result.status, 0, result.stderr);
+    assert.match(result.stdout, /^Deleted:\n  containers of traslado-prueba-de-campo: traslado-prueba-de-campo-gateway\n/);
+    assert.match(result.stdout, new RegExp(`\n  database volume ${fieldVolume}\n`));
+    assert.match(result.stdout, new RegExp(`\n  network ${fieldNetwork}\n`));
+    assert.match(result.stdout, /\n  state directory .*prueba-de-campo\nThe Prueba de campo is deleted\.\n$/);
+    assert.match(log(), new RegExp(`^volume rm ${fieldVolume}$`, 'm'));
+    assert.equal(read('containers').trim(), '');
+    assert.equal(read('volumes').trim(), '');
+    assert.equal(read('networks').trim(), '');
+    assert.equal(existsSync(state), false);
+    assert.deepEqual(pids.map(alive), [false, false]);
+    const again = field('borrar', '--confirmar');
+    assert.equal(again.status, 0, again.stderr);
+    assert.equal(again.stdout, 'Nothing to delete: the Prueba de campo is already deleted\n');
+  });
+});
+
+test('borrar --confirmar fails and says what is left when something cannot be deleted', () => {
+  withTwoEnvironments(({ root, run, read }) => {
+    assert.equal(run(fieldScript, ['up']).status, 0);
+    const state = join(root, 'prueba-de-campo');
+    const unreadable = run(fieldScript, ['borrar', '--confirmar'], { FAIL_INSPECT: '1' });
+    assert.equal(unreadable.status, 1);
+    assert.equal(unreadable.stderr, 'Cannot inspect the Prueba de campo in Docker; nothing was deleted\n');
+    assert.ok(existsSync(join(state, 'office-password')));
+    assert.match(read('volumes'), new RegExp(`^${fieldVolume}$`, 'm'));
+    const failed = run(fieldScript, ['borrar', '--confirmar'], { FAIL_VOLUME_RM: '1' });
+    assert.equal(failed.status, 1);
+    assert.match(failed.stderr, new RegExp(`still left:\n  database volume ${fieldVolume}\n  state directory .*prueba-de-campo\n`));
+    assert.match(failed.stderr, /run sh deploy\/prueba-de-campo\.sh borrar --confirmar again/);
+    assert.ok(existsSync(join(state, 'office-password')));
+    const retry = run(fieldScript, ['borrar', '--confirmar']);
+    assert.equal(retry.status, 0, retry.stderr);
+    assert.equal(read('volumes').trim(), '');
+    assert.equal(existsSync(state), false);
+  });
+});
+
+test('borrar --confirmar fails and names an extra project volume that survives volume rm', () => {
+  const root = mkdtempSync(join(tmpdir(), 'field-test-'));
+  try {
+    mkdirSync(join(root, 'bin'));
+    writeFileSync(join(root, 'bin', 'docker'), '#!/bin/sh\necho "$*" >> "$LOG"\ncase "$1 $2" in\n  "volume ls") echo traslado-prueba-de-campo_extra ;;\nesac\n', { mode: 0o755 });
+    const log = join(root, 'docker-log');
+    const result = spawnSync(shell, [fieldScript, 'borrar', '--confirmar'], {
+      encoding: 'utf8', timeout: 20000,
+      env: { ...process.env, DEPLOY_ROOT: root, LOG: log, PATH: `${join(root, 'bin')}${process.platform === 'win32' ? ';' : ':'}${process.env.PATH}` },
+    });
+    assert.equal(result.status, 1, result.stdout);
+    assert.equal(result.stdout, '');
+    assert.equal(result.stderr, 'borrar could not delete everything; still left:\n  volume traslado-prueba-de-campo_extra\nFix the cause and run sh deploy/prueba-de-campo.sh borrar --confirmar again\n');
+    assert.match(readFileSync(log, 'utf8'), /^volume rm traslado-prueba-de-campo_extra$/m);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test('borrar lists and deletes every volume and network of the Prueba de campo Compose project', () => {
+  withTwoEnvironments(({ root, env, field, read, log }) => {
+    assert.equal(field('up').status, 0);
+    writeFileSync(join(env.FAKE, 'volumes'), `${read('volumes')}traslado-prueba-de-campo_extra\n`);
+    writeFileSync(join(env.FAKE, 'networks'), `${read('networks')}traslado-prueba-de-campo-extra-net\n`);
+    writeFileSync(join(env.FAKE, 'labels'), 'network traslado-prueba-de-campo traslado-prueba-de-campo-extra-net\n');
+    const before = [read('volumes'), read('networks')];
+    const listed = field('borrar');
+    assert.equal(listed.status, 0, listed.stderr);
+    assert.deepEqual(listed.stdout.split('\n').slice(0, 7), [
+      'borrar --confirmar would delete:',
+      '  containers of traslado-prueba-de-campo: traslado-prueba-de-campo-gateway',
+      `  database volume ${fieldVolume}`,
+      '  volume traslado-prueba-de-campo_extra',
+      '  network traslado-prueba-de-campo-extra-net',
+      '  network traslado-prueba-de-campo_default',
+      `  network ${fieldNetwork}`,
+    ]);
+    assert.deepEqual([read('volumes'), read('networks')], before);
+    assert.doesNotMatch(log(), /^(rm -f|volume rm|network rm)/m);
+    const result = field('borrar', '--confirmar');
+    assert.equal(result.status, 0, result.stderr);
+    assert.match(result.stdout, /\n  volume traslado-prueba-de-campo_extra\n  network traslado-prueba-de-campo-extra-net\n/);
+    assert.match(log(), /^volume rm traslado-prueba-de-campo_extra$/m);
+    assert.match(log(), /^network rm traslado-prueba-de-campo-extra-net$/m);
+    assert.equal(read('volumes').trim(), '');
+    assert.equal(read('networks').trim(), '');
+  });
+});
+
+test('borrar never lists or deletes a staging volume or network, even labelled with the Prueba de campo project', () => {
+  withTwoEnvironments(({ root, env, field, staging, read, log }) => {
+    assert.equal(staging('up').status, 0);
+    assert.equal(field('up').status, 0);
+    writeFileSync(join(env.FAKE, 'labels'), [
+      'volume traslado-prueba-de-campo traslado-staging_database',
+      'network traslado-prueba-de-campo traslado-staging_default',
+      'network traslado-prueba-de-campo traslado-local-ingress-staging',
+      '',
+    ].join('\n'));
+    const listed = field('borrar');
+    assert.equal(listed.status, 0, listed.stderr);
+    assert.doesNotMatch(listed.stdout, /staging/);
+    const mark = log().length;
+    const result = field('borrar', '--confirmar');
+    assert.equal(result.status, 0, result.stderr);
+    assert.doesNotMatch(result.stdout, /staging/);
+    assert.doesNotMatch(log().slice(mark), /^(rm -f|volume rm|network rm) .*staging/m);
+    assert.match(read('volumes'), /^traslado-staging_database$/m);
+    assert.match(read('networks'), /^traslado-staging_default$/m);
+    assert.match(read('networks'), /^traslado-local-ingress-staging$/m);
+    assert.ok(existsSync(join(root, 'staging', '.env')));
+  });
+});
+
+test('borrar never splits a Docker name with a space into a staging name', () => {
+  withTwoEnvironments(({ env, field, staging, read, log }) => {
+    assert.equal(staging('up').status, 0);
+    assert.equal(field('up').status, 0);
+    const odd = 'traslado-prueba-de-campo_a traslado-staging_default';
+    writeFileSync(join(env.FAKE, 'networks'), `${read('networks')}${odd}\n`);
+    writeFileSync(join(env.FAKE, 'labels'), `network traslado-prueba-de-campo ${odd}\n`);
+    const listed = field('borrar');
+    assert.equal(listed.status, 0, listed.stderr);
+    assert.doesNotMatch(listed.stdout, /staging/);
+    const mark = log().length;
+    const result = field('borrar', '--confirmar');
+    assert.equal(result.status, 0, result.stderr);
+    assert.doesNotMatch(result.stdout, /staging/);
+    assert.doesNotMatch(log().slice(mark), /^network rm traslado-staging_default$/m);
+    assert.doesNotMatch(log().slice(mark), /^(volume|network) rm \S+ /m);
+    assert.match(read('networks'), /^traslado-staging_default$/m);
+  });
+});
+
+test('borrar ignores a volume of a similarly named project and a labelled volume without the project name', () => {
+  withTwoEnvironments(({ env, field, read, log }) => {
+    assert.equal(field('up').status, 0);
+    writeFileSync(join(env.FAKE, 'volumes'), `${read('volumes')}traslado-prueba-de-campo2_db\nunrelated-vol\n`);
+    writeFileSync(join(env.FAKE, 'labels'), 'volume traslado-prueba-de-campo unrelated-vol\n');
+    const listed = field('borrar');
+    assert.equal(listed.status, 0, listed.stderr);
+    assert.doesNotMatch(listed.stdout, /prueba-de-campo2_db|unrelated-vol/);
+    const result = field('borrar', '--confirmar');
+    assert.equal(result.status, 0, result.stderr);
+    assert.doesNotMatch(result.stdout, /prueba-de-campo2_db|unrelated-vol/);
+    assert.doesNotMatch(log(), /^volume rm (traslado-prueba-de-campo2_db|unrelated-vol)$/m);
+    assert.deepEqual(read('volumes').trim().split('\n'), ['traslado-prueba-de-campo2_db', 'unrelated-vol']);
+  });
+});
+
+test('prueba-de-campo down keeps the database and reminds that it holds real Posiciones', () => {
+  withTwoEnvironments(({ root, field, read }) => {
+    assert.equal(field('up').status, 0);
+    const state = join(root, 'prueba-de-campo');
+    const password = readFileSync(join(state, 'office-password'), 'utf8');
+    const pids = tunnelPids(state);
+    const down = field('down');
+    assert.equal(down.status, 0, down.stderr);
+    assert.equal(down.stdout, 'The Prueba de campo database keeps real Posiciones: when the test ends, run sh deploy/prueba-de-campo.sh borrar --confirmar\n');
+    assert.equal(read('containers').trim(), '');
+    assert.match(read('volumes'), new RegExp(`^${fieldVolume}$`, 'm'));
+    assert.deepEqual(pids.map(alive), [false, false]);
+    const again = field('up');
+    assert.equal(again.status, 0, again.stderr);
+    assert.equal(readFileSync(join(state, 'office-password'), 'utf8'), password);
+  });
+});
+
+test('with staging up, up, down and borrar of the Prueba de campo leave staging untouched, and the other way round', () => {
+  withTwoEnvironments(({ root, field, staging, read, log }) => {
+    assert.equal(staging('up').status, 0);
+    const stagingState = join(root, 'staging');
+    const before = [snapshot(stagingState), projectContainers(read('containers'), 'traslado-staging')];
+    const mark = log().length;
+    for (const args of [['up'], ['down'], ['up'], ['borrar', '--confirmar']]) assert.equal(field(...args).status, 0, args.join(' '));
+    assert.doesNotMatch(log().slice(mark), /traslado-staging|ingress-staging/);
+    assert.deepEqual([snapshot(stagingState), projectContainers(read('containers'), 'traslado-staging')], before);
+    assert.match(read('volumes'), /^traslado-staging_database$/m);
+    assert.match(read('networks'), /^traslado-local-ingress-staging$/m);
+    assert.deepEqual(tunnelPids(stagingState).map(alive), [true, true]);
+
+    const fieldUp = field('up');
+    assert.equal(fieldUp.status, 0, fieldUp.stderr);
+    const fieldState = join(root, 'prueba-de-campo');
+    const fieldBefore = [snapshot(fieldState), projectContainers(read('containers'), 'traslado-prueba-de-campo')];
+    const fieldMark = log().length;
+    for (const action of ['down', 'up', 'down']) assert.equal(staging(action).status, 0, action);
+    assert.doesNotMatch(log().slice(fieldMark), /prueba-de-campo/);
+    assert.deepEqual([snapshot(fieldState), projectContainers(read('containers'), 'traslado-prueba-de-campo')], fieldBefore);
+    assert.match(read('volumes'), new RegExp(`^${fieldVolume}$`, 'm'));
+    assert.deepEqual(tunnelPids(fieldState).map(alive), [true, true]);
+  });
+});
+
+test('the demo seed runs against the state that prueba-de-campo up writes', () => {
+  withTwoEnvironments(({ root, env, field }) => {
+    assert.equal(field('up').status, 0);
+    const urls = join(root, 'prueba-de-campo', 'urls');
+    writeFileSync(urls, readFileSync(urls, 'utf8').replace(/^office: .*$/m, 'office: https://127.0.0.1:9'));
+    const result = spawnSync(shell, [resolve('deploy/seed-demo.sh'), '2099-12-05'], { encoding: 'utf8', timeout: 20000, env: { ...env, DEPLOY_PROJECT: 'prueba-de-campo' } });
+    assert.equal(result.status, 1);
+    assert.equal(result.stderr.trim(), 'levantá la Prueba de campo con prueba-de-campo.sh up');
+    assert.equal(existsSync(join(root, 'prueba-de-campo', 'office-totp-secret')), false);
   });
 });
