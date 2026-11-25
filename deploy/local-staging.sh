@@ -191,6 +191,7 @@ INGRESS_SUBNET=$ingress_subnet
 INGRESS_PREFIX=traslado-local-ingress
 TRUSTED_PROXY_CIDRS=$deploy_subnet,$ingress_subnet
 LOCAL_DRIVER_HOST=driver.invalid
+LOCAL_GATEWAY_PORT=$port
 ENV
   if [ "$name" = staging ]; then
     printf '%s\n' "$driver_password" > "$state/driver-password.tmp"
@@ -216,6 +217,11 @@ case "$postgres$migration$app" in *[!0-9a-f]*|'') echo "Invalid $label env" >&2;
   [ "$(value DEPLOY_SUBNET)" = "$deploy_subnet" ] &&
   [ "$(value INGRESS_SUBNET)" = "$ingress_subnet" ] &&
   [ "$(value TRUSTED_PROXY_CIDRS)" = "$deploy_subnet,$ingress_subnet" ] || { echo "Invalid $label env" >&2; exit 1; }
+# A Compose call made outside this script reads the gateway port from the .env alone. Staging envs written before the
+# port was persisted have no line and keep Compose's default 18780; any other env must carry its own port once.
+if [ "$name" != staging ] || grep -q '^LOCAL_GATEWAY_PORT=' "$envfile"; then
+  [ "$(value LOCAL_GATEWAY_PORT)" = "$port" ] || { echo "Invalid $label env" >&2; exit 1; }
+fi
 tag=$(sed -n 's/^IMAGE_TAG=//p' "$envfile")
 case "$tag" in ''|*[!a-zA-Z0-9_.-]*) echo 'Invalid image tag' >&2; exit 1;; esac
 for image in api office driver; do

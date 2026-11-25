@@ -139,6 +139,9 @@ Tunnels, the `main` images, real OSRM and VROOM) but separately: Compose project
 `$HOME/traslado-staging/prueba-de-campo`), subnets
 `172.16.31.0/24` and `172.16.30.0/24`, ingress network
 `traslado-local-ingress-prueba-de-campo`, and gateway port `127.0.0.1:18790`.
+The port is saved as `LOCAL_GATEWAY_PORT=18790` in its `.env`, so a
+`docker compose --env-file "$DEPLOY_ROOT/prueba-de-campo/.env"` run by hand
+never lands on staging's 18780; `up` refuses an env without it.
 Both environments can run at the same time without touching each other, and
 each script refuses the other's state directory. It costs nothing: no hosting,
 domain or paid service.

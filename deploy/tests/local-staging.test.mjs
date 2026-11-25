@@ -525,6 +525,7 @@ test('prueba-de-campo up runs its own Compose project, state directory, subnets,
     assert.match(state, /^DEPLOY_SUBNET=172\.16\.31\.0\/24$/m);
     assert.match(state, /^INGRESS_SUBNET=172\.16\.30\.0\/24$/m);
     assert.match(state, /^TRUSTED_PROXY_CIDRS=172\.16\.31\.0\/24,172\.16\.30\.0\/24$/m);
+    assert.deepEqual(state.match(/^LOCAL_GATEWAY_PORT=.*$/gm), ['LOCAL_GATEWAY_PORT=18790']);
     const calls = log().slice(mark).split('\n').filter((call) => call.startsWith('compose'));
     assert.ok(calls.length > 0);
     for (const call of calls) assert.match(call, /--project-name traslado-prueba-de-campo /);
@@ -539,8 +540,11 @@ test('prueba-de-campo up runs its own Compose project, state directory, subnets,
 test('prueba-de-campo compose publishes only its gateway on its own loopback port, network and volume', () => {
   withTwoEnvironments(({ root, field }) => {
     assert.equal(field('up').status, 0);
+    // A Compose call made outside the engine only has the generated .env: nothing injects the port.
+    const outside = { ...process.env };
+    for (const key of ['LOCAL_GATEWAY_PORT', 'DEPLOY_PROJECT', 'IMAGE_TAG', 'DEPLOY_SUBNET', 'INGRESS_SUBNET', 'INGRESS_PREFIX', 'COMPOSE_PROJECT_NAME', 'COMPOSE_FILE', 'COMPOSE_ENV_FILES']) delete outside[key];
     const result = spawnSync('docker', ['compose', '--project-name', 'traslado-prueba-de-campo', '--env-file', join(root, 'prueba-de-campo', '.env'), '-f', 'deploy/compose.yaml', '-f', 'deploy/local-staging.compose.yaml', 'config', '--format', 'json'], {
-      encoding: 'utf8', env: { ...process.env, LOCAL_GATEWAY_PORT: '18790' },
+      encoding: 'utf8', env: outside,
     });
     assert.equal(result.status, 0, result.stderr);
     const config = JSON.parse(result.stdout);
@@ -551,6 +555,48 @@ test('prueba-de-campo compose publishes only its gateway on its own loopback por
     assert.equal(config.volumes.database.name, fieldVolume);
     assert.equal(config.networks.ingress.name, fieldNetwork);
     assert.equal(config.networks.default.ipam.config[0].subnet, '172.16.31.0/24');
+  });
+});
+
+test('prueba-de-campo up rejects an env whose LOCAL_GATEWAY_PORT is missing, repeated or the staging port', () => {
+  for (const edit of [
+    (text) => text.replace(/^LOCAL_GATEWAY_PORT=.*\r?\n/m, ''),
+    (text) => text.replace(/^LOCAL_GATEWAY_PORT=.*$/m, 'LOCAL_GATEWAY_PORT=18780'),
+    (text) => `${text}LOCAL_GATEWAY_PORT=18790\n`,
+  ]) {
+    withTwoEnvironments(({ root, field, log }) => {
+      assert.equal(field('up').status, 0);
+      assert.equal(field('down').status, 0);
+      const path = join(root, 'prueba-de-campo', '.env');
+      writeFileSync(path, edit(readFileSync(path, 'utf8')));
+      const mark = log().length;
+      const result = field('up');
+      assert.equal(result.status, 1);
+      assert.equal(result.stdout, '');
+      assert.equal(result.stderr, 'Invalid Prueba de campo env\n');
+      assert.deepEqual(log().slice(mark).trim().split('\n'), ['info']);
+    });
+  }
+});
+
+test('local-staging up accepts a staging env written before LOCAL_GATEWAY_PORT was persisted, and rejects a wrong one', () => {
+  withTwoEnvironments(({ root, staging, read, log }) => {
+    assert.equal(staging('up').status, 0);
+    assert.equal(staging('down').status, 0);
+    const path = join(root, 'staging', '.env');
+    const text = readFileSync(path, 'utf8');
+    assert.deepEqual(text.match(/^LOCAL_GATEWAY_PORT=.*$/gm), ['LOCAL_GATEWAY_PORT=18780']);
+    writeFileSync(path, text.replace(/^LOCAL_GATEWAY_PORT=.*\r?\n/m, ''));
+    const legacy = staging('up');
+    assert.equal(legacy.status, 0, legacy.stderr);
+    assert.match(read('ports'), /^traslado-staging 18780$/m);
+    assert.equal(staging('down').status, 0);
+    writeFileSync(path, readFileSync(path, 'utf8').concat('LOCAL_GATEWAY_PORT=18790\n'));
+    const mark = log().length;
+    const wrong = staging('up');
+    assert.equal(wrong.status, 1);
+    assert.equal(wrong.stderr, 'Invalid local staging env\n');
+    assert.deepEqual(log().slice(mark).trim().split('\n'), ['info']);
   });
 });
 
