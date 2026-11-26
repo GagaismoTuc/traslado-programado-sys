@@ -1,0 +1,95 @@
+{
+  "version": 1,
+  "entries": [
+    {
+      "rule": "comment-excuse",
+      "file": ".github/scripts/test-ci-scripts.sh",
+      "location": "<módulo>",
+      "fingerprint": "sha256:8bc9379098b2d62f"
+    },
+    {
+      "rule": "comment-excuse",
+      "file": "infra/osrm/build.sh",
+      "location": "<módulo>",
+      "fingerprint": "sha256:d13c5452883769c1"
+    },
+    {
+      "rule": "comment-excuse",
+      "file": "infra/wizard/hosting.sh",
+      "location": "run_wizard()",
+      "fingerprint": "sha256:9f3421ef722e957f"
+    },
+    {
+      "rule": "long-file",
+      "file": "packages/api/src/app.ts",
+      "location": "file",
+      "fingerprint": "sha256:92f85673b01576a5"
+    },
+    {
+      "rule": "shallow-module",
+      "file": "apps/driver/src/Days.tsx",
+      "location": "module",
+      "fingerprint": "sha256:d7a7929a8b90f10e"
+    },
+    {
+      "rule": "shallow-module",
+      "file": "apps/driver/src/Marks.tsx",
+      "location": "module",
+      "fingerprint": "sha256:e4535e81f1a2b865"
+    },
+    {
+      "rule": "shallow-module",
+      "file": "apps/driver/src/offline.ts",
+      "location": "module",
+      "fingerprint": "sha256:6abb1860b97dacb8"
+    },
+    {
+      "rule": "shallow-module",
+      "file": "apps/office/src/LiveMap.tsx",
+      "location": "module",
+      "fingerprint": "sha256:f166c8f3cf7312fe"
+    },
+    {
+      "rule": "shallow-module",
+      "file": "apps/office/src/PlanPage.tsx",
+      "location": "module",
+      "fingerprint": "sha256:86b33d6d4fae8252"
+    },
+    {
+      "rule": "wide-directory",
+      "file": "./",
+      "location": "directory",
+      "fingerprint": "sha256:c14cecec97312ad1"
+    },
+    {
+      "rule": "wide-directory",
+      "file": "apps/driver/src/",
+      "location": "directory",
+      "fingerprint": "sha256:6382e8d0e84d8b37"
+    },
+    {
+      "rule": "wide-directory",
+      "file": "apps/office/src/",
+      "location": "directory",
+      "fingerprint": "sha256:d1d9523484a8fbc8"
+    },
+    {
+      "rule": "wide-directory",
+      "file": "packages/api/drizzle/",
+      "location": "directory",
+      "fingerprint": "sha256:dae76eafd9e38b1c"
+    },
+    {
+      "rule": "wide-directory",
+      "file": "packages/api/src/",
+      "location": "directory",
+      "fingerprint": "sha256:17624cfddd6295a2"
+    },
+    {
+      "rule": "wide-directory",
+      "file": "packages/api/test/",
+      "location": "directory",
+      "fingerprint": "sha256:b35a0e62726e1072"
+    }
+  ]
+}
