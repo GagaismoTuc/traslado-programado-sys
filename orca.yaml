@@ -1,3 +1,1 @@
-# Orca runs scripts.setup in each new worktree right after creating it.
-# No worktree.sharedDirectories: a worker that changes dependencies would change them for every worktree.
-# orca-stack init found no install step (no package-lock.json): add one under scripts.setup if worktrees need it.
+# orca-stack init (Gagaismo/orca-stack#424) wrote no install step because it only looks for package-lock.json; this repo uses pnpm, so add pnpm install --frozen-lockfile under scripts.setup if worktrees need dependencies.
