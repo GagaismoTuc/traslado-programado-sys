@@ -13,3 +13,18 @@ Code that verifies external or system state before letting a step pass (the host
 Why: PR #107 needed seven review rounds, and every round found a new hole of this one class (a firewall attached to another server, unattached rules, extra open ports on a second firewall, a monitor without alert contacts or paused, an unread second page).
 
 Review: when a finding belongs to this class, name the class in the finding so the author fixes every instance in the diff, not only the reported line.
+
+## 2. The comment rule
+
+Every code comment falls into one of four types, and each type says what to do with it:
+
+| Type | Action |
+|---|---|
+| Tautology | Delete it. |
+| Excuse | Delete it and open an issue to fix the implementation. |
+| Stale | Delete it. |
+| Decision Record | Move it to an ADR. |
+
+Source: Matt Pocock, https://x.com/mattpocockuk/status/2123798388227403983.
+
+The only comment allowed is a Decision Record that cites an ADR or an issue `#n`. `orca-stack lint` (the `orca-stack lint` CI job) applies the mechanical part of this rule in JavaScript, TypeScript, Go, Python and Shell; the reviewer applies the rest. Comments that predate the lint are listed in `.orca-stack-baseline.json` until someone removes them.

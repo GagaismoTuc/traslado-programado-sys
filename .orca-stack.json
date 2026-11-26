@@ -47,5 +47,18 @@
     "commits": "español",
     "prs": "español"
   },
-  "setup": "completo"
+  "setup": "completo",
+  "lint": {
+    "enabled": true,
+    "excluir": [
+      "packages/api/drizzle/meta/**",
+      "pnpm-lock.yaml"
+    ],
+    "lenguajes": {
+      "python": "warning"
+    },
+    "comentarios": {
+      "alcance": "repo"
+    }
+  }
 }
